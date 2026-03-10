@@ -68,7 +68,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 #sidebar-entries::-webkit-scrollbar { width: 6px; }
 #sidebar-entries::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
 .sidebar-entry { padding: 6px 14px; font-size: 12px; line-height: 1.4; border-left: 3px solid transparent; word-break: break-word; }
-.sidebar-entry.user-input { border-left-color: var(--accent-blue); color: var(--accent-blue); }
+.sidebar-entry.user-input { border-left-color: #50fa7b; color: #50fa7b; }
 .sidebar-entry.claude-response { border-left-color: var(--accent-green); color: var(--text-primary); }
 .sidebar-entry.tool-call { border-left-color: var(--accent-yellow); color: var(--accent-yellow); font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 11px; }
 .sidebar-entry-time { font-size: 10px; color: var(--text-muted); margin-bottom: 2px; }

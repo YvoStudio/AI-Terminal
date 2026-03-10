@@ -9,6 +9,19 @@ export interface TerminalTheme {
 
 export const themes: TerminalTheme[] = [
   {
+    name: 'Pure Black',
+    uiBg: '#000000',
+    theme: {
+      background: '#000000', foreground: '#ffffff', cursor: '#ffffff',
+      cursorAccent: '#000000', selectionBackground: '#333333',
+      black: '#000000', red: '#ff5555', green: '#50fa7b', yellow: '#f1fa8c',
+      blue: '#6699ff', magenta: '#ff79c6', cyan: '#8be9fd', white: '#ffffff',
+      brightBlack: '#555555', brightRed: '#ff6e6e', brightGreen: '#69ff94',
+      brightYellow: '#ffffa5', brightBlue: '#99bbff', brightMagenta: '#ff92df',
+      brightCyan: '#a4ffff', brightWhite: '#ffffff',
+    },
+  },
+  {
     name: 'One Dark',
     uiBg: '#282c34',
     theme: {
