@@ -1,4 +1,5 @@
 mod commands;
+mod notification;
 mod output_parser;
 mod pty_manager;
 
@@ -34,6 +35,11 @@ pub fn run() {
             commands::select_image,
             commands::select_directory,
             commands::save_clipboard_image,
+            commands::clear_badge,
+            commands::list_claude_sessions,
+            commands::get_claude_session_history,
+            commands::delete_claude_session,
+            commands::delete_history_entry,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Terminal");

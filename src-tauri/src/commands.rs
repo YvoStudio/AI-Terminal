@@ -34,6 +34,14 @@ pub struct HistoryEntry {
 
 fn default_shell_str() -> String { "cmd".to_string() }
 
+/// Truncate a string at a char boundary, never panicking on multi-byte chars.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes { return s; }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    &s[..end]
+}
+
 fn app_data_dir(app: &AppHandle) -> PathBuf {
     app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -56,11 +64,16 @@ fn make_pty_callback(
     move |data: String| {
         let _ = app.emit(&format!("terminal-output-{}", tab_id), data.clone());
         if let Ok(mut parser) = parser_arc.lock() {
+            let app_ref = &app;
             parser.process(
                 &tab_id,
                 &data,
                 |tid, status| {
-                    let _ = app.emit("tab-status-changed", serde_json::json!({ "tabId": tid, "status": status }));
+                    let _ = app_ref.emit("tab-status-changed", serde_json::json!({ "tabId": tid, "status": status }));
+                    // Notify user when a tab finishes (Dock bounce + badge)
+                    if matches!(status, TabStatus::DoneUnseen) {
+                        crate::notification::notify_task_done(app_ref, 1);
+                    }
                 },
                 |tid, entry| {
                     let _ = app.emit("sidebar-entry-added", serde_json::json!({ "tabId": tid, "entry": entry }));
@@ -190,6 +203,14 @@ pub fn get_sidebar_entries(
     Ok(parser.get_entries(&tab_id))
 }
 
+// ── Notification ──────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn clear_badge(app: AppHandle) -> Result<(), String> {
+    crate::notification::clear_badge(&app);
+    Ok(())
+}
+
 // ── Tabs persistence ───────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -285,6 +306,222 @@ pub async fn select_directory(app: AppHandle) -> Result<String, String> {
         .file()
         .blocking_pick_folder();
     Ok(path.map(|p| p.to_string()).unwrap_or_default())
+}
+
+// ── Claude session scanning ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeSession {
+    pub session_id: String,
+    pub slug: String,
+    pub cwd: String,
+    pub timestamp: String,
+    pub user_messages: Vec<String>,
+}
+
+#[tauri::command]
+pub fn list_claude_sessions(project_cwd: Option<String>) -> Result<Vec<ClaudeSession>, String> {
+    let home = dirs_home().ok_or("Cannot determine home directory")?;
+    let projects_dir = home.join(".claude").join("projects");
+    if !projects_dir.exists() { return Ok(vec![]); }
+
+    let mut sessions: Vec<ClaudeSession> = Vec::new();
+
+    // If project_cwd is given, scan only that project dir; otherwise scan all
+    let project_dirs: Vec<PathBuf> = if let Some(cwd) = &project_cwd {
+        let encoded = cwd.replace('/', "-");
+        let dir = projects_dir.join(&encoded);
+        if dir.exists() { vec![dir] } else { vec![] }
+    } else {
+        fs::read_dir(&projects_dir)
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_dir())
+            .collect()
+    };
+
+    for proj_dir in project_dirs {
+        let jsonl_files: Vec<PathBuf> = fs::read_dir(&proj_dir)
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
+            .collect();
+
+        for jsonl_path in jsonl_files {
+            if let Ok(session) = parse_claude_session(&jsonl_path) {
+                sessions.push(session);
+            }
+        }
+    }
+
+    // Sort by timestamp descending (newest first)
+    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sessions.truncate(30);
+    Ok(sessions)
+}
+
+#[tauri::command]
+pub fn get_claude_session_history(session_id: String) -> Result<Vec<String>, String> {
+    let home = dirs_home().ok_or("Cannot determine home directory")?;
+    let projects_dir = home.join(".claude").join("projects");
+    if !projects_dir.exists() { return Ok(vec![]); }
+
+    // Search all project dirs for the session
+    for entry in fs::read_dir(&projects_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        let jsonl = path.join(format!("{}.jsonl", session_id));
+        if jsonl.exists() {
+            return parse_session_user_messages(&jsonl, 50);
+        }
+    }
+    Ok(vec![])
+}
+
+#[tauri::command]
+pub fn delete_claude_session(session_id: String) -> Result<(), String> {
+    let home = dirs_home().ok_or("Cannot determine home directory")?;
+    let projects_dir = home.join(".claude").join("projects");
+    if !projects_dir.exists() { return Ok(()); }
+    for entry in fs::read_dir(&projects_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        let jsonl = path.join(format!("{}.jsonl", session_id));
+        if jsonl.exists() {
+            fs::remove_file(&jsonl).map_err(|e| e.to_string())?;
+            // Also remove subagent dir if exists
+            let sub_dir = path.join(&session_id);
+            if sub_dir.exists() { let _ = fs::remove_dir_all(&sub_dir); }
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_history_entry(app: AppHandle, index: usize) -> Result<(), String> {
+    let path = history_file(&app);
+    if !path.exists() { return Ok(()); }
+    let data = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut history: Vec<HistoryEntry> = serde_json::from_str(&data).unwrap_or_default();
+    if index < history.len() {
+        history.remove(index);
+        let json = serde_json::to_string(&history).map_err(|e| e.to_string())?;
+        fs::write(&path, json).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+fn parse_claude_session(path: &PathBuf) -> Result<ClaudeSession, String> {
+    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut session_id = String::new();
+    let mut slug = String::new();
+    let mut cwd = String::new();
+    let mut last_timestamp = String::new();
+    let mut user_messages: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        if line.is_empty() { continue; }
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Extract sessionId from any message
+        if session_id.is_empty() {
+            if let Some(sid) = val.get("sessionId").and_then(|v| v.as_str()) {
+                session_id = sid.to_string();
+            }
+        }
+
+        // Extract slug from progress messages
+        if slug.is_empty() {
+            if let Some(s) = val.get("slug").and_then(|v| v.as_str()) {
+                slug = s.to_string();
+            }
+        }
+
+        // Extract cwd
+        if let Some(c) = val.get("cwd").and_then(|v| v.as_str()) {
+            if cwd.is_empty() { cwd = c.to_string(); }
+        }
+
+        // Track latest timestamp
+        if let Some(ts) = val.get("timestamp").and_then(|v| v.as_str()) {
+            last_timestamp = ts.to_string();
+        }
+
+        // Collect user messages
+        if val.get("type").and_then(|v| v.as_str()) == Some("user") {
+            if let Some(content) = val.get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+            {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with("<command") && trimmed.len() <= 200 {
+                    user_messages.push(truncate_str(trimmed, 100).to_string());
+                }
+            }
+        }
+    }
+
+    if session_id.is_empty() {
+        // Try filename as session ID
+        session_id = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+    }
+
+    if slug.is_empty() {
+        slug = session_id.chars().take(8).collect();
+    }
+
+    // Keep last 5 user messages as preview
+    let preview_messages: Vec<String> = user_messages.into_iter().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect();
+
+    Ok(ClaudeSession {
+        session_id,
+        slug,
+        cwd,
+        timestamp: last_timestamp,
+        user_messages: preview_messages,
+    })
+}
+
+fn parse_session_user_messages(path: &PathBuf, limit: usize) -> Result<Vec<String>, String> {
+    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut messages: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        if line.is_empty() { continue; }
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if val.get("type").and_then(|v| v.as_str()) == Some("user") {
+            if let Some(content) = val.get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+            {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with("<command") {
+                    messages.push(truncate_str(trimmed, 200).to_string());
+                }
+            }
+        }
+    }
+
+    // Return last N messages
+    let start = if messages.len() > limit { messages.len() - limit } else { 0 };
+    Ok(messages[start..].to_vec())
 }
 
 // ── Clipboard image ────────────────────────────────────────────────────────

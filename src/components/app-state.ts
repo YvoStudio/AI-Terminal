@@ -92,6 +92,16 @@ class AppState {
     this.switchTab(this.tabOrder[(idx - 1 + this.tabOrder.length) % this.tabOrder.length]);
   }
 
+  moveTab(fromIndex: number, toIndex: number) {
+    if (fromIndex === toIndex) return;
+    if (fromIndex < 0 || fromIndex >= this.tabOrder.length) return;
+    if (toIndex < 0 || toIndex >= this.tabOrder.length) return;
+    const [id] = this.tabOrder.splice(fromIndex, 1);
+    this.tabOrder.splice(toIndex, 0, id);
+    this.notify();
+    this.persistTabs();
+  }
+
   renameTab(id: string, name: string) {
     const tab = this.tabs.get(id);
     if (!tab) return;

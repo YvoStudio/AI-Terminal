@@ -113,7 +113,7 @@ impl OutputParser {
                 let entry = SidebarEntry {
                     entry_type: "user-input".to_string(),
                     timestamp: now,
-                    content: content[..content.len().min(200)].to_string(),
+                    content: truncate_str(&content, 200).to_string(),
                 };
                 state.entries.push(entry.clone());
                 on_entry(tab_id.to_string(), entry);
@@ -137,7 +137,7 @@ impl OutputParser {
 
             // Tool call line
             if is_tool_call(trimmed) {
-                let content = &trimmed[..trimmed.len().min(200)];
+                let content = truncate_str(trimmed, 200);
                 if let Some(last) = state.entries.last() {
                     if last.entry_type == "tool-call" && last.content == content { continue; }
                 }
@@ -157,6 +157,13 @@ impl OutputParser {
         state.mute_until = now_ms() + ms;
         state.buffer.clear();
     }
+}
+
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes { return s; }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    &s[..end]
 }
 
 fn now_ms() -> u64 {

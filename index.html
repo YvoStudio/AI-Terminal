@@ -9,10 +9,11 @@
 </head>
 <body>
   <div id="app">
-    <div id="tab-bar">
+    <div id="tab-bar" data-tauri-drag-region>
+      <div id="traffic-light-spacer"></div>
       <div id="tab-list"></div>
       <button id="new-tab-btn" title="New Tab (Ctrl+T)">+</button>
-      <div class="tab-bar-spacer"></div>
+      <div class="tab-bar-spacer" data-tauri-drag-region></div>
       <button id="btn-toggle-notepad" class="tab-bar-btn" title="笔记面板">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13 1H3a1 1 0 00-1 1v12a1 1 0 001 1h10a1 1 0 001-1V2a1 1 0 00-1-1zM4 4h8v1H4zm0 3h8v1H4zm0 3h5v1H4z"/></svg>
       </button>

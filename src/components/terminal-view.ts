@@ -1,13 +1,16 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
+import { SearchAddon } from '@xterm/addon-search';
 import { api } from '../api';
 import { themes } from './themes';
 
 export class TerminalView {
   terminal: Terminal;
   private fitAddon: FitAddon;
+  private searchAddon: SearchAddon;
   private wrapper: HTMLElement;
+  private searchBar: HTMLElement | null = null;
   private resizeObserver: ResizeObserver;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -33,7 +36,9 @@ export class TerminalView {
     });
 
     this.fitAddon = new FitAddon();
+    this.searchAddon = new SearchAddon();
     this.terminal.loadAddon(this.fitAddon);
+    this.terminal.loadAddon(this.searchAddon);
     this.terminal.open(this.wrapper);
 
     try { this.terminal.loadAddon(new WebglAddon()); } catch {}
@@ -101,7 +106,55 @@ export class TerminalView {
   focus() { this.terminal.focus(); }
   clear() { this.terminal.clear(); }
 
+  toggleSearch() {
+    if (this.searchBar) { this.closeSearch(); return; }
+    const bar = document.createElement('div');
+    bar.className = 'terminal-search-bar';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = '搜索...';
+    input.addEventListener('input', () => {
+      if (input.value) this.searchAddon.findNext(input.value);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.shiftKey ? this.searchAddon.findPrevious(input.value) : this.searchAddon.findNext(input.value);
+      } else if (e.key === 'Escape') {
+        this.closeSearch();
+      }
+    });
+    const prevBtn = document.createElement('button');
+    prevBtn.textContent = '▲';
+    prevBtn.title = '上一个 (Shift+Enter)';
+    prevBtn.addEventListener('click', () => this.searchAddon.findPrevious(input.value));
+    const nextBtn = document.createElement('button');
+    nextBtn.textContent = '▼';
+    nextBtn.title = '下一个 (Enter)';
+    nextBtn.addEventListener('click', () => this.searchAddon.findNext(input.value));
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '×';
+    closeBtn.className = 'search-close';
+    closeBtn.addEventListener('click', () => this.closeSearch());
+    bar.appendChild(input);
+    bar.appendChild(prevBtn);
+    bar.appendChild(nextBtn);
+    bar.appendChild(closeBtn);
+    this.wrapper.appendChild(bar);
+    this.searchBar = bar;
+    input.focus();
+  }
+
+  closeSearch() {
+    if (this.searchBar) {
+      this.searchAddon.clearDecorations();
+      this.searchBar.remove();
+      this.searchBar = null;
+      this.terminal.focus();
+    }
+  }
+
   dispose() {
+    this.closeSearch();
     this.resizeObserver.disconnect();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     this.terminal.dispose();

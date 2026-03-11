@@ -5,6 +5,7 @@ export class TabBar {
   private tabListEl: HTMLElement;
   private editingTabId: string | null = null;
   private contextMenu: HTMLElement | null = null;
+  private dragTabId: string | null = null;
 
   constructor(
     private onNewTab: () => void,
@@ -47,32 +48,37 @@ export class TabBar {
       }
     });
 
-    const sep = document.createElement('div');
-    sep.className = 'tab-context-menu-sep';
-
-    const currentShell = appState.tabs.get(tabId)?.shell ?? 'cmd';
-    const shells: Array<{ label: string; shell: 'cmd' | 'powershell' | 'wsl' }> = [
-      { label: 'CMD', shell: 'cmd' },
-      { label: 'PowerShell', shell: 'powershell' },
-      { label: 'WSL', shell: 'wsl' },
-    ];
-    const shellItems = shells.map(({ label, shell }) => {
-      const item = document.createElement('div');
-      item.className = 'tab-context-menu-item';
-      const dot = shell === currentShell
-        ? '<span class="tab-context-menu-dot"></span>'
-        : '<span class="tab-context-menu-dot-placeholder"></span>';
-      item.innerHTML = `切换到 ${label}${dot}`;
-      item.addEventListener('click', (e) => {
-        e.stopPropagation(); this.closeContextMenu(); this.onSwitchShell(tabId, shell);
-      });
-      return item;
-    });
-
     menu.appendChild(renameItem);
     menu.appendChild(addHistoryItem);
-    menu.appendChild(sep);
-    shellItems.forEach(item => menu.appendChild(item));
+
+    // Shell switching only on Windows
+    const isWindows = navigator.userAgent.includes('Windows');
+    if (isWindows) {
+      const sep = document.createElement('div');
+      sep.className = 'tab-context-menu-sep';
+
+      const currentShell = appState.tabs.get(tabId)?.shell ?? 'cmd';
+      const shells: Array<{ label: string; shell: 'cmd' | 'powershell' | 'wsl' }> = [
+        { label: 'CMD', shell: 'cmd' },
+        { label: 'PowerShell', shell: 'powershell' },
+        { label: 'WSL', shell: 'wsl' },
+      ];
+      const shellItems = shells.map(({ label, shell }) => {
+        const item = document.createElement('div');
+        item.className = 'tab-context-menu-item';
+        const dot = shell === currentShell
+          ? '<span class="tab-context-menu-dot"></span>'
+          : '<span class="tab-context-menu-dot-placeholder"></span>';
+        item.innerHTML = `切换到 ${label}${dot}`;
+        item.addEventListener('click', (e) => {
+          e.stopPropagation(); this.closeContextMenu(); this.onSwitchShell(tabId, shell);
+        });
+        return item;
+      });
+
+      menu.appendChild(sep);
+      shellItems.forEach(item => menu.appendChild(item));
+    }
     menu.addEventListener('click', (e) => e.stopPropagation());
     document.body.appendChild(menu);
     this.contextMenu = menu;
@@ -136,6 +142,46 @@ export class TabBar {
       el.appendChild(close);
       el.addEventListener('click', () => this.onSwitchTab(id));
       el.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); this.showContextMenu(e.clientX, e.clientY, id, title); });
+
+      // Drag-to-reorder
+      el.draggable = true;
+      el.addEventListener('dragstart', (e) => {
+        this.dragTabId = id;
+        el.classList.add('dragging');
+        e.dataTransfer!.effectAllowed = 'move';
+      });
+      el.addEventListener('dragend', () => {
+        this.dragTabId = null;
+        el.classList.remove('dragging');
+        this.tabListEl.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over-left', 'drag-over-right'));
+      });
+      el.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer!.dropEffect = 'move';
+        if (!this.dragTabId || this.dragTabId === id) return;
+        const rect = el.getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
+        el.classList.toggle('drag-over-left', e.clientX < midX);
+        el.classList.toggle('drag-over-right', e.clientX >= midX);
+      });
+      el.addEventListener('dragleave', () => {
+        el.classList.remove('drag-over-left', 'drag-over-right');
+      });
+      el.addEventListener('drop', (e) => {
+        e.preventDefault();
+        el.classList.remove('drag-over-left', 'drag-over-right');
+        if (!this.dragTabId || this.dragTabId === id) return;
+        const fromIdx = appState.tabOrder.indexOf(this.dragTabId);
+        let toIdx = appState.tabOrder.indexOf(id);
+        const rect = el.getBoundingClientRect();
+        if (e.clientX >= rect.left + rect.width / 2 && toIdx < appState.tabOrder.length - 1) {
+          toIdx = fromIdx < toIdx ? toIdx : toIdx + 1;
+        } else if (e.clientX < rect.left + rect.width / 2) {
+          toIdx = fromIdx > toIdx ? toIdx : toIdx - 1;
+        }
+        appState.moveTab(fromIdx, toIdx);
+      });
+
       this.tabListEl.appendChild(el);
     }
 

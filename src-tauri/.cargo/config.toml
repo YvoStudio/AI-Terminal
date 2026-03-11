@@ -1,2 +1,2 @@
 [build]
-target-dir = "C:\\cargo-target\\ai-terminal"
+target-dir = "target"

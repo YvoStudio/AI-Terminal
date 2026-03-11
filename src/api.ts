@@ -4,6 +4,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 export type TabStatus = 'active' | 'executing' | 'done-unseen' | 'waiting';
 
@@ -17,6 +18,14 @@ export interface SavedTab {
   name: string;
   noteBlocks?: Array<{ id: string; content: string }>;
   shell?: 'cmd' | 'powershell' | 'wsl';
+}
+
+export interface ClaudeSession {
+  session_id: string;
+  slug: string;
+  cwd: string;
+  timestamp: string;
+  user_messages: string[];
 }
 
 export interface HistoryEntry {
@@ -132,11 +141,39 @@ export const api = {
     return invoke<string>('save_clipboard_image', { dataUrl });
   },
 
+  async listClaudeSessions(projectCwd?: string): Promise<ClaudeSession[]> {
+    return invoke<ClaudeSession[]>('list_claude_sessions', { projectCwd: projectCwd ?? null });
+  },
+
+  async deleteClaudeSession(sessionId: string): Promise<void> {
+    return invoke('delete_claude_session', { sessionId });
+  },
+
+  async deleteHistoryEntry(index: number): Promise<void> {
+    return invoke('delete_history_entry', { index });
+  },
+
+  async getClaudeSessionHistory(sessionId: string): Promise<string[]> {
+    return invoke<string[]>('get_claude_session_history', { sessionId });
+  },
+
+  clearBadge(): void {
+    invoke('clear_badge').catch(() => {});
+  },
+
   setInputColor(_colorCode: number, _bgCode: number): void {
     // No-op for now — shell color customization is macOS-specific
   },
 
   toggleMaximize(): void {
-    invoke('plugin:window|toggle_maximize').catch(() => {});
+    getCurrentWindow().toggleMaximize().catch(() => {});
+  },
+
+  minimizeWindow(): void {
+    getCurrentWindow().minimize().catch(() => {});
+  },
+
+  closeWindow(): void {
+    getCurrentWindow().close().catch(() => {});
   },
 };
