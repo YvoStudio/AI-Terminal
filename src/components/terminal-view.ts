@@ -26,9 +26,16 @@ export class TerminalView {
     const savedIndex = TerminalView.getSavedThemeIndex();
     const currentTheme = themes[savedIndex];
 
+    // Windows 使用黑体，字号默认大一号
+    const isWindows = navigator.platform.toLowerCase().includes('win');
+    const fontSize = isWindows ? 14 : 13;
+    const fontFamily = isWindows
+      ? "'SimHei', 'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', monospace"
+      : "'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', monospace";
+
     this.terminal = new Terminal({
-      fontSize: 13,
-      fontFamily: "'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', monospace",
+      fontSize,
+      fontFamily,
       theme: currentTheme.theme,
       cursorBlink: true,
       scrollback: 10000,

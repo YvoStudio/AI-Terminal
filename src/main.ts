@@ -65,6 +65,11 @@ const tabBar = new TabBar(() => createTab(), closeTab, switchToTab, switchShell)
 const sidebar = new Sidebar();
 void tabBar; void sidebar;
 
+// Window controls (Windows)
+document.getElementById('btn-minimize')?.addEventListener('click', () => api.minimizeWindow());
+document.getElementById('btn-maximize')?.addEventListener('click', () => api.toggleMaximize());
+document.getElementById('btn-close')?.addEventListener('click', () => api.closeWindow());
+
 // Double-click tab bar to maximize/restore
 document.getElementById('tab-bar')!.addEventListener('dblclick', (e) => {
   const target = e.target as HTMLElement;
