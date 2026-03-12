@@ -65,23 +65,28 @@ void tabBar;
 
 // Platform-specific title bar
 const isMacOS = navigator.userAgent.includes('Mac');
+const wc = document.getElementById('window-controls');
+
 if (isMacOS) {
-  // macOS: native traffic lights via Overlay, hide custom window controls
-  document.getElementById('window-controls')?.remove();
+  // macOS: native traffic lights, hide custom controls
+  if (wc) {
+    wc.style.display = 'none';
+    wc.remove();
+  }
   document.getElementById('traffic-light-spacer')!.style.display = '';
 } else {
-  // Windows/Linux: custom window controls, no traffic light spacer
-  document.getElementById('traffic-light-spacer')?.remove();
-  const wc = document.getElementById('window-controls');
+  // Windows/Linux: custom window controls
   if (wc) wc.style.display = 'flex';
+  document.getElementById('traffic-light-spacer')?.remove();
   document.getElementById('btn-minimize')?.addEventListener('click', () => api.minimizeWindow());
   document.getElementById('btn-maximize')?.addEventListener('click', () => api.toggleMaximize());
   document.getElementById('btn-close')?.addEventListener('click', () => api.closeWindow());
-  // On Windows we need decorations:false — set via Tauri API
-  import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-    getCurrentWindow().setDecorations(false).catch(() => {});
-  });
 }
+
+// On Windows we need decorations:false — set via Tauri API
+import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+  getCurrentWindow().setDecorations(false).catch(() => {});
+});
 
 // Double-click tab bar to maximize/restore
 document.getElementById('tab-bar')!.addEventListener('dblclick', (e) => {
@@ -507,20 +512,7 @@ let _closeHistoryPanel: (() => void) | null = null;
 
 // Backend events — auto-send notepad blocks when Claude is waiting
 api.onTabStatusChanged((tabId, status) => {
-  const prevStatus = appState.tabs.get(tabId)?.status;
   appState.setStatus(tabId, status);
-
-  // Style user input: bright green text + subtle gray background when waiting for input
-  const view = terminalViews.get(tabId);
-  if (view) {
-    if (status === 'waiting') {
-      // ESC[38;2;80;220;100m = bright green fg, ESC[48;2;40;40;40m = dark gray bg
-      view.terminal.write('\x1b[38;2;80;220;100m\x1b[48;2;40;40;40m');
-    } else if (prevStatus === 'waiting' && status !== 'waiting') {
-      // Reset colors when user submits input
-      view.terminal.write('\x1b[0m');
-    }
-  }
 
   // Auto-submit first notepad block when tab becomes "waiting" (Claude waiting for input)
   if (status === 'waiting') {

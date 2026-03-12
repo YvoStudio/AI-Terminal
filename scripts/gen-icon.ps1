@@ -7,34 +7,28 @@ function New-IconBitmap([int]$Size) {
     $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
     $g.Clear([System.Drawing.Color]::Transparent)
 
-    # Rounded background #0d0d0d
-    [float]$rad = $Size * 0.20
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $path.AddArc([float]0,                [float]0,                $rad*2, $rad*2, 180, 90)
-    $path.AddArc([float]($Size-$rad*2),   [float]0,                $rad*2, $rad*2, 270, 90)
-    $path.AddArc([float]($Size-$rad*2),   [float]($Size-$rad*2),   $rad*2, $rad*2,   0, 90)
-    $path.AddArc([float]0,                [float]($Size-$rad*2),   $rad*2, $rad*2,  90, 90)
-    $path.CloseFigure()
-    $g.FillPath((New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 13, 13, 13))), $path)
-    $g.SetClip($path)
+    # Full-bleed background #1a1a2e (slightly lighter so edges are visible)
+    $g.FillRectangle(
+        (New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 26, 26, 46))),
+        0, 0, $Size, $Size)
 
     $green = [System.Drawing.Color]::FromArgb(255, 80, 250, 123)
 
     if ($Size -ge 32) {
-        [float]$thick = if ($Size -le 48) { $Size * 0.13 } else { $Size * 0.095 }
+        [float]$thick = if ($Size -le 48) { $Size * 0.15 } else { $Size * 0.12 }
         $pen = New-Object System.Drawing.Pen($green, $thick)
         $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
         $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
 
-        [float]$midX = $Size * 0.54
+        [float]$midX = $Size * 0.58
         [float]$midY = $Size * 0.50
-        $g.DrawLine($pen, [float]($Size*0.14), [float]($Size*0.22), $midX, $midY)
-        $g.DrawLine($pen, $midX, $midY, [float]($Size*0.14), [float]($Size*0.78))
+        $g.DrawLine($pen, [float]($Size*0.10), [float]($Size*0.15), $midX, $midY)
+        $g.DrawLine($pen, $midX, $midY, [float]($Size*0.10), [float]($Size*0.85))
 
         $cbBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(230, 80, 250, 123))
         $g.FillRectangle($cbBrush,
-            [float]($Size*0.60), [float]($Size*0.37),
-            [float]($Size*0.17), [float]($Size*0.26))
+            [float]($Size*0.64), [float]($Size*0.32),
+            [float]($Size*0.20), [float]($Size*0.36))
 
         if ($Size -ge 128) {
             $scanPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(18, 80, 250, 123), 1.0)
