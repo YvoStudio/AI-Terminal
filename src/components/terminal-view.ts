@@ -1,6 +1,6 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { CanvasAddon } from '@xterm/addon-canvas';
+// Canvas/WebGL addons removed — DOM renderer has best emoji support
 import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { api } from '../api';
@@ -33,8 +33,8 @@ export class TerminalView {
     const isWindows = navigator.platform.toLowerCase().includes('win');
     const fontSize = isWindows ? 14 : 13;
     const fontFamily = isWindows
-      ? "'CaskaydiaCove Nerd Font', 'SimHei', 'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', monospace"
-      : "'MesloLGS Nerd Font', 'Hack Nerd Font', 'Menlo', 'Cascadia Code', 'SF Mono', 'Consolas', monospace";
+      ? "'CaskaydiaCove Nerd Font', 'SimHei', 'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', 'Apple Color Emoji', 'Segoe UI Emoji', monospace"
+      : "'MesloLGS Nerd Font', 'Hack Nerd Font', 'Menlo', 'Cascadia Code', 'SF Mono', 'Consolas', 'Apple Color Emoji', monospace";
 
     this.terminal = new Terminal({
       fontSize,
@@ -56,7 +56,7 @@ export class TerminalView {
     this.terminal.loadAddon(unicode11);
     this.terminal.unicode.activeVersion = '11';
 
-    try { this.terminal.loadAddon(new CanvasAddon()); } catch {}
+    // Using default DOM renderer for best emoji/Unicode support
 
     // Input → Rust backend
     this.terminal.onData((data) => {

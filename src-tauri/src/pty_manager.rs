@@ -103,12 +103,34 @@ impl PtyManager {
         let tab_id_clone = tab_id.clone();
         thread::spawn(move || {
             let mut buf = [0u8; 4096];
+            let mut pending = Vec::new(); // incomplete UTF-8 bytes from previous read
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                        on_data(data);
+                        pending.extend_from_slice(&buf[..n]);
+                        // Find the last valid UTF-8 boundary
+                        match std::str::from_utf8(&pending) {
+                            Ok(s) => {
+                                on_data(s.to_string());
+                                pending.clear();
+                            }
+                            Err(e) => {
+                                let valid_up_to = e.valid_up_to();
+                                if valid_up_to > 0 {
+                                    let valid = std::str::from_utf8(&pending[..valid_up_to]).unwrap();
+                                    on_data(valid.to_string());
+                                    pending = pending[valid_up_to..].to_vec();
+                                }
+                                // Keep remaining bytes for next read (incomplete char)
+                                // But if pending is too large (>8 bytes), it's truly invalid — flush it
+                                if pending.len() > 8 {
+                                    let data = String::from_utf8_lossy(&pending).to_string();
+                                    on_data(data);
+                                    pending.clear();
+                                }
+                            }
+                        }
                     }
                     Err(_) => break,
                 }
