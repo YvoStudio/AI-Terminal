@@ -143,43 +143,63 @@ export class TabBar {
       el.addEventListener('click', () => this.onSwitchTab(id));
       el.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); this.showContextMenu(e.clientX, e.clientY, id, title); });
 
-      // Drag-to-reorder
-      el.draggable = true;
-      el.addEventListener('dragstart', (e) => {
-        this.dragTabId = id;
-        el.classList.add('dragging');
-        e.dataTransfer!.effectAllowed = 'move';
-      });
-      el.addEventListener('dragend', () => {
-        this.dragTabId = null;
-        el.classList.remove('dragging');
-        this.tabListEl.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over-left', 'drag-over-right'));
-      });
-      el.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        e.dataTransfer!.dropEffect = 'move';
-        if (!this.dragTabId || this.dragTabId === id) return;
-        const rect = el.getBoundingClientRect();
-        const midX = rect.left + rect.width / 2;
-        el.classList.toggle('drag-over-left', e.clientX < midX);
-        el.classList.toggle('drag-over-right', e.clientX >= midX);
-      });
-      el.addEventListener('dragleave', () => {
-        el.classList.remove('drag-over-left', 'drag-over-right');
-      });
-      el.addEventListener('drop', (e) => {
-        e.preventDefault();
-        el.classList.remove('drag-over-left', 'drag-over-right');
-        if (!this.dragTabId || this.dragTabId === id) return;
-        const fromIdx = appState.tabOrder.indexOf(this.dragTabId);
-        let toIdx = appState.tabOrder.indexOf(id);
-        const rect = el.getBoundingClientRect();
-        if (e.clientX >= rect.left + rect.width / 2 && toIdx < appState.tabOrder.length - 1) {
-          toIdx = fromIdx < toIdx ? toIdx : toIdx + 1;
-        } else if (e.clientX < rect.left + rect.width / 2) {
-          toIdx = fromIdx > toIdx ? toIdx : toIdx - 1;
-        }
-        appState.moveTab(fromIdx, toIdx);
+      // Drag-to-reorder via mousedown/mousemove (HTML5 drag blocked by Tauri drag region)
+      el.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        // Ignore if clicking close button or editing title
+        if ((e.target as HTMLElement).closest('.tab-close') || (e.target as HTMLElement).closest('[contenteditable="true"]')) return;
+        const startX = e.clientX;
+        let dragging = false;
+        const onMove = (ev: MouseEvent) => {
+          if (!dragging && Math.abs(ev.clientX - startX) > 5) {
+            dragging = true;
+            this.dragTabId = id;
+            el.classList.add('dragging');
+            document.body.classList.add('tab-dragging');
+          }
+          if (!dragging) return;
+          // Highlight drop target
+          this.tabListEl.querySelectorAll('.tab').forEach(t => {
+            t.classList.remove('drag-over-left', 'drag-over-right');
+            if (t === el) return;
+            const rect = t.getBoundingClientRect();
+            if (ev.clientX >= rect.left && ev.clientX <= rect.right) {
+              const midX = rect.left + rect.width / 2;
+              t.classList.toggle('drag-over-left', ev.clientX < midX);
+              t.classList.toggle('drag-over-right', ev.clientX >= midX);
+            }
+          });
+        };
+        const onUp = (ev: MouseEvent) => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          if (!dragging) return;
+          el.classList.remove('dragging');
+          document.body.classList.remove('tab-dragging');
+          // Find drop target
+          const tabs = Array.from(this.tabListEl.querySelectorAll('.tab'));
+          tabs.forEach(t => t.classList.remove('drag-over-left', 'drag-over-right'));
+          for (const t of tabs) {
+            if (t === el) continue;
+            const rect = t.getBoundingClientRect();
+            if (ev.clientX >= rect.left && ev.clientX <= rect.right) {
+              const targetId = (t as HTMLElement).dataset.tabId!;
+              const fromIdx = appState.tabOrder.indexOf(id);
+              let toIdx = appState.tabOrder.indexOf(targetId);
+              const midX = rect.left + rect.width / 2;
+              if (ev.clientX >= midX) {
+                toIdx = fromIdx < toIdx ? toIdx : toIdx + 1;
+              } else {
+                toIdx = fromIdx > toIdx ? toIdx : toIdx - 1;
+              }
+              appState.moveTab(fromIdx, toIdx);
+              break;
+            }
+          }
+          this.dragTabId = null;
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
       });
 
       this.tabListEl.appendChild(el);

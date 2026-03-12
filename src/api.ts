@@ -153,6 +153,10 @@ export const api = {
     return invoke('delete_history_entry', { index });
   },
 
+  async clearHistory(): Promise<void> {
+    return invoke('clear_history');
+  },
+
   async getClaudeSessionHistory(sessionId: string): Promise<string[]> {
     return invoke<string[]>('get_claude_session_history', { sessionId });
   },

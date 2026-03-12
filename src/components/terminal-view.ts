@@ -1,7 +1,8 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebglAddon } from '@xterm/addon-webgl';
+import { CanvasAddon } from '@xterm/addon-canvas';
 import { SearchAddon } from '@xterm/addon-search';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { api } from '../api';
 import { themes } from './themes';
 
@@ -13,6 +14,8 @@ export class TerminalView {
   private searchBar: HTMLElement | null = null;
   private resizeObserver: ResizeObserver;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  private scrollBtn: HTMLElement;
+  private scrollCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private tabId: string,
@@ -30,8 +33,8 @@ export class TerminalView {
     const isWindows = navigator.platform.toLowerCase().includes('win');
     const fontSize = isWindows ? 14 : 13;
     const fontFamily = isWindows
-      ? "'SimHei', 'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', monospace"
-      : "'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', monospace";
+      ? "'CaskaydiaCove Nerd Font', 'SimHei', 'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', monospace"
+      : "'MesloLGS Nerd Font', 'Hack Nerd Font', 'Menlo', 'Cascadia Code', 'SF Mono', 'Consolas', monospace";
 
     this.terminal = new Terminal({
       fontSize,
@@ -48,7 +51,12 @@ export class TerminalView {
     this.terminal.loadAddon(this.searchAddon);
     this.terminal.open(this.wrapper);
 
-    try { this.terminal.loadAddon(new WebglAddon()); } catch {}
+    // Unicode 11 for proper emoji/CJK width calculation
+    const unicode11 = new Unicode11Addon();
+    this.terminal.loadAddon(unicode11);
+    this.terminal.unicode.activeVersion = '11';
+
+    try { this.terminal.loadAddon(new CanvasAddon()); } catch {}
 
     // Input → Rust backend
     this.terminal.onData((data) => {
@@ -82,11 +90,33 @@ export class TerminalView {
       }
     });
 
+    // Scroll-to-bottom button
+    this.scrollBtn = document.createElement('button');
+    this.scrollBtn.className = 'terminal-scroll-bottom';
+    this.scrollBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11.5l-5-5h10z"/></svg>';
+    this.scrollBtn.title = '回到底部';
+    this.scrollBtn.addEventListener('click', () => {
+      this.terminal.scrollToBottom();
+      this.terminal.focus();
+    });
+    this.wrapper.appendChild(this.scrollBtn);
+
+    this.terminal.onScroll(() => this.updateScrollBtn());
+    this.terminal.onWriteParsed(() => this.updateScrollBtn());
+    // Periodic check for scroll position (catches mouse wheel and other scroll events)
+    this.scrollCheckTimer = setInterval(() => this.updateScrollBtn(), 500);
+
     this.resizeObserver = new ResizeObserver(() => {
       if (this.resizeTimer) clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => this.fit(), 100);
     });
     this.resizeObserver.observe(this.wrapper);
+  }
+
+  private updateScrollBtn() {
+    const buf = this.terminal.buffer.active;
+    const atBottom = buf.viewportY >= buf.baseY;
+    this.scrollBtn.classList.toggle('visible', !atBottom);
   }
 
   applyTheme(index: number) {
@@ -102,8 +132,23 @@ export class TerminalView {
 
   fit() {
     try {
+      // Preserve scroll position across resize to prevent jumping to top
+      const buf = this.terminal.buffer.active;
+      const wasAtBottom = buf.viewportY >= buf.baseY;
+      const savedViewportY = buf.viewportY;
+
       this.fitAddon.fit();
-      api.resizeTerminal(this.tabId, this.terminal.cols, this.terminal.rows);
+      // Report 1 less col to PTY to prevent edge-case line wrapping
+      // (scrollbar width and sub-pixel rounding can cause off-by-one)
+      const safeCols = Math.max(1, this.terminal.cols - 1);
+      api.resizeTerminal(this.tabId, safeCols, this.terminal.rows);
+
+      // Restore scroll: if user was at bottom, stay at bottom; otherwise try to keep position
+      if (wasAtBottom) {
+        this.terminal.scrollToBottom();
+      } else {
+        this.terminal.scrollToLine(savedViewportY);
+      }
     } catch {}
   }
 
@@ -164,6 +209,7 @@ export class TerminalView {
     this.closeSearch();
     this.resizeObserver.disconnect();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
+    if (this.scrollCheckTimer) clearInterval(this.scrollCheckTimer);
     this.terminal.dispose();
     this.wrapper.remove();
   }

@@ -258,7 +258,7 @@ pub fn add_history(app: AppHandle, tab_id: String, name: String, cwd: String, sh
         .as_millis() as u64;
 
     history.insert(0, HistoryEntry { name, cwd, timestamp: ts, shell: shell.unwrap_or_else(default_shell_str) });
-    history.truncate(15);
+    history.truncate(20);
 
     let json = serde_json::to_string(&history).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())
@@ -305,6 +305,19 @@ pub async fn select_directory(app: AppHandle) -> Result<String, String> {
     let path = app.dialog()
         .file()
         .blocking_pick_folder();
+    Ok(path.map(|p| p.to_string()).unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn select_path(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+    // Use pick_folder first won't work — use std approach to show open panel with both
+    // On macOS, blocking_pick_file allows file selection; for dirs use separate command
+    // Simplest: try file first, if cancelled return empty
+    let path = app.dialog()
+        .file()
+        .set_title("选择文件或目录")
+        .blocking_pick_file();
     Ok(path.map(|p| p.to_string()).unwrap_or_default())
 }
 
@@ -396,6 +409,15 @@ pub fn delete_claude_session(session_id: String) -> Result<(), String> {
             if sub_dir.exists() { let _ = fs::remove_dir_all(&sub_dir); }
             return Ok(());
         }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_history(app: AppHandle) -> Result<(), String> {
+    let path = history_file(&app);
+    if path.exists() {
+        fs::write(&path, "[]").map_err(|e| e.to_string())?;
     }
     Ok(())
 }

@@ -197,9 +197,9 @@ fn generate_tab_name(entries: &[SidebarEntry]) -> Option<String> {
         if text.len() <= 3 { continue; }
         if matches!(text.to_lowercase().as_str(), "y" | "n" | "yes" | "no" | "claude" | "exit" | "quit" | "cd" | "ls") { continue; }
         if text.len() <= 20 { return Some(text.to_string()); }
-        let cut = &text[..20];
+        let cut = truncate_str(text, 20);
         let last_space = cut.rfind(' ');
-        return Some(if let Some(i) = last_space { if i > 10 { format!("{}…", &cut[..i]) } else { format!("{}…", cut) } } else { format!("{}…", cut) });
+        return Some(if let Some(i) = last_space { if i > 10 { format!("{}…", truncate_str(cut, i)) } else { format!("{}…", cut) } } else { format!("{}…", cut) });
     }
     None
 }

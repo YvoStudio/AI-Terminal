@@ -79,6 +79,8 @@ impl PtyManager {
         // Set environment
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        cmd.env("LANG", "en_US.UTF-8");
+        cmd.env("LC_ALL", "en_US.UTF-8");
         // Prevent Claude Code from refusing to start inside this terminal
         cmd.env_remove("CLAUDECODE");
 

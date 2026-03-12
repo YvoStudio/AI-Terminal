@@ -2,7 +2,6 @@ import { api } from './api';
 import { appState } from './components/app-state';
 import { TabBar } from './components/tab-bar';
 import { TerminalView } from './components/terminal-view';
-import { Sidebar } from './components/sidebar';
 import { themes } from './components/themes';
 
 const terminalViews = new Map<string, TerminalView>();
@@ -62,13 +61,27 @@ async function switchShell(tabId: string, shell: 'cmd' | 'powershell' | 'wsl') {
 
 // Initialize components
 const tabBar = new TabBar(() => createTab(), closeTab, switchToTab, switchShell);
-const sidebar = new Sidebar();
-void tabBar; void sidebar;
+void tabBar;
 
-// Window controls (Windows)
-document.getElementById('btn-minimize')?.addEventListener('click', () => api.minimizeWindow());
-document.getElementById('btn-maximize')?.addEventListener('click', () => api.toggleMaximize());
-document.getElementById('btn-close')?.addEventListener('click', () => api.closeWindow());
+// Platform-specific title bar
+const isMacOS = navigator.userAgent.includes('Mac');
+if (isMacOS) {
+  // macOS: native traffic lights via Overlay, hide custom window controls
+  document.getElementById('window-controls')?.remove();
+  document.getElementById('traffic-light-spacer')!.style.display = '';
+} else {
+  // Windows/Linux: custom window controls, no traffic light spacer
+  document.getElementById('traffic-light-spacer')?.remove();
+  const wc = document.getElementById('window-controls');
+  if (wc) wc.style.display = 'flex';
+  document.getElementById('btn-minimize')?.addEventListener('click', () => api.minimizeWindow());
+  document.getElementById('btn-maximize')?.addEventListener('click', () => api.toggleMaximize());
+  document.getElementById('btn-close')?.addEventListener('click', () => api.closeWindow());
+  // On Windows we need decorations:false — set via Tauri API
+  import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+    getCurrentWindow().setDecorations(false).catch(() => {});
+  });
+}
 
 // Double-click tab bar to maximize/restore
 document.getElementById('tab-bar')!.addEventListener('dblclick', (e) => {
@@ -85,20 +98,6 @@ function refitActiveTerminal() {
     if (view) requestAnimationFrame(() => view.fit());
   }
 }
-
-// Sidebar toggle
-const sidebarEl = document.getElementById('sidebar')!;
-const sidebarResizeEl = document.getElementById('sidebar-resize-handle')!;
-const sidebarBtn = document.getElementById('btn-toggle-sidebar')!;
-function setSidebarVisible(visible: boolean) {
-  sidebarEl.classList.toggle('hidden', !visible);
-  sidebarResizeEl.style.display = visible ? '' : 'none';
-  sidebarBtn.classList.toggle('active', visible);
-  localStorage.setItem('sidebar-hidden', visible ? '0' : '1');
-  refitActiveTerminal();
-}
-sidebarBtn.addEventListener('click', () => setSidebarVisible(sidebarEl.classList.contains('hidden')));
-if (localStorage.getItem('sidebar-hidden') !== '0') setSidebarVisible(false);
 
 // Notepad toggle
 const notepadEl = document.getElementById('notepad')!;
@@ -230,12 +229,10 @@ appState.subscribe(() => renderNoteBlocks());
       <div class="tips-columns">
         <div class="tips-column">
           <div class="tips-section">
-            <div class="tips-section-title">左侧工具栏</div>
-            <div class="tips-item"><span class="tips-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1 2.5h4v11H1zm5.5 0h8v11h-8z"/></svg></span>显示/隐藏 Chat History 面板</div>
-            <div class="tips-item"><span class="tips-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M14 1H2a1 1 0 00-1 1v12a1 1 0 001 1h12a1 1 0 001-1V2a1 1 0 00-1-1zm-1 12H3l3-4 1.5 2L10 8l3 5zM5.5 7a1.5 1.5 0 110-3 1.5 1.5 0 010 3z"/></svg></span>选择图片，路径插入光标处</div>
-            <div class="tips-item"><span class="tips-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13 1H5a1 1 0 00-1 1v2H3a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1v-2h1a1 1 0 001-1V3l-2-2zm-3 13H4V6h6v8zm3-3h-1V5a1 1 0 00-1-1H6V3h4l2 2v6z"/></svg></span>选择文件，路径插入光标处</div>
-            <div class="tips-item"><span class="tips-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M14 3H7.5L6 1.5H2a1 1 0 00-1 1v11a1 1 0 001 1h12a1 1 0 001-1V4a1 1 0 00-1-1z"/></svg></span>选择文件夹路径，插入光标处</div>
-            <div class="tips-item"><span class="tips-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 12.5a5.5 5.5 0 110-11 5.5 5.5 0 010 11zM7.5 4v4.5l3 1.5.5-1-2.5-1.25V4z"/></svg></span>历史工作区，恢复已关闭的标签</div>
+            <div class="tips-section-title">底栏工具</div>
+            <div class="tips-item"><span class="tips-icon">📎</span>插入路径：选择文件或目录</div>
+            <div class="tips-item"><span class="tips-icon">🕐</span>历史会话：恢复标签或会话</div>
+            <div class="tips-item"><span class="tips-icon">🎨</span>主题切换：右下角主题名</div>
           </div>
           <div class="tips-section">
             <div class="tips-section-title">快捷键</div>
@@ -244,44 +241,57 @@ appState.subscribe(() => renderNoteBlocks());
             <div class="tips-item"><span class="tips-key">⌘[</span> / <span class="tips-key">⌘]</span> 切换标签</div>
             <div class="tips-item"><span class="tips-key">⌘1-9</span> 跳转到指定标签</div>
             <div class="tips-item"><span class="tips-key">⌘F</span> 终端内搜索</div>
+            <div class="tips-item"><span class="tips-key">⌘K</span> 命令面板</div>
           </div>
           <div class="tips-section">
-            <div class="tips-section-title">Notepad & 标签</div>
-            <div class="tips-item"><span class="tips-icon">+</span>添加文本块，预写提示词</div>
-            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>发送文本块内容到终端</div>
+            <div class="tips-section-title">标签 & Notepad</div>
             <div class="tips-item"><span class="tips-icon">✏️</span>双击标签名可重命名</div>
-            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-red)">●</span>标签红点 = 后台任务完成</div>
-            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-blue)">⚡</span>文本块在 Claude 等待时自动发送</div>
+            <div class="tips-item"><span class="tips-icon">↔️</span>拖动标签可排序</div>
+            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-red)">●</span>红点 = 后台任务完成</div>
+            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-yellow)">●</span>黄点 = 等待输入</div>
+            <div class="tips-item"><span class="tips-icon">+</span>Notepad 预写提示词</div>
+            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>发送文本块到终端</div>
+            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-blue)">⚡</span>等待时自动发送</div>
           </div>
         </div>
         <div class="tips-column">
           <div class="tips-section">
             <div class="tips-section-title">Claude Code 启动</div>
-            <div class="tips-item"><span class="tips-cmd">claude</span> 正常启动交互模式</div>
-            <div class="tips-item"><span class="tips-cmd">claude --dangerously-skip-permissions</span> 危险模式，跳过所有权限确认</div>
-            <div class="tips-item"><span class="tips-cmd">claude -p "prompt"</span> 非交互，执行单次任务后退出</div>
-            <div class="tips-item"><span class="tips-cmd">claude -c</span> 继续上一次对话</div>
-            <div class="tips-item"><span class="tips-cmd">claude -r</span> 恢复最近的会话</div>
-            <div class="tips-item"><span class="tips-cmd">cat file | claude -p "分析"</span> 管道输入内容给 Claude</div>
+            <div class="tips-item"><span class="tips-cmd">claude</span> 启动交互模式</div>
+            <div class="tips-item"><span class="tips-cmd">claude -r</span> 恢复最近会话</div>
+            <div class="tips-item"><span class="tips-cmd">claude -c</span> 继续上次对话</div>
+            <div class="tips-item"><span class="tips-cmd">claude -p "prompt"</span> 单次任务</div>
+            <div class="tips-item"><span class="tips-cmd">claude --dangerously-skip-permissions</span> 跳过权限</div>
+            <div class="tips-item"><span class="tips-cmd">cat file | claude -p "分析"</span> 管道输入</div>
           </div>
           <div class="tips-section">
-            <div class="tips-section-title">Claude Code 交互命令</div>
-            <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文，释放 token 空间</div>
-            <div class="tips-item"><span class="tips-cmd">/clear</span> 清空当前对话历史</div>
-            <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型 (opus/sonnet/haiku)</div>
-            <div class="tips-item"><span class="tips-cmd">/cost</span> 查看当前会话 token 用量和费用</div>
-            <div class="tips-item"><span class="tips-cmd">/help</span> 显示所有可用命令</div>
-            <div class="tips-item"><span class="tips-cmd">/vim</span> 切换 Vim 编辑模式</div>
+            <div class="tips-section-title">交互命令</div>
+            <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
+            <div class="tips-item"><span class="tips-cmd">/clear</span> 清空对话</div>
+            <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型</div>
+            <div class="tips-item"><span class="tips-cmd">/cost</span> 查看用量</div>
+            <div class="tips-item"><span class="tips-cmd">/help</span> 所有命令</div>
+            <div class="tips-item"><span class="tips-cmd">/vim</span> Vim 模式</div>
+          </div>
+        </div>
+        <div class="tips-column">
+          <div class="tips-section">
+            <div class="tips-section-title">Claude @ 命令</div>
+            <div class="tips-item"><span class="tips-cmd">@file</span> 文件内容加入上下文</div>
+            <div class="tips-item"><span class="tips-cmd">@dir</span> 目录结构加入上下文</div>
+            <div class="tips-item"><span class="tips-cmd">@url</span> 抓取网页内容</div>
+            <div class="tips-item"><span class="tips-cmd">@git</span> 引用 git 历史</div>
+            <div class="tips-item"><span class="tips-cmd">@terminal</span> 引用终端输出</div>
           </div>
           <div class="tips-section">
-            <div class="tips-section-title">Claude Code 高级用法</div>
-            <div class="tips-item"><span class="tips-cmd">claude "任务" &</span> 后台运行任务</div>
-            <div class="tips-item"><span class="tips-cmd">CLAUDE_MODEL=opus claude</span> 指定模型启动</div>
-            <div class="tips-item"><span class="tips-cmd">claude config set model opus</span> 永久设置默认模型</div>
-            <div class="tips-item"><span class="tips-cmd">claude mcp add name cmd</span> 添加 MCP 服务器</div>
+            <div class="tips-section-title">高级用法</div>
+            <div class="tips-item"><span class="tips-cmd">claude "任务" &</span> 后台运行</div>
+            <div class="tips-item"><span class="tips-cmd">CLAUDE_MODEL=opus claude</span> 指定模型</div>
+            <div class="tips-item"><span class="tips-cmd">claude config set model opus</span> 默认模型</div>
+            <div class="tips-item"><span class="tips-cmd">claude mcp add name cmd</span> 添加 MCP</div>
           </div>
           <div class="tips-section tips-section-hints">
-            <div class="tips-item">在 Notepad 预写长提示词，一键发送到 Claude</div>
+            <div class="tips-item">Notepad 预写长提示词，一键发送</div>
             <div class="tips-item">多标签并行运行多个 Claude 任务</div>
           </div>
         </div>
@@ -293,6 +303,10 @@ appState.subscribe(() => renderNoteBlocks());
   });
   document.addEventListener('click', () => { if (tipsOpen && tipsEl) { tipsEl.remove(); tipsEl = null; tipsOpen = false; } });
 })();
+
+// Shared panel close helpers (so attach & history can dismiss each other)
+let _closeAttachMenu: (() => void) | null = null;
+let _closeHistoryPanel: (() => void) | null = null;
 
 // History panel (unified: Claude sessions first, then plain history)
 (() => {
@@ -313,9 +327,14 @@ appState.subscribe(() => renderNoteBlocks());
     historyIndex?: number; // original index in history array for deletion
   }
 
+  let currentHistoryItems: UnifiedItem[] = [];
+  function closeHistory() { if (historyOpen && historyEl) { historyEl.remove(); historyEl = null; historyOpen = false; } }
+  _closeHistoryPanel = closeHistory;
+
   historyBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    if (historyOpen && historyEl) { historyEl.remove(); historyEl = null; historyOpen = false; return; }
+    if (historyOpen && historyEl) { closeHistory(); return; }
+    if (_closeAttachMenu) _closeAttachMenu();
 
     historyEl = document.createElement('div');
     historyEl.className = 'tips-panel';
@@ -323,10 +342,28 @@ appState.subscribe(() => renderNoteBlocks());
     historyEl.style.overflow = 'hidden';
     historyEl.style.display = 'flex';
     historyEl.style.flexDirection = 'column';
-    historyEl.innerHTML = `<h3>历史会话</h3><div class="history-content"><div style="color:var(--text-muted);font-size:12px;padding:8px 0;">加载中...</div></div>`;
+    historyEl.style.paddingRight = '0';
+    historyEl.innerHTML = `<h3>历史会话</h3><div class="history-content"><div style="color:var(--text-muted);font-size:12px;padding:8px 0;">加载中...</div></div><button class="history-clear-btn">清空历史</button>`;
     historyEl.addEventListener('click', (ev) => ev.stopPropagation());
     document.body.appendChild(historyEl);
     historyOpen = true;
+
+    // Clear all button
+    const clearBtn = historyEl.querySelector('.history-clear-btn')!;
+    clearBtn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      // Clear plain history
+      await api.clearHistory();
+      // Also delete all Claude sessions that were listed
+      for (const item of currentHistoryItems) {
+        if (item.type === 'session' && item.sessionId) {
+          await api.deleteClaudeSession(item.sessionId).catch(() => {});
+        }
+      }
+      currentHistoryItems = [];
+      const contentEl2 = historyEl!.querySelector('.history-content')!;
+      contentEl2.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px 0;">已清空</div>`;
+    });
 
     // Load both sources in parallel
     const [sessions, entries] = await Promise.all([
@@ -367,8 +404,10 @@ appState.subscribe(() => renderNoteBlocks());
       });
     });
 
-    // Sort by time descending
+    // Sort by time descending, limit to 20
     items.sort((a, b) => b.time.getTime() - a.time.getTime());
+    if (items.length > 20) items.length = 20;
+    currentHistoryItems = items;
 
     const contentEl = historyEl.querySelector('.history-content')!;
     contentEl.innerHTML = '';
@@ -422,29 +461,67 @@ appState.subscribe(() => renderNoteBlocks());
       contentEl.appendChild(el);
     }
   });
-  document.addEventListener('click', () => { if (historyOpen && historyEl) { historyEl.remove(); historyEl = null; historyOpen = false; } });
+  document.addEventListener('click', () => { closeHistory(); });
 })();
 
-// File/image/dir buttons
-document.getElementById('btn-add-image')!.addEventListener('click', async () => {
-  if (!appState.activeTabId) return;
-  const p = await api.selectImage();
-  if (p) api.writeTerminal(appState.activeTabId, p);
-});
-document.getElementById('btn-add-file')!.addEventListener('click', async () => {
-  if (!appState.activeTabId) return;
-  const p = await api.selectFile();
-  if (p) api.writeTerminal(appState.activeTabId, p);
-});
-document.getElementById('btn-add-dir')!.addEventListener('click', async () => {
-  if (!appState.activeTabId) return;
-  const p = await api.selectDirectory();
-  if (p) api.writeTerminal(appState.activeTabId, p);
-});
+// Attach button — file/dir picker menu
+(() => {
+  const attachBtn = document.getElementById('btn-attach')!;
+  let menuOpen = false;
+  let menuEl: HTMLElement | null = null;
+
+  function closeAttach() { if (menuOpen && menuEl) { menuEl.remove(); menuEl = null; menuOpen = false; attachBtn.classList.remove('menu-open'); } }
+  _closeAttachMenu = closeAttach;
+
+  attachBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menuOpen && menuEl) { closeAttach(); return; }
+    if (_closeHistoryPanel) _closeHistoryPanel();
+
+    menuEl = document.createElement('div');
+    menuEl.className = 'attach-menu';
+    menuEl.innerHTML = `
+      <div class="attach-menu-item" data-type="file">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13 1H5a1 1 0 00-1 1v2H3a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1v-2h1a1 1 0 001-1V3l-2-2zm-3 13H4V6h6v8zm3-3h-1V5a1 1 0 00-1-1H6V3h4l2 2v6z"/></svg>
+        文件
+      </div>
+      <div class="attach-menu-item" data-type="dir">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M14 3H7.5L6 1.5H2a1 1 0 00-1 1v11a1 1 0 001 1h12a1 1 0 001-1V4a1 1 0 00-1-1z"/></svg>
+        目录
+      </div>
+    `;
+    menuEl.addEventListener('click', async (ev) => {
+      const item = (ev.target as HTMLElement).closest('.attach-menu-item') as HTMLElement | null;
+      if (!item || !appState.activeTabId) return;
+      menuEl?.remove(); menuEl = null; menuOpen = false;
+      const type = item.dataset.type;
+      const p = type === 'dir' ? await api.selectDirectory() : await api.selectFile();
+      if (p) api.writeTerminal(appState.activeTabId, p);
+    });
+    document.body.appendChild(menuEl);
+    menuOpen = true;
+    attachBtn.classList.add('menu-open');
+  });
+  document.addEventListener('click', () => { closeAttach(); });
+})();
 
 // Backend events — auto-send notepad blocks when Claude is waiting
 api.onTabStatusChanged((tabId, status) => {
+  const prevStatus = appState.tabs.get(tabId)?.status;
   appState.setStatus(tabId, status);
+
+  // Style user input: bright green text + subtle gray background when waiting for input
+  const view = terminalViews.get(tabId);
+  if (view) {
+    if (status === 'waiting') {
+      // ESC[38;2;80;220;100m = bright green fg, ESC[48;2;40;40;40m = dark gray bg
+      view.terminal.write('\x1b[38;2;80;220;100m\x1b[48;2;40;40;40m');
+    } else if (prevStatus === 'waiting' && status !== 'waiting') {
+      // Reset colors when user submits input
+      view.terminal.write('\x1b[0m');
+    }
+  }
+
   // Auto-submit first notepad block when tab becomes "waiting" (Claude waiting for input)
   if (status === 'waiting') {
     const tab = appState.tabs.get(tabId);
@@ -460,7 +537,6 @@ api.onTabStatusChanged((tabId, status) => {
     }
   }
 });
-api.onSidebarEntryAdded((tabId, entry) => appState.addSidebarEntry(tabId, entry));
 api.onTabAutoRenamed((tabId, name) => {
   const tab = appState.tabs.get(tabId);
   if (tab && tab.title.startsWith('Terminal ')) {
@@ -499,7 +575,6 @@ function toggleCommandPalette() {
     { label: '新建标签', detail: '⌘T', action: () => createTab() },
     { label: '关闭标签', detail: '⌘W', action: () => { if (appState.activeTabId) closeTab(appState.activeTabId); } },
     { label: '终端搜索', detail: '⌘F', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.toggleSearch(); } } },
-    { label: '切换侧边栏', action: () => setSidebarVisible(sidebarEl.classList.contains('hidden')) },
     { label: '切换笔记面板', action: () => setNotepadVisible(notepadEl.classList.contains('hidden')) },
     { label: '清空终端', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.clear(); } } },
   ];
@@ -573,27 +648,45 @@ function applyThemeToAll(index: number) {
   const root = document.documentElement;
   root.style.setProperty('--bg-primary', t.uiBg);
   if (t.light) {
-    const isWhite = t.name === 'Pure White';
-    root.style.setProperty('--bg-secondary', isWhite ? '#f5f5f5' : '#eee8d5');
-    root.style.setProperty('--bg-tertiary', isWhite ? '#ebebeb' : '#e6dfcc');
-    root.style.setProperty('--bg-hover', isWhite ? '#e0e0e0' : '#d6ceb5');
-    root.style.setProperty('--text-primary', isWhite ? '#1a1a1a' : '#073642');
-    root.style.setProperty('--text-secondary', isWhite ? '#555555' : '#586e75');
-    root.style.setProperty('--text-muted', isWhite ? '#999999' : '#93a1a1');
-    root.style.setProperty('--border-color', isWhite ? '#d4d4d4' : '#d3cbb7');
-    root.style.setProperty('--tab-active-bg', t.uiBg);
-    root.style.setProperty('--tab-inactive-bg', isWhite ? '#f5f5f5' : '#eee8d5');
+    const bg = t.uiBg;
+    const r = parseInt(bg.slice(1,3),16), g = parseInt(bg.slice(3,5),16), b = parseInt(bg.slice(5,7),16);
+    const adjust = (amt: number) => '#' + [r,g,b].map(c => Math.max(0, Math.min(255, c - amt)).toString(16).padStart(2,'0')).join('');
+    const lighten = (amt: number) => '#' + [r,g,b].map(c => Math.min(255, c + amt).toString(16).padStart(2,'0')).join('');
+    root.style.setProperty('--bg-secondary', adjust(10));
+    root.style.setProperty('--bg-tertiary', adjust(18));
+    root.style.setProperty('--bg-hover', adjust(25));
+    root.style.setProperty('--text-primary', '#1a1a1a');
+    root.style.setProperty('--text-secondary', '#444444');
+    root.style.setProperty('--text-muted', '#777777');
+    root.style.setProperty('--border-color', adjust(20));
+    root.style.setProperty('--tab-active-bg', bg);
+    root.style.setProperty('--tab-inactive-bg', adjust(8));
+    root.style.setProperty('--accent-green', '#006400');
+    root.style.setProperty('--accent-red', '#c41a16');
+    root.style.setProperty('--accent-blue', '#003d99');
+    root.style.setProperty('--accent-yellow', '#7a5b00');
   } else {
-    root.style.setProperty('--bg-secondary', '#252526');
-    root.style.setProperty('--bg-tertiary', '#2d2d2d');
-    root.style.setProperty('--bg-hover', '#3c3c3c');
+    // Derive UI colors from theme background
+    const bg = t.theme.background || t.uiBg;
+    const r = parseInt(bg.slice(1,3),16), g = parseInt(bg.slice(3,5),16), b = parseInt(bg.slice(5,7),16);
+    const lighten = (amt: number) => '#' + [r,g,b].map(c => Math.min(255, c + amt).toString(16).padStart(2,'0')).join('');
+    const darken = (amt: number) => '#' + [r,g,b].map(c => Math.max(0, c - amt).toString(16).padStart(2,'0')).join('');
+    root.style.setProperty('--bg-secondary', lighten(10));
+    root.style.setProperty('--bg-tertiary', lighten(18));
+    root.style.setProperty('--bg-hover', lighten(30));
     root.style.setProperty('--text-primary', '#cccccc');
     root.style.setProperty('--text-secondary', '#999999');
     root.style.setProperty('--text-muted', '#666666');
-    root.style.setProperty('--border-color', '#404040');
-    root.style.setProperty('--tab-active-bg', '#1e1e1e');
-    root.style.setProperty('--tab-inactive-bg', '#2d2d2d');
+    root.style.setProperty('--border-color', lighten(25));
+    root.style.setProperty('--tab-active-bg', bg);
+    root.style.setProperty('--tab-inactive-bg', lighten(12));
+    root.style.setProperty('--accent-green', '#4ec9b0');
+    root.style.setProperty('--accent-red', '#f14c4c');
+    root.style.setProperty('--accent-blue', '#569cd6');
+    root.style.setProperty('--accent-yellow', '#dcdcaa');
   }
+  // Update color-scheme for native scrollbar theming
+  document.documentElement.style.colorScheme = t.light ? 'light' : 'dark';
   const statusTheme = document.getElementById('status-theme');
   if (statusTheme) statusTheme.textContent = t.name;
 }

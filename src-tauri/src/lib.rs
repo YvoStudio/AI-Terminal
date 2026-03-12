@@ -40,6 +40,7 @@ pub fn run() {
             commands::get_claude_session_history,
             commands::delete_claude_session,
             commands::delete_history_entry,
+            commands::clear_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Terminal");
