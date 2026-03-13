@@ -148,8 +148,19 @@ export class TabBar {
         if (e.button !== 0) return;
         // Ignore if clicking close button or editing title
         if ((e.target as HTMLElement).closest('.tab-close') || (e.target as HTMLElement).closest('[contenteditable="true"]')) return;
+        e.preventDefault();
         const startX = e.clientX;
         let dragging = false;
+        const cleanup = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          document.removeEventListener('mouseleave', onLeave);
+          if (!dragging) return;
+          el.classList.remove('dragging');
+          document.body.classList.remove('tab-dragging');
+          this.tabListEl.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over-left', 'drag-over-right'));
+          this.dragTabId = null;
+        };
         const onMove = (ev: MouseEvent) => {
           if (!dragging && Math.abs(ev.clientX - startX) > 5) {
             dragging = true;
@@ -171,14 +182,9 @@ export class TabBar {
           });
         };
         const onUp = (ev: MouseEvent) => {
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          if (!dragging) return;
-          el.classList.remove('dragging');
-          document.body.classList.remove('tab-dragging');
+          if (!dragging) { cleanup(); return; }
           // Find drop target
           const tabs = Array.from(this.tabListEl.querySelectorAll('.tab'));
-          tabs.forEach(t => t.classList.remove('drag-over-left', 'drag-over-right'));
           for (const t of tabs) {
             if (t === el) continue;
             const rect = t.getBoundingClientRect();
@@ -196,10 +202,12 @@ export class TabBar {
               break;
             }
           }
-          this.dragTabId = null;
+          cleanup();
         };
+        const onLeave = () => cleanup();
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
+        document.addEventListener('mouseleave', onLeave);
       });
 
       this.tabListEl.appendChild(el);

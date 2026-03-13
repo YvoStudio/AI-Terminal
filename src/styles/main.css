@@ -66,9 +66,9 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 
 /* Terminal */
 #terminal-container { flex: 1; position: relative; background: var(--bg-primary); padding-top: 6px; padding-left: 4px; }
-.terminal-wrapper { position: absolute; top: 6px; left: 4px; right: 0; bottom: 0; display: none; }
+.terminal-wrapper { position: absolute; top: 6px; left: 4px; right: 0; bottom: 0; display: none; -webkit-app-region: no-drag; }
 .terminal-wrapper.visible { display: block; }
-.terminal-wrapper .xterm { height: 100%; }
+.terminal-wrapper .xterm { height: 100%; -webkit-app-region: no-drag; }
 .terminal-wrapper .xterm-viewport::-webkit-scrollbar { width: 8px; }
 .terminal-wrapper .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
 .terminal-wrapper .xterm-viewport::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
@@ -163,6 +163,14 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .tips-cmd { background: var(--bg-primary); padding: 3px 8px; border-radius: 3px; font-size: 12px; font-family: 'Cascadia Code', 'Consolas', monospace; color: var(--accent-green); cursor: pointer; user-select: all; white-space: nowrap; display: inline-block; margin-right: 6px; }
 .tips-key { background: var(--bg-hover); padding: 2px 6px; border-radius: 3px; font-size: 12px; font-family: 'Cascadia Code', 'Consolas', monospace; color: var(--text-primary); }
 .tips-section-hints .tips-item { color: var(--text-muted); font-style: italic; padding-left: 4px; }
+
+/* Font Settings in Tips Panel */
+.tips-settings { display: flex; gap: 16px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border-color); justify-content: flex-end; }
+.tips-setting-item { display: flex; align-items: center; gap: 8px; }
+.tips-setting-item label { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.tips-setting-item select { background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary); font-size: 12px; padding: 4px 8px; outline: none; cursor: pointer; }
+.tips-setting-item select:hover { border-color: var(--accent-blue); }
+.tips-setting-item select:focus { border-color: var(--accent-blue); }
 
 /* History Items */
 .history-item { padding: 8px 10px; border-radius: 5px; cursor: pointer; margin-bottom: 2px; position: relative; }

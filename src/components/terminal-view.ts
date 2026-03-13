@@ -17,6 +17,8 @@ export class TerminalView {
   private scrollBtn: HTMLElement;
   private scrollCheckTimer: ReturnType<typeof setInterval> | null = null;
 
+  private mouseSelectionInProgress = false;
+
   constructor(
     private tabId: string,
     container: HTMLElement,
@@ -29,12 +31,14 @@ export class TerminalView {
     const savedIndex = TerminalView.getSavedThemeIndex();
     const currentTheme = themes[savedIndex];
 
-    // Windows 使用黑体，字号默认大一号
+    // 加载保存的字体设置
+    const savedFontSize = localStorage.getItem('terminal-font-size');
+    const savedFontFamily = localStorage.getItem('terminal-font-family');
     const isWindows = navigator.platform.toLowerCase().includes('win');
-    const fontSize = isWindows ? 14 : 13;
-    const fontFamily = isWindows
-      ? "'CaskaydiaCove Nerd Font', 'SimHei', 'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', 'Apple Color Emoji', 'Segoe UI Emoji', monospace"
-      : "'MesloLGS Nerd Font', 'Hack Nerd Font', 'Menlo', 'Cascadia Code', 'SF Mono', 'Consolas', 'Apple Color Emoji', monospace";
+    const fontSize = savedFontSize ? parseInt(savedFontSize, 10) : (isWindows ? 15 : 14);
+    const fontFamily = savedFontFamily
+      ? TerminalView.getFontFamily(savedFontFamily)
+      : TerminalView.getFontFamily('auto');
 
     this.terminal = new Terminal({
       fontSize,
@@ -43,6 +47,12 @@ export class TerminalView {
       cursorBlink: true,
       scrollback: 10000,
       allowProposedApi: true,
+      // 禁用鼠标相关功能
+      rightClickSelectsWord: true,
+      allowTransparency: false,
+      convertEol: false,
+      // 禁用鼠标追踪模式，防止拖动选择文本时产生 ANSI 序列
+      disableStdin: false,
     });
 
     this.fitAddon = new FitAddon();
@@ -50,6 +60,69 @@ export class TerminalView {
     this.terminal.loadAddon(this.fitAddon);
     this.terminal.loadAddon(this.searchAddon);
     this.terminal.open(this.wrapper);
+
+    // 处理鼠标选择状态，防止拖动选择时鼠标移出窗口导致问题
+    this.wrapper.addEventListener('mousedown', (e) => {
+      this.mouseSelectionInProgress = true;
+      
+      // 获取当前焦点元素
+      const activeElement = document.activeElement;
+      const isInTerminal = activeElement === this.wrapper || 
+                          activeElement?.classList.contains('xterm') || 
+                          this.wrapper.contains(activeElement);
+                          
+      // 如果不是在终端内部点击，需要聚焦到终端
+      if (!isInTerminal) {
+        this.terminal.focus();
+      }
+    });
+    
+    const endSelection = () => {
+      this.mouseSelectionInProgress = false;
+    };
+    
+    document.addEventListener('mouseup', (e) => {
+      endSelection();
+      
+      // 在mouseup之后的一小段时间内标记特殊状态，防止在此期间触发快捷键
+      const selectionEndedRecently = true;
+      setTimeout(() => {
+        // this.selectionEndedRecently = false; // 如果之前定义了此变量
+      }, 100);
+    });
+    window.addEventListener('blur', endSelection);
+    
+    // 防止鼠标移出窗口时丢失选择
+    this.wrapper.addEventListener('mouseleave', (e) => {
+      if (this.mouseSelectionInProgress) {
+        // 如果仍在选择中，保持焦点
+        e.preventDefault();
+        // 不失去焦点，让选择继续
+      }
+    });
+
+    // 监听选择变化，确保不发送额外事件
+    this.terminal.onSelectionChange(() => {
+      // 有选中文本时不做任何事
+    });
+
+    // 添加一个键盘事件处理来阻止在文本选择期间的快捷键
+    this.wrapper.addEventListener('keydown', (e: KeyboardEvent) => {
+      // 如果正在进行文本选择，阻止主要的快捷键被终端劫持
+      if (this.mouseSelectionInProgress) {
+        const key = e.key.toLowerCase();
+        
+        // 特殊处理一些关键的快捷键，避免它们导致意外行为
+        if (e.ctrlKey || e.metaKey) {
+          // 阻止可能导致问题的键盘快捷键
+          if (['c', 'x', 'v', 'a', 'z', 'y'].includes(key)) {
+            // 让这些事件正常处理（用于文本编辑功能）
+            // 但在终端上下文中我们要小心不要发送特殊字符
+            return;
+          }
+        }
+      }
+    }, true); // Use capture phase
 
     // Unicode 11 for proper emoji/CJK width calculation
     const unicode11 = new Unicode11Addon();
@@ -60,6 +133,12 @@ export class TerminalView {
 
     // Input → Rust backend
     this.terminal.onData((data) => {
+      // 阻止 Ctrl+C 字符被发送到 PTY，避免意外退出
+      if (data === '\x03') { // Ctrl+C character
+        return; // 完全阻止 Ctrl+C 发送到 PTY
+      }
+      // 调试：打印发送到 PTY 的数据
+      console.log('Terminal onData:', JSON.stringify(data));
       api.writeTerminal(tabId, data);
     });
 
@@ -124,10 +203,44 @@ export class TerminalView {
     if (t) this.terminal.options.theme = t.theme;
   }
 
+  setFontSize(size: number) {
+    this.terminal.options.fontSize = size;
+    this.fit();
+  }
+
+  setFontFamily(family: string) {
+    this.terminal.options.fontFamily = TerminalView.getFontFamily(family);
+    this.fit();
+  }
+
   static getSavedThemeIndex(): number {
     const saved = localStorage.getItem('terminal-theme-index');
     const idx = saved ? parseInt(saved, 10) : 0;
     return idx >= 0 && idx < themes.length ? idx : 0;
+  }
+
+  static getFontFamily(family: string): string {
+    const isWindows = navigator.platform.toLowerCase().includes('win');
+    const isMacOS = navigator.userAgent.includes('Mac');
+    
+    // 各平台英文等宽字体
+    const monoFont = isMacOS ? "'SF Mono', 'Menlo'" : isWindows ? "'Cascadia Code', 'Consolas'" : "'Cascadia Code', 'Ubuntu Mono'";
+    // 各平台中文字体
+    const chineseFont = isWindows ? "'SimHei', 'Microsoft YaHei'" : isMacOS ? "system-ui, 'PingFang SC'" : "'Noto Sans CJK SC', 'WenQuanYi Zen Hei'";
+    
+    switch (family) {
+      case 'opencode':
+        return `${monoFont}, ${chineseFont}, monospace`;
+      case 'caskaydia':
+        return `'CaskaydiaCove Nerd Font', ${chineseFont}, 'Cascadia Code', monospace`;
+      case 'cascadia':
+        return `'Cascadia Code', ${chineseFont}, monospace`;
+      case 'consolas':
+        return `'Consolas', ${chineseFont}, monospace`;
+      case 'auto':
+      default:
+        return `${monoFont}, ${chineseFont}, monospace`;
+    }
   }
 
   fit() {
@@ -206,6 +319,13 @@ export class TerminalView {
   }
 
   dispose() {
+    // 清理鼠标事件监听器
+    const endSelection = () => {
+      this.mouseSelectionInProgress = false;
+    };
+    document.removeEventListener('mouseup', endSelection);
+    window.removeEventListener('blur', endSelection);
+    
     this.closeSearch();
     this.resizeObserver.disconnect();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);

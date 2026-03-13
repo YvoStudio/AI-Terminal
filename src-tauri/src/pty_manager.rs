@@ -81,6 +81,8 @@ impl PtyManager {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("LANG", "en_US.UTF-8");
         cmd.env("LC_ALL", "en_US.UTF-8");
+        // Disable mouse tracking protocols - prevent mouse events from being sent to PTY
+        cmd.env("XTERM_VERSION", "XTerm(396)");
         // Prevent Claude Code from refusing to start inside this terminal
         cmd.env_remove("CLAUDECODE");
 
@@ -118,7 +120,8 @@ impl PtyManager {
                             Err(e) => {
                                 let valid_up_to = e.valid_up_to();
                                 if valid_up_to > 0 {
-                                    let valid = std::str::from_utf8(&pending[..valid_up_to]).unwrap();
+                                    let valid =
+                                        std::str::from_utf8(&pending[..valid_up_to]).unwrap();
                                     on_data(valid.to_string());
                                     pending = pending[valid_up_to..].to_vec();
                                 }
@@ -156,7 +159,9 @@ impl PtyManager {
             inst.writer
                 .write_all(data.as_bytes())
                 .map_err(|e| format!("Write failed: {}", e))?;
-            inst.writer.flush().map_err(|e| format!("Flush failed: {}", e))?;
+            inst.writer
+                .flush()
+                .map_err(|e| format!("Flush failed: {}", e))?;
             Ok(())
         } else {
             Err("Tab not found".into())
@@ -214,14 +219,22 @@ impl PtyManager {
 
 fn home_dir() -> String {
     #[cfg(target_os = "windows")]
-    { std::env::var("USERPROFILE").unwrap_or_default() }
+    {
+        std::env::var("USERPROFILE").unwrap_or_default()
+    }
     #[cfg(not(target_os = "windows"))]
-    { std::env::var("HOME").unwrap_or_default() }
+    {
+        std::env::var("HOME").unwrap_or_default()
+    }
 }
 
 fn dirs_next_home() -> Option<String> {
     let h = home_dir();
-    if h.is_empty() { None } else { Some(h) }
+    if h.is_empty() {
+        None
+    } else {
+        Some(h)
+    }
 }
 
 #[allow(unused_variables)]

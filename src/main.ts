@@ -120,20 +120,24 @@ notepadBtn.addEventListener('click', () => setNotepadVisible(notepadEl.classList
 if (localStorage.getItem('notepad-hidden') !== '') setNotepadVisible(false);
 
 // Notepad resize
-(() => {
+  (() => {
   let startX = 0, startWidth = 0;
   notepadResizeEl.addEventListener('mousedown', (e) => {
+    e.preventDefault();
     startX = e.clientX; startWidth = notepadEl.offsetWidth;
+    const cleanup = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('mouseleave', cleanup);
+      refitActiveTerminal();
+    };
     const onMove = (e: MouseEvent) => {
       notepadEl.style.width = Math.max(200, Math.min(600, startWidth - (e.clientX - startX))) + 'px';
     };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      refitActiveTerminal();
-    };
+    const onUp = () => cleanup();
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
+    document.addEventListener('mouseleave', cleanup);
   });
 })();
 
@@ -220,6 +224,42 @@ document.getElementById('notepad-add-block')!.addEventListener('click', () => {
 });
 appState.subscribe(() => renderNoteBlocks());
 
+// 全局拖选状态
+let isSelectingText = false;
+let isMouseDown = false;
+
+// 监听文本选择状态和鼠标按下状态
+document.addEventListener('mousedown', (e) => {
+  isMouseDown = true;
+  
+  // 只处理在终端区域内的鼠标按下
+  const target = e.target as HTMLElement;
+  if (target.closest('.terminal-wrapper') || target.closest('.xterm')) {
+    isSelectingText = true;
+  }
+});
+
+document.addEventListener('mouseup', () => {
+  isMouseDown = false;
+  // 鼠标松开后，根据当前选择状态更新
+  const sel = window.getSelection();
+  isSelectingText = sel ? !sel.isCollapsed : false;
+});
+
+// 监听窗口失去焦点，确保清除鼠标按下状态
+window.addEventListener('blur', () => {
+  isMouseDown = false;
+  isSelectingText = false;
+});
+
+// 监听文本选择状态
+document.addEventListener('selectionchange', () => {
+  if (!isMouseDown) {
+    const sel = window.getSelection();
+    isSelectingText = sel ? !sel.isCollapsed : false;
+  }
+});
+
 // Tips panel
 (() => {
   const tipsBtn = document.getElementById('btn-tips')!;
@@ -301,13 +341,77 @@ appState.subscribe(() => renderNoteBlocks());
           </div>
         </div>
       </div>
+      <div class="tips-settings">
+        <div class="tips-setting-item">
+          <label>字号</label>
+          <select id="font-size-select">
+            <option value="12">12</option>
+            <option value="13">13</option>
+            <option value="14">14</option>
+            <option value="15">15</option>
+            <option value="16">16</option>
+            <option value="18">18</option>
+            <option value="20">20</option>
+          </select>
+        </div>
+        <div class="tips-setting-item">
+          <label>字体</label>
+          <select id="font-family-select">
+            <option value="auto">自动 (平台默认)</option>
+            <option value="opencode">OpenCode (SF Mono/Menlo)</option>
+            <option value="caskaydia">CaskaydiaCove (需安装)</option>
+            <option value="cascadia">Cascadia Code</option>
+            <option value="consolas">Consolas (Windows)</option>
+          </select>
+        </div>
+      </div>
     `;
     tipsEl.addEventListener('click', (e) => e.stopPropagation());
+    tipsEl.addEventListener('mousedown', (e) => e.stopPropagation());
     document.body.appendChild(tipsEl);
     tipsOpen = true;
+
+    // Load saved font settings
+    const savedFontSize = localStorage.getItem('terminal-font-size');
+    const savedFontFamily = localStorage.getItem('terminal-font-family');
+    if (savedFontSize) {
+      const fontSizeSelect = tipsEl.querySelector('#font-size-select') as HTMLSelectElement;
+      if (fontSizeSelect) fontSizeSelect.value = savedFontSize;
+    }
+    if (savedFontFamily) {
+      const fontFamilySelect = tipsEl.querySelector('#font-family-select') as HTMLSelectElement;
+      if (fontFamilySelect) fontFamilySelect.value = savedFontFamily;
+    }
+
+    // Font size change handler
+    const fontSizeSelect = tipsEl.querySelector('#font-size-select') as HTMLSelectElement;
+    if (fontSizeSelect) {
+      fontSizeSelect.addEventListener('change', () => {
+        const size = parseInt(fontSizeSelect.value, 10);
+        localStorage.setItem('terminal-font-size', fontSizeSelect.value);
+        terminalViews.forEach(view => view.setFontSize(size));
+      });
+    }
+
+    // Font family change handler
+    const fontFamilySelect = tipsEl.querySelector('#font-family-select') as HTMLSelectElement;
+    if (fontFamilySelect) {
+      fontFamilySelect.addEventListener('change', () => {
+        localStorage.setItem('terminal-font-family', fontFamilySelect.value);
+        terminalViews.forEach(view => view.setFontFamily(fontFamilySelect.value));
+      });
+    }
   });
-  document.addEventListener('click', () => { if (tipsOpen && tipsEl) { tipsEl.remove(); tipsEl = null; tipsOpen = false; } });
-})();
+  document.addEventListener('click', (e) => {
+    if (!tipsOpen || !tipsEl) return;
+    // 如果有选中文本或正在拖动鼠标，不关闭 Tips 面板
+    if (isSelectingText || isMouseDown) return;
+    if (tipsEl.contains(e.target as Node)) return;
+    tipsEl.remove();
+    tipsEl = null;
+    tipsOpen = false;
+  });
+})();;;
 
 // Shared panel close helpers (so attach & history can dismiss each other)
 let _closeAttachMenu: (() => void) | null = null;
@@ -543,6 +647,16 @@ api.onClaudeDetected((tabId, cwd) => {
 
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
+  const activeElement = document.activeElement;
+  const isInputElement = activeElement?.tagName === 'INPUT' || 
+                        activeElement?.tagName === 'TEXTAREA' ||
+                        (activeElement as HTMLElement)?.contentEditable === 'true';
+                        
+  // 如果是输入元素，则不要处理快捷键
+  if (isInputElement) {
+    return;
+  }
+  
   const isCtrl = e.ctrlKey || e.metaKey;
   if (isCtrl && e.key === 't') { e.preventDefault(); createTab(); }
   else if (isCtrl && e.key === 'w') { e.preventDefault(); if (appState.activeTabId) closeTab(appState.activeTabId); }

@@ -15,14 +15,26 @@ npm run tauri:dev        # Full Tauri dev mode (frontend + backend) — use this
 npm run tauri:build      # Production build (platform-specific app)
 ```
 
-**Note:** `tauri:check` and `tauri:build` in package.json have hardcoded Windows paths. On macOS/Linux, use Cargo directly:
+**Note:** `tauri:check` and `tauri:build` in package.json have hardcoded Windows paths. On macOS/Linux, use Tauri CLI directly:
 
 ```bash
-cd src-tauri && cargo check    # Type-check Rust code
+npx @tauri-apps/cli dev        # Start dev server
+npx @tauri-apps/cli build      # Production build (creates .msi/.dmg/.app)
+cd src-tauri && cargo check    # Type-check Rust only
 cd src-tauri && cargo build    # Build Rust backend only
 ```
 
 No test suite or linter is configured. Rust backend is in `src-tauri/` and uses Cargo. Frontend builds to `/dist` and is embedded by Tauri.
+
+## Quick Reference
+
+| Task | Command |
+|------|---------|
+| Start dev server | `npm run tauri:dev` |
+| Build for production | `npx @tauri-apps/cli build` |
+| Check Rust types | `cd src-tauri && cargo check` |
+| Regenerate icons | `powershell -File scripts/gen-icon.ps1` |
+| Installers output | `src-tauri/target/release/bundle/{msi,nsis}/` |
 
 ## Architecture
 
@@ -70,13 +82,28 @@ No test suite or linter is configured. Rust backend is in `src-tauri/` and uses 
 
 ## Configuration
 
-- Tauri config: `src-tauri/tauri.conf.json` (window 1400x900, min 800x500, dev port 1420, overlay title bar, transparent false)
+- Tauri config: `src-tauri/tauri.conf.json` (window 1400x900, min 800x500, **dev port 1450**, overlay title bar, transparent false)
 - TypeScript: strict mode, ES2021 target
 - Vite: port 1420 with HMR
+
+## Roadmap (from docs/design-notes.md)
+
+**P1 — High Priority:**
+- Notepad "to send" / "sent" tabs with drag-to-reorder
+- `::` inline command palette (triggered by typing `::` in terminal)
+
+**P2 — Medium Priority:**
+- Split-screen support (drag tabs to edges)
+- Prompt template library
+
+**P3 — Future:**
+- Workspaces (save/restore groups of tabs + notepad)
+- Multi-window (drag tabs out as separate windows)
+- Session persistence (save terminal scrollback across restarts)
 
 ## Platform-Specific Notes
 
 - **PowerShell PTY fix**: Disables PSReadLine prediction features that cause cursor rendering issues in PTY (`Set-PSReadLineOption -PredictionSource None`)
 - **macOS**: Dock icon bounce + red badge counter for background task completion
 - **Windows**: Taskbar flash notification; cmd/powershell/WSL shell switching supported
-- **Icons**: Generated via `scripts/gen-icon.ps1` (GDI+ PNG-in-ICO, sizes 256/128/64/48/32/16)
+- **Icons**: Generated via `scripts/gen-icon.ps1` (GDI+ PNG-in-ICO, sizes 256/128/64/48/32/16) and `scripts/gen-png.ps1`

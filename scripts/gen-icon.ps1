@@ -3,71 +3,97 @@ Add-Type -AssemblyName System.Drawing
 function New-IconBitmap([int]$Size) {
     $bmp = New-Object System.Drawing.Bitmap($Size, $Size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
     $g.Clear([System.Drawing.Color]::Transparent)
 
-    # Full-bleed background #1a1a2e (slightly lighter so edges are visible)
-    $g.FillRectangle(
-        (New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 26, 26, 46))),
-        0, 0, $Size, $Size)
+    $bgBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 26, 26, 46))
+    $g.FillRectangle($bgBrush, 0, 0, $Size, $Size)
 
     $green = [System.Drawing.Color]::FromArgb(255, 80, 250, 123)
+    $lightGreen = [System.Drawing.Color]::FromArgb(230, 80, 250, 123)
 
     if ($Size -ge 32) {
-        [float]$thick = if ($Size -le 48) { $Size * 0.15 } else { $Size * 0.12 }
-        $pen = New-Object System.Drawing.Pen($green, $thick)
-        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-        $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
+        [float]$thick = if ($Size -le 48) { $Size * 0.22 } else { $Size * 0.18 }
+        $greenBrush = New-Object System.Drawing.SolidBrush($green)
 
-        [float]$midX = $Size * 0.58
+        [float]$midX = $Size * 0.70
         [float]$midY = $Size * 0.50
-        $g.DrawLine($pen, [float]($Size*0.10), [float]($Size*0.15), $midX, $midY)
-        $g.DrawLine($pen, $midX, $midY, [float]($Size*0.10), [float]($Size*0.85))
+        [float]$startX = $Size * 0.02
+        [float]$endY = $Size * 0.95
+        [float]$y1 = $Size * 0.05
 
-        $cbBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(230, 80, 250, 123))
-        $g.FillRectangle($cbBrush,
-            [float]($Size*0.64), [float]($Size*0.32),
-            [float]($Size*0.20), [float]($Size*0.36))
+        for ($i = 0; $i -le 20; $i++) {
+            [float]$t = $i / 20.0
+            [float]$x = $startX + ($midX - $startX) * $t
+            [float]$y = $y1 + ($midY - $y1) * $t
+            $g.FillEllipse($greenBrush, $x - $thick/2, $y - $thick/2, $thick, $thick)
+        }
+
+        for ($i = 0; $i -le 20; $i++) {
+            [float]$t = $i / 20.0
+            [float]$x = $midX + ($startX - $midX) * $t
+            [float]$y = $midY + ($endY - $midY) * $t
+            $g.FillEllipse($greenBrush, $x - $thick/2, $y - $thick/2, $thick, $thick)
+        }
+
+        [float]$cbX = $Size * 0.72
+        [float]$cbY = $Size * 0.22
+        [float]$cbW = $Size * 0.26
+        [float]$cbH = $Size * 0.52
+        $cbBrush = New-Object System.Drawing.SolidBrush($lightGreen)
+        $g.FillRectangle($cbBrush, $cbX, $cbY, $cbW, $cbH)
 
         if ($Size -ge 128) {
-            $scanPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(18, 80, 250, 123), 1.0)
+            $scanBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(18, 80, 250, 123))
             [int]$step = [Math]::Max(1, [int]($Size * 0.045))
             for ([int]$sy = 0; $sy -lt $Size; $sy += $step) {
-                $g.DrawLine($scanPen, 0, $sy, $Size, $sy)
+                $g.FillRectangle($scanBrush, 0, $sy, $Size, 1)
             }
 
-            # Neural nodes
-            [float]$n0x = $Size*0.75; [float]$n0y = $Size*0.72; [float]$n0r = $Size*0.055
-            [float]$n1x = $Size*0.87; [float]$n1y = $Size*0.64; [float]$n1r = $Size*0.038
-            [float]$n2x = $Size*0.89; [float]$n2y = $Size*0.81; [float]$n2r = $Size*0.044
-            [float]$n3x = $Size*0.96; [float]$n3y = $Size*0.72; [float]$n3r = $Size*0.028
+            [float]$n0x = $Size*0.82; [float]$n0y = $Size*0.70; [float]$n0r = $Size*0.07
+            [float]$n1x = $Size*0.92; [float]$n1y = $Size*0.55; [float]$n1r = $Size*0.05
+            [float]$n2x = $Size*0.94; [float]$n2y = $Size*0.78; [float]$n2r = $Size*0.055
+            [float]$n3x = $Size*0.98; [float]$n3y = $Size*0.66; [float]$n3r = $Size*0.04
 
-            $nodePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(170, 80, 250, 123), ($Size * 0.013))
-            $linePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(90,  80, 250, 123), ($Size * 0.008))
-            $g.DrawLine($linePen, $n0x, $n0y, $n1x, $n1y)
-            $g.DrawLine($linePen, $n0x, $n0y, $n2x, $n2y)
-            $g.DrawLine($linePen, $n1x, $n1y, $n3x, $n3y)
-            $g.DrawLine($linePen, $n2x, $n2y, $n3x, $n3y)
-            $g.DrawEllipse($nodePen, $n0x-$n0r, $n0y-$n0r, $n0r*2, $n0r*2)
-            $g.DrawEllipse($nodePen, $n1x-$n1r, $n1y-$n1r, $n1r*2, $n1r*2)
-            $g.DrawEllipse($nodePen, $n2x-$n2r, $n2y-$n2r, $n2r*2, $n2r*2)
-            $g.DrawEllipse($nodePen, $n3x-$n3r, $n3y-$n3r, $n3r*2, $n3r*2)
+            $lineBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(90, 80, 250, 123))
+            [float]$lineThick = $Size * 0.008
+            for ($i = 0; $i -le 15; $i++) {
+                [float]$t = $i / 15.0
+                $g.FillEllipse($lineBrush, $n0x + ($n1x-$n0x)*$t - $lineThick/2, $n0y + ($n1y-$n0y)*$t - $lineThick/2, $lineThick, $lineThick)
+                $g.FillEllipse($lineBrush, $n0x + ($n2x-$n0x)*$t - $lineThick/2, $n0y + ($n2y-$n0y)*$t - $lineThick/2, $lineThick, $lineThick)
+                $g.FillEllipse($lineBrush, $n1x + ($n3x-$n1x)*$t - $lineThick/2, $n1y + ($n3y-$n1y)*$t - $lineThick/2, $lineThick, $lineThick)
+                $g.FillEllipse($lineBrush, $n2x + ($n3x-$n2x)*$t - $lineThick/2, $n2y + ($n3y-$n2y)*$t - $lineThick/2, $lineThick, $lineThick)
+            }
+
+            $ringBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(170, 80, 250, 123))
+            $g.FillEllipse($ringBrush, $n0x-$n0r, $n0y-$n0r, $n0r*2, $n0r*2)
+            $g.FillEllipse($ringBrush, $n1x-$n1r, $n1y-$n1r, $n1r*2, $n1r*2)
+            $g.FillEllipse($ringBrush, $n2x-$n2r, $n2y-$n2r, $n2r*2, $n2r*2)
+            $g.FillEllipse($ringBrush, $n3x-$n3r, $n3y-$n3r, $n3r*2, $n3r*2)
         }
     } else {
-        # 16x16 minimal chevron
-        $pen2 = New-Object System.Drawing.Pen($green, 2.2)
-        $pen2.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-        $pen2.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
-        $g.DrawLine($pen2, [float]3.5, [float]3.0,  [float]9.5, [float]8.0)
-        $g.DrawLine($pen2, [float]9.5, [float]8.0,  [float]3.5, [float]13.0)
-        $g.FillRectangle(
-            (New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(220, 80, 250, 123))),
-            [float]10, [float]5, [float]3, [float]6)
+        [float]$thick = 3.0
+        $penBrush = New-Object System.Drawing.SolidBrush($green)
+
+        for ($i = 0; $i -le 10; $i++) {
+            [float]$t = $i / 10.0
+            [float]$x = 1.5 + (11.0 - 1.5) * $t
+            [float]$y = 1.0 + (8.0 - 1.0) * $t
+            $g.FillEllipse($penBrush, $x - $thick/2, $y - $thick/2, $thick, $thick)
+        }
+        for ($i = 0; $i -le 10; $i++) {
+            [float]$t = $i / 10.0
+            [float]$x = 11.0 + (1.5 - 11.0) * $t
+            [float]$y = 8.0 + (15.0 - 8.0) * $t
+            $g.FillEllipse($penBrush, $x - $thick/2, $y - $thick/2, $thick, $thick)
+        }
+
+        $cbBrush = New-Object System.Drawing.SolidBrush($lightGreen)
+        $g.FillRectangle($cbBrush, 11.5, 4.0, 4.0, 8.0)
     }
 
     $g.Dispose()
-    # Return bitmap wrapped so pipeline doesn't dispose/unroll it
     $script:_lastBmp = $bmp
 }
 
@@ -80,7 +106,7 @@ function Get-PngBytes([System.Drawing.Bitmap]$bmp) {
 }
 
 function Write-Ico([string]$OutPath, [int[]]$Sizes) {
-    $pngs  = New-Object System.Collections.Generic.List[byte[]]
+    $pngs = New-Object System.Collections.Generic.List[byte[]]
     $szList = New-Object System.Collections.Generic.List[int]
 
     foreach ($sz in $Sizes) {
@@ -97,16 +123,14 @@ function Write-Ico([string]$OutPath, [int[]]$Sizes) {
         $szList.Add($sz)
     }
 
-    [int]$count  = $pngs.Count
+    [int]$count = $pngs.Count
     $stream = [System.IO.File]::Open($OutPath, [System.IO.FileMode]::Create)
-    $bw     = New-Object System.IO.BinaryWriter($stream)
+    $bw = New-Object System.IO.BinaryWriter($stream)
 
-    # ICO header
     $bw.Write([uint16]0)
     $bw.Write([uint16]1)
     $bw.Write([uint16]$count)
 
-    # Directory entries
     [int]$offset = 6 + $count * 16
     for ([int]$i = 0; $i -lt $count; $i++) {
         [int]$sz = $szList[$i]
@@ -123,7 +147,6 @@ function Write-Ico([string]$OutPath, [int[]]$Sizes) {
         $offset += $png.Length
     }
 
-    # Image data
     for ([int]$i = 0; $i -lt $count; $i++) {
         [byte[]]$png = $pngs[$i]
         $bw.Write($png, 0, $png.Length)

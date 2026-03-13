@@ -6,7 +6,7 @@ export default defineConfig({
   clearScreen: false,
   server: {
     port: 1450,
-    strictPort: true,
+    strictPort: false,
     host: host || false,
     hmr: host
       ? { protocol: "ws", host, port: 1421 }
