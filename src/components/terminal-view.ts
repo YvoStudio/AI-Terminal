@@ -5,6 +5,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { api } from '../api';
 import { themes } from './themes';
+import { isWindows, getDefaultFontSize, getPlatformFonts } from '../platform';
 
 export class TerminalView {
   terminal: Terminal;
@@ -34,8 +35,7 @@ export class TerminalView {
     // 加载保存的字体设置
     const savedFontSize = localStorage.getItem('terminal-font-size');
     const savedFontFamily = localStorage.getItem('terminal-font-family');
-    const isWindows = navigator.platform.toLowerCase().includes('win');
-    const fontSize = savedFontSize ? parseInt(savedFontSize, 10) : (isWindows ? 15 : 14);
+    const fontSize = savedFontSize ? parseInt(savedFontSize, 10) : getDefaultFontSize();
     const fontFamily = savedFontFamily
       ? TerminalView.getFontFamily(savedFontFamily)
       : TerminalView.getFontFamily('auto');
@@ -53,6 +53,9 @@ export class TerminalView {
       convertEol: false,
       // 禁用鼠标追踪模式，防止拖动选择文本时产生 ANSI 序列
       disableStdin: false,
+      // 禁用 xterm 内置的复制功能
+      macOptionIsMeta: false,
+      macOptionClickForcesSelection: true,
     });
 
     this.fitAddon = new FitAddon();
@@ -106,23 +109,35 @@ export class TerminalView {
       // 有选中文本时不做任何事
     });
 
-    // 添加一个键盘事件处理来阻止在文本选择期间的快捷键
+    // 在 wrapper 上监听 keydown，在 xterm 处理之前拦截 Ctrl+C
     this.wrapper.addEventListener('keydown', (e: KeyboardEvent) => {
-      // 如果正在进行文本选择，阻止主要的快捷键被终端劫持
-      if (this.mouseSelectionInProgress) {
+      // 检查是否有选中文本
+      const hasSelection = this.terminal.hasSelection();
+
+      // 如果正在进行鼠标选择或有选中文本，阻止可能导致问题的快捷键
+      if (this.mouseSelectionInProgress || hasSelection) {
         const key = e.key.toLowerCase();
-        
-        // 特殊处理一些关键的快捷键，避免它们导致意外行为
+
+        // 特殊处理 Ctrl/Cmd + 字母组合
         if (e.ctrlKey || e.metaKey) {
-          // 阻止可能导致问题的键盘快捷键
-          if (['c', 'x', 'v', 'a', 'z', 'y'].includes(key)) {
-            // 让这些事件正常处理（用于文本编辑功能）
-            // 但在终端上下文中我们要小心不要发送特殊字符
+          // Ctrl+C 是主要问题 - 在有选中文本时阻止它
+          if (key === 'c' && hasSelection) {
+            // 阻止事件传播到 xterm
+            e.preventDefault();
+            e.stopPropagation();
+            // 触发浏览器复制
+            navigator.clipboard.writeText(this.terminal.getSelection());
+            return;
+          }
+          // 阻止其他可能导致问题的快捷键
+          if (['x', 'v', 'a', 'z', 'y'].includes(key)) {
+            e.preventDefault();
+            e.stopPropagation();
             return;
           }
         }
       }
-    }, true); // Use capture phase
+    }, true); // Use capture phase - 在 xterm 之前处理
 
     // Unicode 11 for proper emoji/CJK width calculation
     const unicode11 = new Unicode11Addon();
@@ -131,14 +146,31 @@ export class TerminalView {
 
     // Using default DOM renderer for best emoji/Unicode support
 
+    // 拦截键盘事件，在 xterm 内部处理之前阻止 Ctrl+C
+    this.terminal.onKey(({ key, domEvent }) => {
+      // 检查是否有选中文本或正在选择
+      const hasSelection = this.terminal.hasSelection();
+      if (this.mouseSelectionInProgress || hasSelection) {
+        // 阻止 Ctrl+C
+        if (domEvent.ctrlKey && key.toLowerCase() === 'c') {
+          // 复制选中的文本
+          navigator.clipboard.writeText(this.terminal.getSelection());
+          // 阻止默认行为
+          return false;
+        }
+      }
+      // 其他键正常处理
+      return true;
+    });
+
     // Input → Rust backend
     this.terminal.onData((data) => {
-      // 阻止 Ctrl+C 字符被发送到 PTY，避免意外退出
-      if (data === '\x03') { // Ctrl+C character
-        return; // 完全阻止 Ctrl+C 发送到 PTY
+      // 始终过滤掉 Ctrl+C (\x03)，当有选中文本或鼠标选择进行中时
+      // 这样可以防止鼠标选择文本时误触发 Ctrl+C 中断信号
+      if (data === '\x03' && (this.mouseSelectionInProgress || this.terminal.hasSelection())) {
+        console.log('Blocked Ctrl+C during selection');
+        return;
       }
-      // 调试：打印发送到 PTY 的数据
-      console.log('Terminal onData:', JSON.stringify(data));
       api.writeTerminal(tabId, data);
     });
 
@@ -220,26 +252,18 @@ export class TerminalView {
   }
 
   static getFontFamily(family: string): string {
-    const isWindows = navigator.platform.toLowerCase().includes('win');
-    const isMacOS = navigator.userAgent.includes('Mac');
-    
-    // 各平台英文等宽字体
-    const monoFont = isMacOS ? "'SF Mono', 'Menlo'" : isWindows ? "'Cascadia Code', 'Consolas'" : "'Cascadia Code', 'Ubuntu Mono'";
-    // 各平台中文字体
-    const chineseFont = isWindows ? "'SimHei', 'Microsoft YaHei'" : isMacOS ? "system-ui, 'PingFang SC'" : "'Noto Sans CJK SC', 'WenQuanYi Zen Hei'";
+    const fonts = getPlatformFonts();
     
     switch (family) {
-      case 'opencode':
-        return `${monoFont}, ${chineseFont}, monospace`;
-      case 'caskaydia':
-        return `'CaskaydiaCove Nerd Font', ${chineseFont}, 'Cascadia Code', monospace`;
-      case 'cascadia':
-        return `'Cascadia Code', ${chineseFont}, monospace`;
       case 'consolas':
-        return `'Consolas', ${chineseFont}, monospace`;
+        return `'Consolas', ${fonts.chinese}, monospace`;
+      case 'courier':
+        return `'Courier New', ${fonts.chinese}, monospace`;
+      case 'lucida':
+        return `'Lucida Console', ${fonts.chinese}, monospace`;
       case 'auto':
       default:
-        return `${monoFont}, ${chineseFont}, monospace`;
+        return `${fonts.mono}, ${fonts.chinese}, monospace`;
     }
   }
 
