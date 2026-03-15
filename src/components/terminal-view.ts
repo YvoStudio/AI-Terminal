@@ -125,6 +125,38 @@ export class TerminalView {
         return;
       }
 
+      // Ctrl+V: 粘贴（包括图片）
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+        // 如果有选中文本，先处理粘贴逻辑
+        navigator.clipboard.read().then(async (items) => {
+          for (const item of items) {
+            if (item.type.startsWith('image/')) {
+              e.preventDefault();
+              e.stopPropagation();
+              const blob = await item.getType('image/png');
+              const reader = new FileReader();
+              reader.onload = async () => {
+                const dataUrl = reader.result as string;
+                try {
+                  const filePath = await api.saveClipboardImage(dataUrl);
+                  if (filePath) {
+                    api.writeTerminal(tabId, filePath);
+                  }
+                } catch (err) {
+                  console.error('Failed to save image:', err);
+                }
+              };
+              reader.readAsDataURL(blob);
+              return;
+            }
+          }
+          // 如果没有图片，让浏览器/系统处理文本粘贴
+        }).catch(() => {
+          // 读取剪贴板失败，让系统默认处理
+        });
+        return;
+      }
+
       // 如果正在进行鼠标选择或有选中文本，阻止可能导致问题的快捷键
       if (this.mouseSelectionInProgress || hasSelection) {
         const key = e.key.toLowerCase();
