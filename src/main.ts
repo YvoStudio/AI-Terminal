@@ -3,6 +3,7 @@ import { appState } from './components/app-state';
 import { TabBar } from './components/tab-bar';
 import { TerminalView } from './components/terminal-view';
 import { themes } from './components/themes';
+import { isMac, shouldUseNativeTitleBar } from './platform';
 
 const terminalViews = new Map<string, TerminalView>();
 const container = document.getElementById('terminal-container')!;
@@ -18,6 +19,25 @@ async function createTab(name?: string, noteBlocks?: Array<{ id: string; content
 
   const view = new TerminalView(tabId, container);
   terminalViews.set(tabId, view);
+
+  // 监听终端输出，每次有输出时立即更新 cwd
+  api.onTerminalOutput(tabId, () => {
+    if (appState.activeTabId === tabId) {
+      // 直接调用 updateCwdDisplay，使用后端事件保存的 cwd
+      const tab = appState.tabs.get(tabId);
+      if (tab && tab.cwd) {
+        const cwdEl = document.getElementById('status-cwd');
+        if (cwdEl) {
+          let shortCwd = tab.cwd;
+          shortCwd = shortCwd.replace(/^\/Users\/[^/]+/, '~');
+          shortCwd = shortCwd.replace(/^[A-Za-z]:\\Users\\[^\\]+\\/i, '~\\');
+          shortCwd = shortCwd.replace(/^[A-Za-z]:\\?/i, '');
+          cwdEl.textContent = shortCwd || '';
+          cwdEl.title = tab.cwd || '';
+        }
+      }
+    }
+  }).catch(console.error);
 
   switchToTab(tabId);
 
@@ -45,6 +65,39 @@ function switchToTab(tabId: string) {
   }
   appState.switchTab(tabId);
   api.clearBadge();
+  // 切换标签时更新 cwd 显示
+  updateCwdDisplay(tabId);
+}
+
+async function updateCwdDisplay(tabId: string, newCwd?: string) {
+  const cwdEl = document.getElementById('status-cwd');
+  if (!cwdEl) return;
+
+  let cwd: string;
+  if (newCwd) {
+    cwd = newCwd;
+  } else {
+    try {
+      cwd = await api.getTerminalCwd(tabId);
+    } catch {
+      cwd = '';
+    }
+  }
+
+  console.log('updateCwdDisplay: cwd =', cwd);
+  // 更新 appState 中的 cwd
+  appState.setCwd(tabId, cwd);
+  // 缩短显示：将长路径缩写为 ~ 开头
+  let shortCwd = cwd;
+  // Unix-style: /Users/xxx -> ~
+  shortCwd = shortCwd.replace(/^\/Users\/[^/]+/, '~');
+  // Windows-style: C:\Users\xxx -> ~\xxx
+  shortCwd = shortCwd.replace(/^[A-Za-z]:\\Users\\[^\\]+\\/i, '~\\');
+  // Windows-style: G:\ -> (show just the path after drive)
+  shortCwd = shortCwd.replace(/^[A-Za-z]:\\?/i, '');
+  console.log('updateCwdDisplay: short =', shortCwd);
+  cwdEl.textContent = shortCwd || '';
+  cwdEl.title = cwd || '';
 }
 
 async function switchShell(tabId: string, shell: 'cmd' | 'powershell' | 'wsl') {
@@ -63,19 +116,16 @@ async function switchShell(tabId: string, shell: 'cmd' | 'powershell' | 'wsl') {
 const tabBar = new TabBar(() => createTab(), closeTab, switchToTab, switchShell);
 void tabBar;
 
-// Platform-specific title bar
-const isMacOS = navigator.userAgent.includes('Mac');
+// Platform-specific setup
 const wc = document.getElementById('window-controls');
 
-if (isMacOS) {
-  // macOS: native traffic lights, hide custom controls
+if (shouldUseNativeTitleBar()) {
   if (wc) {
     wc.style.display = 'none';
     wc.remove();
   }
   document.getElementById('traffic-light-spacer')!.style.display = '';
 } else {
-  // Windows/Linux: custom window controls
   if (wc) wc.style.display = 'flex';
   document.getElementById('traffic-light-spacer')?.remove();
   document.getElementById('btn-minimize')?.addEventListener('click', () => api.minimizeWindow());
@@ -261,83 +311,117 @@ document.addEventListener('selectionchange', () => {
 });
 
 // Tips panel
-(() => {
-  const tipsBtn = document.getElementById('btn-tips')!;
-  let tipsOpen = false; let tipsEl: HTMLElement | null = null;
-  tipsBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (tipsOpen && tipsEl) { tipsEl.remove(); tipsEl = null; tipsOpen = false; return; }
-    tipsEl = document.createElement('div');
-    tipsEl.className = 'tips-panel tips-panel-wide';
-    tipsEl.innerHTML = `
+let _tipsEl: HTMLElement | null = null;
+let _tipsOpen = false;
+
+function toggleTipsPanel() {
+  if (_tipsOpen && _tipsEl) { _tipsEl.remove(); _tipsEl = null; _tipsOpen = false; return; }
+  if (_tipsEl) _tipsEl.remove();
+  _tipsEl = document.createElement('div');
+  _tipsEl.className = 'tips-panel tips-panel-wide';
+  _tipsEl.innerHTML = `
       <h3>使用技巧</h3>
       <div class="tips-columns">
         <div class="tips-column">
           <div class="tips-section">
             <div class="tips-section-title">底栏工具</div>
-            <div class="tips-item"><span class="tips-icon">📎</span>插入路径：选择文件或目录</div>
+            <div class="tips-item"><span class="tips-icon">📄</span>插入文件路径</div>
+            <div class="tips-item"><span class="tips-icon">📁</span>插入目录路径</div>
             <div class="tips-item"><span class="tips-icon">🕐</span>历史会话：恢复标签或会话</div>
             <div class="tips-item"><span class="tips-icon">🎨</span>主题切换：右下角主题名</div>
           </div>
           <div class="tips-section">
             <div class="tips-section-title">快捷键</div>
-            <div class="tips-item"><span class="tips-key">⌘T</span> 新建标签</div>
-            <div class="tips-item"><span class="tips-key">⌘W</span> 关闭标签</div>
-            <div class="tips-item"><span class="tips-key">⌘[</span> / <span class="tips-key">⌘]</span> 切换标签</div>
-            <div class="tips-item"><span class="tips-key">⌘1-9</span> 跳转到指定标签</div>
-            <div class="tips-item"><span class="tips-key">⌘F</span> 终端内搜索</div>
-            <div class="tips-item"><span class="tips-key">⌘K</span> 命令面板</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+T</span> 新建标签</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+W</span> 关闭标签</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+[</span> / <span class="tips-key">Ctrl+]</span> 切换标签</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+1-9</span> 跳转到指定标签</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+F</span> 终端内搜索</div>
+            <div class="tips-item"><span class="tips-key">Alt+K</span> 技巧面板</div>
           </div>
           <div class="tips-section">
             <div class="tips-section-title">标签 & Notepad</div>
             <div class="tips-item"><span class="tips-icon">✏️</span>双击标签名可重命名</div>
             <div class="tips-item"><span class="tips-icon">↔️</span>拖动标签可排序</div>
             <div class="tips-item"><span class="tips-icon" style="color:var(--accent-red)">●</span>红点 = 后台任务完成</div>
-            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-yellow)">●</span>黄点 = 等待输入</div>
+            <div class="tips-item"><span class="tips-icon">🎨</span>右键标签可改颜色</div>
             <div class="tips-item"><span class="tips-icon">+</span>Notepad 预写提示词</div>
-            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>发送文本块到终端</div>
-            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-blue)">⚡</span>等待时自动发送</div>
+            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>点击发送文本块</div>
           </div>
         </div>
-        <div class="tips-column">
-          <div class="tips-section">
-            <div class="tips-section-title">Claude Code 启动</div>
-            <div class="tips-item"><span class="tips-cmd">claude</span> 启动交互模式</div>
-            <div class="tips-item"><span class="tips-cmd">claude -r</span> 恢复最近会话</div>
-            <div class="tips-item"><span class="tips-cmd">claude -c</span> 继续上次对话</div>
-            <div class="tips-item"><span class="tips-cmd">claude -p "prompt"</span> 单次任务</div>
-            <div class="tips-item"><span class="tips-cmd">claude --dangerously-skip-permissions</span> 跳过权限</div>
-            <div class="tips-item"><span class="tips-cmd">cat file | claude -p "分析"</span> 管道输入</div>
+        <div class="tips-column tips-column-ai">
+          <div class="tips-tabs">
+            <button class="tips-tab active" data-tab="claude">Claude Code</button>
+            <button class="tips-tab" data-tab="opencode">OpenCode</button>
+            <button class="tips-tab" data-tab="codex">Codex</button>
           </div>
-          <div class="tips-section">
-            <div class="tips-section-title">交互命令</div>
-            <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
-            <div class="tips-item"><span class="tips-cmd">/clear</span> 清空对话</div>
-            <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型</div>
-            <div class="tips-item"><span class="tips-cmd">/cost</span> 查看用量</div>
-            <div class="tips-item"><span class="tips-cmd">/help</span> 所有命令</div>
-            <div class="tips-item"><span class="tips-cmd">/vim</span> Vim 模式</div>
+          <div class="tips-tab-content active" data-content="claude">
+            <div class="tips-section">
+              <div class="tips-section-title">启动命令</div>
+              <div class="tips-item"><span class="tips-cmd">claude</span> 启动交互模式</div>
+              <div class="tips-item"><span class="tips-cmd">claude -c</span> 继续上次对话</div>
+              <div class="tips-item"><span class="tips-cmd">claude -r</span> 恢复最近会话</div>
+              <div class="tips-item"><span class="tips-cmd">claude "prompt"</span> 单次任务</div>
+              <div class="tips-item"><span class="tips-cmd">claude --dangerously-skip-permissions</span> 跳过权限</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">交互命令</div>
+              <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
+              <div class="tips-item"><span class="tips-cmd">/clear</span> 清空对话</div>
+              <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型</div>
+              <div class="tips-item"><span class="tips-cmd">/cost</span> 查看用量</div>
+              <div class="tips-item"><span class="tips-cmd">/help</span> 所有命令</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">@ 命令</div>
+              <div class="tips-item"><span class="tips-cmd">@file</span> 文件内容加入上下文</div>
+              <div class="tips-item"><span class="tips-cmd">@dir</span> 目录结构加入上下文</div>
+              <div class="tips-item"><span class="tips-cmd">@url</span> 抓取网页内容</div>
+              <div class="tips-item"><span class="tips-cmd">@git</span> 引用 git 历史</div>
+              <div class="tips-item"><span class="tips-cmd">@terminal</span> 引用终端输出</div>
+            </div>
           </div>
-        </div>
-        <div class="tips-column">
-          <div class="tips-section">
-            <div class="tips-section-title">Claude @ 命令</div>
-            <div class="tips-item"><span class="tips-cmd">@file</span> 文件内容加入上下文</div>
-            <div class="tips-item"><span class="tips-cmd">@dir</span> 目录结构加入上下文</div>
-            <div class="tips-item"><span class="tips-cmd">@url</span> 抓取网页内容</div>
-            <div class="tips-item"><span class="tips-cmd">@git</span> 引用 git 历史</div>
-            <div class="tips-item"><span class="tips-cmd">@terminal</span> 引用终端输出</div>
+          <div class="tips-tab-content" data-content="opencode">
+            <div class="tips-section">
+              <div class="tips-section-title">启动命令</div>
+              <div class="tips-item"><span class="tips-cmd">opencode</span> 启动交互模式</div>
+              <div class="tips-item"><span class="tips-cmd">opencode -c</span> 继续上次会话</div>
+              <div class="tips-item"><span class="tips-cmd">opencode run "prompt"</span> 单次任务</div>
+              <div class="tips-item"><span class="tips-cmd">opencode --prompt "xxx"</span> 指定提示词</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">交互命令</div>
+              <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
+              <div class="tips-item"><span class="tips-cmd">/clear</span> 清空对话</div>
+              <div class="tips-item"><span class="tips-cmd">/help</span> 所有命令</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">@ 命令</div>
+              <div class="tips-item"><span class="tips-cmd">@file</span> 文件内容加入上下文</div>
+              <div class="tips-item"><span class="tips-cmd">@dir</span> 目录结构加入上下文</div>
+              <div class="tips-item"><span class="tips-cmd">@url</span> 抓取网页内容</div>
+            </div>
           </div>
-          <div class="tips-section">
-            <div class="tips-section-title">高级用法</div>
-            <div class="tips-item"><span class="tips-cmd">claude "任务" &</span> 后台运行</div>
-            <div class="tips-item"><span class="tips-cmd">CLAUDE_MODEL=opus claude</span> 指定模型</div>
-            <div class="tips-item"><span class="tips-cmd">claude config set model opus</span> 默认模型</div>
-            <div class="tips-item"><span class="tips-cmd">claude mcp add name cmd</span> 添加 MCP</div>
-          </div>
-          <div class="tips-section tips-section-hints">
-            <div class="tips-item">Notepad 预写长提示词，一键发送</div>
-            <div class="tips-item">多标签并行运行多个 Claude 任务</div>
+          <div class="tips-tab-content" data-content="codex">
+            <div class="tips-section">
+              <div class="tips-section-title">启动命令</div>
+              <div class="tips-item"><span class="tips-cmd">codex</span> 启动交互模式</div>
+              <div class="tips-item"><span class="tips-cmd">codex resume</span> 恢复上次会话</div>
+              <div class="tips-item"><span class="tips-cmd">codex "prompt"</span> 单次任务</div>
+              <div class="tips-item"><span class="tips-cmd">codex --full-auto</span> 全自动模式</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">交互命令</div>
+              <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
+              <div class="tips-item"><span class="tips-cmd">/clear</span> 清空对话</div>
+              <div class="tips-item"><span class="tips-cmd">/help</span> 所有命令</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">@ 命令</div>
+              <div class="tips-item"><span class="tips-cmd">@file</span> 文件内容加入上下文</div>
+              <div class="tips-item"><span class="tips-cmd">@dir</span> 目录结构加入上下文</div>
+              <div class="tips-item"><span class="tips-cmd">@url</span> 抓取网页内容</div>
+            </div>
           </div>
         </div>
       </div>
@@ -358,63 +442,101 @@ document.addEventListener('selectionchange', () => {
           <label>字体</label>
           <select id="font-family-select">
             <option value="auto">自动 (平台默认)</option>
-            <option value="opencode">OpenCode (SF Mono/Menlo)</option>
-            <option value="caskaydia">CaskaydiaCove (需安装)</option>
-            <option value="cascadia">Cascadia Code</option>
-            <option value="consolas">Consolas (Windows)</option>
+            <option value="consolas">Consolas (推荐)</option>
+            <option value="courier">Courier New</option>
+            <option value="lucida">Lucida Console</option>
           </select>
         </div>
       </div>
     `;
-    tipsEl.addEventListener('click', (e) => e.stopPropagation());
-    tipsEl.addEventListener('mousedown', (e) => e.stopPropagation());
-    document.body.appendChild(tipsEl);
-    tipsOpen = true;
+  _tipsEl.addEventListener('click', (e) => e.stopPropagation());
+  _tipsEl.addEventListener('mousedown', (e) => e.stopPropagation());
+  document.body.appendChild(_tipsEl);
+  _tipsOpen = true;
 
-    // Load saved font settings
-    const savedFontSize = localStorage.getItem('terminal-font-size');
-    const savedFontFamily = localStorage.getItem('terminal-font-family');
-    if (savedFontSize) {
-      const fontSizeSelect = tipsEl.querySelector('#font-size-select') as HTMLSelectElement;
-      if (fontSizeSelect) fontSizeSelect.value = savedFontSize;
-    }
-    if (savedFontFamily) {
-      const fontFamilySelect = tipsEl.querySelector('#font-family-select') as HTMLSelectElement;
-      if (fontFamilySelect) fontFamilySelect.value = savedFontFamily;
-    }
-
-    // Font size change handler
-    const fontSizeSelect = tipsEl.querySelector('#font-size-select') as HTMLSelectElement;
-    if (fontSizeSelect) {
-      fontSizeSelect.addEventListener('change', () => {
-        const size = parseInt(fontSizeSelect.value, 10);
-        localStorage.setItem('terminal-font-size', fontSizeSelect.value);
-        terminalViews.forEach(view => view.setFontSize(size));
+  // Tab switching logic
+  const tabs = _tipsEl.querySelectorAll('.tips-tab');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      const tabName = (tab as HTMLElement).dataset.tab;
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      _tipsEl!.querySelectorAll('.tips-tab-content').forEach(content => {
+        content.classList.toggle('active', (content as HTMLElement).dataset.content === tabName);
       });
-    }
-
-    // Font family change handler
-    const fontFamilySelect = tipsEl.querySelector('#font-family-select') as HTMLSelectElement;
-    if (fontFamilySelect) {
-      fontFamilySelect.addEventListener('change', () => {
-        localStorage.setItem('terminal-font-family', fontFamilySelect.value);
-        terminalViews.forEach(view => view.setFontFamily(fontFamilySelect.value));
-      });
-    }
+    });
   });
-  document.addEventListener('click', (e) => {
-    if (!tipsOpen || !tipsEl) return;
-    // 如果有选中文本或正在拖动鼠标，不关闭 Tips 面板
-    if (isSelectingText || isMouseDown) return;
-    if (tipsEl.contains(e.target as Node)) return;
-    tipsEl.remove();
-    tipsEl = null;
-    tipsOpen = false;
-  });
-})();;;
 
-// Shared panel close helpers (so attach & history can dismiss each other)
-let _closeAttachMenu: (() => void) | null = null;
+  // Auto-switch to current AI tool tab
+  if (appState.activeTabId) {
+    const currentTab = appState.tabs.get(appState.activeTabId);
+    const aiTool = currentTab?.aiTool || '';
+    const tabMap: Record<string, string> = { claude: 'claude', opencode: 'opencode', codex: 'codex' };
+    const targetTab = tabMap[aiTool];
+    if (targetTab && _tipsEl) {
+      const targetTabBtn = _tipsEl.querySelector(`.tips-tab[data-tab="${targetTab}"]`) as HTMLElement;
+      const targetContent = _tipsEl.querySelector(`.tips-tab-content[data-content="${targetTab}"]`) as HTMLElement;
+      if (targetTabBtn && targetContent) {
+        tabs.forEach(t => t.classList.remove('active'));
+        targetTabBtn.classList.add('active');
+        _tipsEl.querySelectorAll('.tips-tab-content').forEach(c => c.classList.remove('active'));
+        targetContent.classList.add('active');
+      }
+    }
+  }
+
+  // Load saved font settings
+  const savedFontSize = localStorage.getItem('terminal-font-size');
+  const savedFontFamily = localStorage.getItem('terminal-font-family');
+  if (savedFontSize) {
+    const fontSizeSelect = _tipsEl.querySelector('#font-size-select') as HTMLSelectElement;
+    if (fontSizeSelect) fontSizeSelect.value = savedFontSize;
+  }
+  if (savedFontFamily) {
+    const fontFamilySelect = _tipsEl.querySelector('#font-family-select') as HTMLSelectElement;
+    if (fontFamilySelect) fontFamilySelect.value = savedFontFamily;
+  }
+
+  // Font size change handler
+  const fontSizeSelect = _tipsEl.querySelector('#font-size-select') as HTMLSelectElement;
+  if (fontSizeSelect) {
+    fontSizeSelect.addEventListener('change', () => {
+      const size = parseInt(fontSizeSelect.value, 10);
+      localStorage.setItem('terminal-font-size', fontSizeSelect.value);
+      terminalViews.forEach(view => view.setFontSize(size));
+    });
+  }
+
+  // Font family change handler
+  const fontFamilySelect = _tipsEl.querySelector('#font-family-select') as HTMLSelectElement;
+  if (fontFamilySelect) {
+    fontFamilySelect.addEventListener('change', () => {
+      localStorage.setItem('terminal-font-family', fontFamilySelect.value);
+      terminalViews.forEach(view => view.setFontFamily(fontFamilySelect.value));
+    });
+  }
+}
+
+// Bind tips button click
+(() => {
+  const tipsBtn = document.getElementById('btn-tips')!;
+  tipsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleTipsPanel();
+  });
+})();
+
+// Close tips panel on outside click
+document.addEventListener('click', (e) => {
+  if (!_tipsOpen || !_tipsEl) return;
+  if (isSelectingText || isMouseDown) return;
+  if (_tipsEl.contains(e.target as Node)) return;
+  _tipsEl.remove();
+  _tipsEl = null;
+  _tipsOpen = false;
+});;
+
+// Shared panel close helpers
 let _closeHistoryPanel: (() => void) | null = null;
 
 // History panel (unified: Claude sessions first, then plain history)
@@ -434,6 +556,7 @@ let _closeHistoryPanel: (() => void) | null = null;
     preview?: string;
     shell?: 'cmd' | 'powershell' | 'wsl';
     historyIndex?: number; // original index in history array for deletion
+    aiTool?: string;
   }
 
   let currentHistoryItems: UnifiedItem[] = [];
@@ -443,7 +566,6 @@ let _closeHistoryPanel: (() => void) | null = null;
   historyBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (historyOpen && historyEl) { closeHistory(); return; }
-    if (_closeAttachMenu) _closeAttachMenu();
 
     historyEl = document.createElement('div');
     historyEl.className = 'tips-panel';
@@ -452,33 +574,40 @@ let _closeHistoryPanel: (() => void) | null = null;
     historyEl.style.display = 'flex';
     historyEl.style.flexDirection = 'column';
     historyEl.style.paddingRight = '0';
-    historyEl.innerHTML = `<h3>历史会话</h3><div class="history-content"><div style="color:var(--text-muted);font-size:12px;padding:8px 0;">加载中...</div></div><button class="history-clear-btn">清空历史</button>`;
+    historyEl.innerHTML = `<h3>历史会话 <button class="history-clear-btn" style="float:right;font-size:12px;padding:2px 8px;">清空历史</button></h3><div class="history-content"><div style="color:var(--text-muted);font-size:12px;padding:8px 0;">加载中...</div></div>`;
     historyEl.addEventListener('click', (ev) => ev.stopPropagation());
     document.body.appendChild(historyEl);
     historyOpen = true;
-
-    // Clear all button
-    const clearBtn = historyEl.querySelector('.history-clear-btn')!;
-    clearBtn.addEventListener('click', async (ev) => {
-      ev.stopPropagation();
-      // Clear plain history
-      await api.clearHistory();
-      // Also delete all Claude sessions that were listed
-      for (const item of currentHistoryItems) {
-        if (item.type === 'session' && item.sessionId) {
-          await api.deleteClaudeSession(item.sessionId).catch(() => {});
-        }
-      }
-      currentHistoryItems = [];
-      const contentEl2 = historyEl!.querySelector('.history-content')!;
-      contentEl2.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px 0;">已清空</div>`;
-    });
 
     // Load both sources in parallel
     const [sessions, entries] = await Promise.all([
       api.listClaudeSessions().catch(() => []),
       api.loadHistory().catch(() => []),
     ]);
+
+    // Clear all button - set up AFTER data is loaded
+    const clearBtn = historyEl.querySelector('.history-clear-btn')!;
+    clearBtn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      console.log('Clearing history, sessions:', sessions.length);
+      // Clear plain history
+      await api.clearHistory();
+      // Also delete all loaded Claude sessions
+      let deletedCount = 0;
+      for (const s of sessions) {
+        if (s.session_id) {
+          console.log('Deleting session:', s.session_id);
+          await api.deleteClaudeSession(s.session_id)
+            .then(() => { deletedCount++; console.log('Deleted:', s.session_id); })
+            .catch((e) => console.error('Failed to delete:', s.session_id, e));
+        }
+      }
+      console.log('Deleted', deletedCount, 'sessions');
+      // Remove UI elements
+      const contentEl2 = historyEl!.querySelector('.history-content')!;
+      contentEl2.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px 0;">已清空 (${deletedCount}个会话)</div>`;
+      clearBtn.remove();
+    });
 
     // Build unified list
     const items: UnifiedItem[] = [];
@@ -510,6 +639,7 @@ let _closeHistoryPanel: (() => void) | null = null;
         time: new Date(h.timestamp),
         shell: h.shell,
         historyIndex: i,
+        aiTool: h.ai_tool || undefined,
       });
     });
 
@@ -529,17 +659,25 @@ let _closeHistoryPanel: (() => void) | null = null;
     for (const item of items) {
       const el = document.createElement('div');
       el.className = 'history-item';
-      const shortCwd = item.cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^C:\\Users\\[^\\]+/, '~');
+      // Only shorten paths for home directory, show full path otherwise
+      let shortCwd = item.cwd;
+      if (item.cwd.startsWith('C:\\Users\\') || item.cwd.startsWith('/Users/')) {
+        shortCwd = item.cwd.replace(/^C:\\Users\\[^\\]+/, '~').replace(/^\/Users\/[^/]+/, '~');
+      }
       const timeStr = `${item.time.getMonth()+1}/${item.time.getDate()} ${item.time.getHours().toString().padStart(2,'0')}:${item.time.getMinutes().toString().padStart(2,'0')}`;
 
       const badge = item.type === 'session'
         ? `<span class="history-badge-resume">resume</span>`
         : '';
+      // AI tool badge for history items
+      const aiBadge = item.aiTool
+        ? `<span class="history-badge-ai">${escapeHtml(item.aiTool)}</span>`
+        : '';
       const previewHtml = item.preview
         ? `<div class="session-preview">${escapeHtml(item.preview)}</div>`
         : '';
 
-      el.innerHTML = `<div class="history-item-name">${badge}${escapeHtml(item.name)}</div><div class="history-item-cwd">${escapeHtml(shortCwd)}</div>${previewHtml}<div class="history-item-time">${timeStr}</div>`;
+      el.innerHTML = `<div class="history-item-name">${badge}${aiBadge}${escapeHtml(item.name)}</div><div class="history-item-cwd">${escapeHtml(shortCwd)}</div>${previewHtml}<div class="history-item-time">${timeStr}</div>`;
 
       // Delete button
       const delBtn = document.createElement('button');
@@ -557,13 +695,25 @@ let _closeHistoryPanel: (() => void) | null = null;
       });
       el.appendChild(delBtn);
 
-      el.addEventListener('click', async () => {
+      el.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        console.log('[History Click] type:', item.type, 'cwd:', item.cwd, 'name:', item.name, 'aiTool:', item.aiTool);
         if (item.type === 'session') {
+          console.log('[History Click] Creating session tab:', item.slug, item.cwd, 'sessionId:', item.sessionId);
           const tabId = await createTab(`↻ ${item.slug}`, undefined, item.cwd || undefined);
+          console.log('[History Click] Created tab:', tabId);
           setTimeout(() => api.writeTerminal(tabId, `claude --resume ${item.sessionId}\n`), 500);
+          switchToTab(tabId);
         } else {
-          const tabId = await createTab(item.name, undefined, item.cwd);
+          console.log('[History Click] Creating history tab:', item.name, item.cwd, item.shell, 'aiTool:', item.aiTool);
+          const tabId = await createTab(item.name, undefined, item.cwd || undefined);
+          console.log('[History Click] Created tab:', tabId, 'shell:', item.shell);
           if (item.shell && item.shell !== 'cmd') await switchShell(tabId, item.shell);
+          // Auto-start AI tool if saved
+          if (item.aiTool === 'claude') {
+            setTimeout(() => api.writeTerminal(tabId, 'claude\n'), 500);
+          }
+          switchToTab(tabId);
         }
         historyEl?.remove(); historyEl = null; historyOpen = false;
       });
@@ -573,45 +723,22 @@ let _closeHistoryPanel: (() => void) | null = null;
   document.addEventListener('click', () => { closeHistory(); });
 })();
 
-// Attach button — file/dir picker menu
+// File and directory buttons
 (() => {
-  const attachBtn = document.getElementById('btn-attach')!;
-  let menuOpen = false;
-  let menuEl: HTMLElement | null = null;
+  const fileBtn = document.getElementById('btn-file')!;
+  const dirBtn = document.getElementById('btn-dir')!;
 
-  function closeAttach() { if (menuOpen && menuEl) { menuEl.remove(); menuEl = null; menuOpen = false; attachBtn.classList.remove('menu-open'); } }
-  _closeAttachMenu = closeAttach;
-
-  attachBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (menuOpen && menuEl) { closeAttach(); return; }
-    if (_closeHistoryPanel) _closeHistoryPanel();
-
-    menuEl = document.createElement('div');
-    menuEl.className = 'attach-menu';
-    menuEl.innerHTML = `
-      <div class="attach-menu-item" data-type="file">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13 1H5a1 1 0 00-1 1v2H3a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1v-2h1a1 1 0 001-1V3l-2-2zm-3 13H4V6h6v8zm3-3h-1V5a1 1 0 00-1-1H6V3h4l2 2v6z"/></svg>
-        文件
-      </div>
-      <div class="attach-menu-item" data-type="dir">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M14 3H7.5L6 1.5H2a1 1 0 00-1 1v11a1 1 0 001 1h12a1 1 0 001-1V4a1 1 0 00-1-1z"/></svg>
-        目录
-      </div>
-    `;
-    menuEl.addEventListener('click', async (ev) => {
-      const item = (ev.target as HTMLElement).closest('.attach-menu-item') as HTMLElement | null;
-      if (!item || !appState.activeTabId) return;
-      menuEl?.remove(); menuEl = null; menuOpen = false;
-      const type = item.dataset.type;
-      const p = type === 'dir' ? await api.selectDirectory() : await api.selectFile();
-      if (p) api.writeTerminal(appState.activeTabId, p);
-    });
-    document.body.appendChild(menuEl);
-    menuOpen = true;
-    attachBtn.classList.add('menu-open');
+  fileBtn.addEventListener('click', async () => {
+    if (!appState.activeTabId) return;
+    const p = await api.selectFile();
+    if (p) api.writeTerminal(appState.activeTabId, p);
   });
-  document.addEventListener('click', () => { closeAttach(); });
+
+  dirBtn.addEventListener('click', async () => {
+    if (!appState.activeTabId) return;
+    const p = await api.selectDirectory();
+    if (p) api.writeTerminal(appState.activeTabId, p);
+  });
 })();
 
 // Backend events — auto-send notepad blocks when Claude is waiting
@@ -640,9 +767,35 @@ api.onTabAutoRenamed((tabId, name) => {
     api.updateHistoryName(tabId, name);
   }
 });
-api.onClaudeDetected((tabId, cwd) => {
+api.onAiDetected((tabId, cwd, aiTool) => {
+  console.log('AI detected event:', tabId, aiTool, cwd);
   const tab = appState.tabs.get(tabId);
-  if (tab) api.addHistory(tabId, tab.title, cwd, tab.shell);
+  if (tab) {
+    appState.setAiTool(tabId, aiTool);
+    // 保存历史时使用当前实际的 cwd（从 appState 获取，因为会实时更新）
+    const currentCwd = tab.cwd || cwd || '';
+    api.addHistory(tabId, tab.title, currentCwd, tab.shell, aiTool);
+    // 更新 cwd 显示
+    if (currentCwd) {
+      updateCwdDisplay(tabId, currentCwd);
+    }
+  }
+});
+
+// 监听 cwd 变化事件
+api.onCwdChanged((tabId, cwd) => {
+  console.log('>>> CWD event:', tabId, cwd);
+  appState.setCwd(tabId, cwd);
+  // 立即更新底栏
+  if (tabId === appState.activeTabId) {
+    const el = document.getElementById('status-cwd');
+    if (el) {
+      let sc = cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^[A-Za-z]:\\Users\\[^\\]+\\/i, '~\\').replace(/^[A-Za-z]:\\?/i, '');
+      console.log('>>> Set to:', sc);
+      el.textContent = sc;
+      el.title = cwd;
+    }
+  }
 });
 
 // Keyboard shortcuts
@@ -661,6 +814,7 @@ document.addEventListener('keydown', (e) => {
   if (isCtrl && e.key === 't') { e.preventDefault(); createTab(); }
   else if (isCtrl && e.key === 'w') { e.preventDefault(); if (appState.activeTabId) closeTab(appState.activeTabId); }
   else if (isCtrl && e.key === 'f') { e.preventDefault(); if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.toggleSearch(); } }
+  else if (e.altKey && e.key === 'k') { e.preventDefault(); toggleTipsPanel(); }
   else if (isCtrl && e.key === 'Tab') { e.preventDefault(); if (e.shiftKey) appState.switchToPrev(); else appState.switchToNext(); if (appState.activeTabId) switchToTab(appState.activeTabId); }
   else if (isCtrl && e.shiftKey && e.key === 'p') { e.preventDefault(); toggleCommandPalette(); }
   else if (isCtrl && e.key >= '1' && e.key <= '9') {
@@ -831,7 +985,7 @@ async function init() {
   setupThemePicker();
   const savedTabs = await api.loadTabs();
   if (savedTabs.length > 0) {
-    for (const saved of savedTabs) await createTab(saved.name, saved.noteBlocks, undefined, saved.shell);
+    for (const saved of savedTabs) await createTab(saved.name, saved.noteBlocks, saved.cwd || undefined, saved.shell);
   } else {
     createTab();
   }

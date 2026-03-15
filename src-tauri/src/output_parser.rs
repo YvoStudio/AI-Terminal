@@ -260,7 +260,7 @@ fn match_prompt(line: &str) -> Option<String> {
     }
 
     let first_char = content.chars().next()?;
-    if !first_char.is_alphabetic() || first_char.is_uppercase() {
+    if !first_char.is_alphabetic() {
         // For Windows-style prompts like "C:\path>" or "PS C:\path>", extract the path
         eprintln!("Trying extract_windows_cwd for: '{}'", trimmed);
         if let Some(cwd) = extract_windows_cwd(trimmed) {
@@ -270,10 +270,13 @@ fn match_prompt(line: &str) -> Option<String> {
         return None;
     }
 
-    // Common command patterns
+    // Common command patterns (case-insensitive check via is_ai_command later)
     if content.starts_with("opencode") || content.starts_with("codex") || content.starts_with("claude") ||
        content.starts_with("git") || content.starts_with("cd") || content.starts_with("ls") ||
-       content.starts_with("npm") || content.starts_with("npx") || content.starts_with("yarn") {
+       content.starts_with("npm") || content.starts_with("npx") || content.starts_with("yarn") ||
+       content.starts_with("Opencode") || content.starts_with("Codex") || content.starts_with("Claude") ||
+       content.starts_with("Git") || content.starts_with("Cd") || content.starts_with("Ls") ||
+       content.starts_with("Npm") || content.starts_with("Npx") || content.starts_with("Yarn") {
         eprintln!("Command detected: '{}'", content);
         return Some(content.to_string());
     }

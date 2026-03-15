@@ -9,6 +9,7 @@ pub struct PtyInstance {
     pair: PtyPair,
     #[allow(dead_code)]
     child: Box<dyn portable_pty::Child + Send>,
+    cwd: String,
 }
 
 pub struct PtyManager {
@@ -53,19 +54,27 @@ impl PtyManager {
 
         let shell_lower = shell.to_lowercase();
         let is_powershell = shell_lower.contains("powershell") || shell_lower.contains("pwsh");
+        let is_cmd = shell_lower == "cmd.exe" || shell_lower == "cmd";
 
         let mut cmd = CommandBuilder::new(&shell);
 
         // For PowerShell: disable PSReadLine features that cause cursor to
         // render in wrong position inside PTY terminals.
-        // Use try/catch because -ErrorAction doesn't catch parameter binding errors.
+        // Also set custom prompt to show full cwd for path tracking.
         if is_powershell {
             cmd.args([
                 "-NoLogo",
                 "-NoExit",
                 "-Command",
-                "& { try { Set-PSReadLineOption -PredictionSource None } catch {}; try { Set-PSReadLineOption -ExtraPromptLineCount 0 } catch {} }",
+                "& { try { Set-PSReadLineOption -PredictionSource None } catch {}; try { Set-PSReadLineOption -ExtraPromptLineCount 0 } catch {}; function Prompt { '$(Get-Location)> ' } }",
             ]);
+        }
+
+        // For cmd.exe: set custom prompt to show full cwd (e.g., "C:\path>")
+        if is_cmd {
+            // Replace default args with custom prompt
+            cmd = CommandBuilder::new(&shell);
+            cmd.args(["/K", "prompt $P$G"]);
         }
 
         if let Some(ref dir) = cwd {
@@ -145,6 +154,7 @@ impl PtyManager {
             writer,
             pair,
             child,
+            cwd: cwd.unwrap_or_else(|| dirs_next_home().unwrap_or_default()),
         };
 
         self.instances
@@ -193,12 +203,19 @@ impl PtyManager {
     pub fn get_cwd(&self, tab_id: &str) -> String {
         if let Some(instance) = self.instances.get(tab_id) {
             if let Ok(inst) = instance.lock() {
-                if let Ok(pid) = inst.child.process_id().ok_or("no pid") {
-                    return get_process_cwd(pid as u32);
-                }
+                return inst.cwd.clone();
             }
         }
         home_dir()
+    }
+
+    /// Update cwd for a tab (called from output_parser when cwd changes)
+    pub fn update_cwd(&self, tab_id: &str, new_cwd: String) {
+        if let Some(instance) = self.instances.get(tab_id) {
+            if let Ok(mut inst) = instance.lock() {
+                inst.cwd = new_cwd;
+            }
+        }
     }
 
     pub fn destroy_all(&mut self) {
@@ -234,39 +251,5 @@ fn dirs_next_home() -> Option<String> {
         None
     } else {
         Some(h)
-    }
-}
-
-#[allow(unused_variables)]
-fn get_process_cwd(pid: u32) -> String {
-    #[cfg(target_os = "linux")]
-    {
-        let path = format!("/proc/{}/cwd", pid);
-        std::fs::read_link(&path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| home_dir())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // Use lsof on macOS
-        let output = std::process::Command::new("lsof")
-            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-            .output();
-        if let Ok(out) = output {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if let Some(line) = s.lines().find(|l| l.starts_with('n')) {
-                return line[1..].to_string();
-            }
-        }
-        home_dir()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // On Windows, return home as fallback (QueryFullProcessImageName requires handle)
-        home_dir()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        home_dir()
     }
 }

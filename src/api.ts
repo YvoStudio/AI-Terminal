@@ -18,6 +18,7 @@ export interface SavedTab {
   name: string;
   noteBlocks?: Array<{ id: string; content: string }>;
   shell?: 'cmd' | 'powershell' | 'wsl';
+  cwd?: string;
 }
 
 export interface ClaudeSession {
@@ -91,8 +92,14 @@ export const api = {
     });
   },
 
-  onClaudeDetected(cb: (tabId: string, cwd: string) => void): void {
-    listen<{ tabId: string; cwd: string }>('tab-claude-detected', (e) => {
+  onAiDetected(cb: (tabId: string, cwd: string, aiTool: string) => void): void {
+    listen<{ tabId: string; cwd: string; aiTool: string }>('tab-ai-detected', (e) => {
+      cb(e.payload.tabId, e.payload.cwd, e.payload.aiTool);
+    });
+  },
+
+  onCwdChanged(cb: (tabId: string, cwd: string) => void): void {
+    listen<{ tabId: string; cwd: string }>('tab-cwd-changed', (e) => {
       cb(e.payload.tabId, e.payload.cwd);
     });
   },
@@ -117,8 +124,8 @@ export const api = {
     return invoke<HistoryEntry[]>('load_history');
   },
 
-  async addHistory(tabId: string, name: string, cwd: string, shell?: string): Promise<void> {
-    return invoke('add_history', { tabId, name, cwd, shell: shell ?? null });
+  async addHistory(tabId: string, name: string, cwd: string, shell?: string, aiTool?: string): Promise<void> {
+    return invoke('add_history', { tabId, name, cwd, shell: shell ?? null, aiTool: aiTool ?? null });
   },
 
   async updateHistoryName(tabId: string, newName: string): Promise<void> {
