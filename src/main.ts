@@ -314,6 +314,9 @@ document.addEventListener('selectionchange', () => {
 let _tipsEl: HTMLElement | null = null;
 let _tipsOpen = false;
 
+// 暴露为全局函数，供 terminal-view.ts 调用
+(window as any).toggleTipsPanel = toggleTipsPanel;
+
 function toggleTipsPanel() {
   if (_tipsOpen && _tipsEl) { _tipsEl.remove(); _tipsEl = null; _tipsOpen = false; return; }
   if (_tipsEl) _tipsEl.remove();
