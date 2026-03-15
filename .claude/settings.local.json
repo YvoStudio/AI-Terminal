@@ -59,7 +59,8 @@
       "Bash(npm list:*)",
       "Bash(echo:*)",
       "Bash(opencode:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

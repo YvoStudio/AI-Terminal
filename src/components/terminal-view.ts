@@ -114,6 +114,18 @@ export class TerminalView {
       // 检查是否有选中文本
       const hasSelection = this.terminal.hasSelection();
 
+      // Alt+K: 打开技巧面板（即使在终端焦点下也要响应）
+      if (e.altKey && e.key === 'k') {
+        e.preventDefault();
+        e.stopPropagation();
+        // 触发全局函数
+        const toggleTips = (window as any).toggleTipsPanel;
+        if (typeof toggleTips === 'function') {
+          toggleTips();
+        }
+        return;
+      }
+
       // 如果正在进行鼠标选择或有选中文本，阻止可能导致问题的快捷键
       if (this.mouseSelectionInProgress || hasSelection) {
         const key = e.key.toLowerCase();
