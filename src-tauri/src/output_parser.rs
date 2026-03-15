@@ -121,21 +121,23 @@ impl OutputParser {
                     continue;
                 }
 
-                // Check if this is a Windows prompt (starts with "cd " followed by a path)
+                // Check if this is from Windows prompt extraction (format: "cd {path}")
                 if content.starts_with("cd ") {
                     // Extract the path part after "cd "
                     let path = &content[3..];
                     eprintln!("Checking path for cwd: '{}', is_windows: {}", path, is_windows_path(path));
                     if is_windows_path(path) {
-                        // Direct Windows path from prompt - update cwd
+                        // Direct Windows path from prompt - update cwd, skip user-input entry
                         eprintln!("Updating CWD to: '{}'", path);
                         state.update_cwd(path.to_string());
                         on_cwd_changed(tab_id.to_string(), path.to_string());
+                        continue; // Skip adding to sidebar entries
                     } else if let Some(new_cwd) = extract_cd_path(&content, &state.cwd) {
-                        // Regular cd command
+                        // Regular cd command - update cwd, skip user-input entry
                         eprintln!("Updating CWD (cd cmd) to: '{}'", new_cwd);
                         state.update_cwd(new_cwd.clone());
                         on_cwd_changed(tab_id.to_string(), new_cwd);
+                        continue; // Skip adding to sidebar entries
                     }
                 }
 
@@ -145,6 +147,7 @@ impl OutputParser {
                     eprintln!("Updating CWD (drive switch) to: '{}'", new_cwd);
                     state.update_cwd(new_cwd.clone());
                     on_cwd_changed(tab_id.to_string(), new_cwd);
+                    continue; // Skip adding to sidebar entries
                 }
 
                 // Detect AI launch
