@@ -111,11 +111,12 @@ export class TerminalView {
 
     // 在 wrapper 上监听 keydown，在 xterm 处理之前拦截 Ctrl+C
     this.wrapper.addEventListener('keydown', (e: KeyboardEvent) => {
-      // 检查是否有选中文本
       const hasSelection = this.terminal.hasSelection();
+      console.log('wrapper keydown:', e.key, 'altKey:', e.altKey, 'ctrlKey:', e.ctrlKey, 'target:', e.target, 'hasSelection:', hasSelection);
 
       // Alt+K: 打开技巧面板（即使在终端焦点下也要响应）
-      if (e.altKey && e.key === 'k') {
+      if (e.altKey && e.key.toLowerCase() === 'k') {
+        console.log('Alt+K detected in wrapper!');
         e.preventDefault();
         e.stopPropagation();
         // 触发全局函数
@@ -160,8 +161,12 @@ export class TerminalView {
 
     // 拦截键盘事件，在 xterm 内部处理之前阻止 Ctrl+C
     this.terminal.onKey(({ key, domEvent }) => {
+      console.log('xterm.onKey:', key, 'domEvent.key:', domEvent.key, 'altKey:', domEvent.altKey);
+
       // Alt+K: 打开技巧面板
+      // 检查 domEvent.altKey 和 keyCode
       if (domEvent.altKey && domEvent.key.toLowerCase() === 'k') {
+        console.log('Alt+K detected in onKey!');
         const toggleTips = (window as any).toggleTipsPanel;
         if (typeof toggleTips === 'function') {
           toggleTips();
