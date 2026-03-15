@@ -60,7 +60,9 @@
       "Bash(echo:*)",
       "Bash(opencode:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(powershell -File scripts/gen-icon.ps1)",
+      "Bash(powershell -ExecutionPolicy Bypass -File scripts/gen-icon.ps1)"
     ]
   }
 }

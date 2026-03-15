@@ -7,90 +7,118 @@ function New-IconBitmap([int]$Size) {
     $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
     $g.Clear([System.Drawing.Color]::Transparent)
 
-    $bgBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 26, 26, 46))
-    $g.FillRectangle($bgBrush, 0, 0, $Size, $Size)
+    # Background - dark terminal theme
+    $bgBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 30, 30, 46))
+
+    # Round rectangle background
+    $cornerRadius = [int]($Size * 0.18)
+    $sz = $Size - 1
+    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $diameter = $cornerRadius * 2
+
+    # Add arcs for rounded corners
+    $path.AddArc(0, 0, $diameter, $diameter, 180, 90)  # Top-left
+    $path.AddArc($sz - $diameter, 0, $diameter, $diameter, 270, 90)  # Top-right
+    $path.AddArc($sz - $diameter, $sz - $diameter, $diameter, $diameter, 0, 90)  # Bottom-right
+    $path.AddArc(0, $sz - $diameter, $diameter, $diameter, 90, 90)  # Bottom-left
+    $path.CloseFigure()
+    $g.FillPath($bgBrush, $path)
 
     $green = [System.Drawing.Color]::FromArgb(255, 80, 250, 123)
-    $lightGreen = [System.Drawing.Color]::FromArgb(230, 80, 250, 123)
+    $white = [System.Drawing.Color]::FromArgb(255, 248, 248, 242)
 
-    if ($Size -ge 32) {
-        [float]$thick = if ($Size -le 48) { $Size * 0.22 } else { $Size * 0.18 }
-        $greenBrush = New-Object System.Drawing.SolidBrush($green)
+    if ($Size -ge 64) {
+        # Terminal prompt symbol ">"
+        [float]$promptX = $Size * 0.15
+        [float]$promptY = $Size * 0.35
+        [float]$promptW = $Size * 0.25
+        [float]$promptH = $Size * 0.30
+        [float]$strokeWidth = $Size * 0.055
 
-        [float]$midX = $Size * 0.70
-        [float]$midY = $Size * 0.50
-        [float]$startX = $Size * 0.02
-        [float]$endY = $Size * 0.95
-        [float]$y1 = $Size * 0.05
+        $pen = New-Object System.Drawing.Pen($green, $strokeWidth)
+        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
 
-        for ($i = 0; $i -le 20; $i++) {
-            [float]$t = $i / 20.0
-            [float]$x = $startX + ($midX - $startX) * $t
-            [float]$y = $y1 + ($midY - $y1) * $t
-            $g.FillEllipse($greenBrush, $x - $thick/2, $y - $thick/2, $thick, $thick)
-        }
+        # Draw ">" symbol
+        $g.DrawLine($pen, $promptX, $promptY, $promptX + $promptW, $promptY + $promptH / 2)
+        $g.DrawLine($pen, $promptX, $promptY + $promptH, $promptX + $promptW, $promptY + $promptH / 2)
 
-        for ($i = 0; $i -le 20; $i++) {
-            [float]$t = $i / 20.0
-            [float]$x = $midX + ($startX - $midX) * $t
-            [float]$y = $midY + ($endY - $midY) * $t
-            $g.FillEllipse($greenBrush, $x - $thick/2, $y - $thick/2, $thick, $thick)
-        }
+        # Cursor block
+        [float]$cursorX = $Size * 0.45
+        [float]$cursorY = $Size * 0.32
+        [float]$cursorW = $Size * 0.08
+        [float]$cursorH = $Size * 0.36
+        $cursorBrush = New-Object System.Drawing.SolidBrush($green)
+        $g.FillRectangle($cursorBrush, $cursorX, $cursorY, $cursorW, $cursorH)
 
-        [float]$cbX = $Size * 0.72
-        [float]$cbY = $Size * 0.22
-        [float]$cbW = $Size * 0.26
-        [float]$cbH = $Size * 0.52
-        $cbBrush = New-Object System.Drawing.SolidBrush($lightGreen)
-        $g.FillRectangle($cbBrush, $cbX, $cbY, $cbW, $cbH)
+        # Terminal output lines
+        [float]$lineStartX = $Size * 0.15
+        [float]$line1Y = $Size * 0.55
+        [float]$line2Y = $Size * 0.68
+        [float]$lineWidth = $Size * 0.55
+        [float]$lineHeight = $Size * 0.05
+        $lineBrush = New-Object System.Drawing.SolidBrush($white)
+        $g.FillRectangle($lineBrush, $lineStartX, $line1Y, $lineWidth, $lineHeight)
+        $g.FillRectangle($lineBrush, $lineStartX, $line2Y, $lineWidth * 0.7, $lineHeight)
 
-        if ($Size -ge 128) {
-            $scanBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(18, 80, 250, 123))
-            [int]$step = [Math]::Max(1, [int]($Size * 0.045))
-            for ([int]$sy = 0; $sy -lt $Size; $sy += $step) {
-                $g.FillRectangle($scanBrush, 0, $sy, $Size, 1)
-            }
+        # Input line indicator
+        [float]$inputLineY = $Size * 0.82
+        [float]$inputLineWidth = $Size * 0.45
+        $inputBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(200, 80, 250, 123))
+        $g.FillRectangle($inputBrush, $lineStartX, $inputLineY, $inputLineWidth, $lineHeight)
 
-            [float]$n0x = $Size*0.82; [float]$n0y = $Size*0.70; [float]$n0r = $Size*0.07
-            [float]$n1x = $Size*0.92; [float]$n1y = $Size*0.55; [float]$n1r = $Size*0.05
-            [float]$n2x = $Size*0.94; [float]$n2y = $Size*0.78; [float]$n2r = $Size*0.055
-            [float]$n3x = $Size*0.98; [float]$n3y = $Size*0.66; [float]$n3r = $Size*0.04
+    } elseif ($Size -ge 32) {
+        # Simplified design for medium sizes
+        [float]$promptX = $Size * 0.12
+        [float]$promptY = $Size * 0.28
+        [float]$promptW = $Size * 0.28
+        [float]$promptH = $Size * 0.35
+        [float]$strokeWidth = $Size * 0.065
 
-            $lineBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(90, 80, 250, 123))
-            [float]$lineThick = $Size * 0.008
-            for ($i = 0; $i -le 15; $i++) {
-                [float]$t = $i / 15.0
-                $g.FillEllipse($lineBrush, $n0x + ($n1x-$n0x)*$t - $lineThick/2, $n0y + ($n1y-$n0y)*$t - $lineThick/2, $lineThick, $lineThick)
-                $g.FillEllipse($lineBrush, $n0x + ($n2x-$n0x)*$t - $lineThick/2, $n0y + ($n2y-$n0y)*$t - $lineThick/2, $lineThick, $lineThick)
-                $g.FillEllipse($lineBrush, $n1x + ($n3x-$n1x)*$t - $lineThick/2, $n1y + ($n3y-$n1y)*$t - $lineThick/2, $lineThick, $lineThick)
-                $g.FillEllipse($lineBrush, $n2x + ($n3x-$n2x)*$t - $lineThick/2, $n2y + ($n3y-$n2y)*$t - $lineThick/2, $lineThick, $lineThick)
-            }
+        $pen = New-Object System.Drawing.Pen($green, $strokeWidth)
+        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
 
-            $ringBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(170, 80, 250, 123))
-            $g.FillEllipse($ringBrush, $n0x-$n0r, $n0y-$n0r, $n0r*2, $n0r*2)
-            $g.FillEllipse($ringBrush, $n1x-$n1r, $n1y-$n1r, $n1r*2, $n1r*2)
-            $g.FillEllipse($ringBrush, $n2x-$n2r, $n2y-$n2r, $n2r*2, $n2r*2)
-            $g.FillEllipse($ringBrush, $n3x-$n3r, $n3y-$n3r, $n3r*2, $n3r*2)
-        }
+        # Draw ">" symbol
+        $g.DrawLine($pen, $promptX, $promptY, $promptX + $promptW, $promptY + $promptH / 2)
+        $g.DrawLine($pen, $promptX, $promptY + $promptH, $promptX + $promptW, $promptY + $promptH / 2)
+
+        # Cursor
+        [float]$cursorX = $Size * 0.48
+        [float]$cursorY = $Size * 0.28
+        [float]$cursorW = $Size * 0.10
+        [float]$cursorH = $Size * 0.40
+        $cursorBrush = New-Object System.Drawing.SolidBrush($green)
+        $g.FillRectangle($cursorBrush, $cursorX, $cursorY, $cursorW, $cursorH)
+
+        # Single output line
+        [float]$lineY = $Size * 0.62
+        [float]$lineWidth = $Size * 0.55
+        [float]$lineHeight = $Size * 0.08
+        $lineBrush = New-Object System.Drawing.SolidBrush($white)
+        $g.FillRectangle($lineBrush, $promptX, $lineY, $lineWidth, $lineHeight)
+
     } else {
-        [float]$thick = 3.0
-        $penBrush = New-Object System.Drawing.SolidBrush($green)
+        # Minimal design for 16px
+        [float]$promptX = 2.0
+        [float]$promptY = 3.0
+        [float]$strokeWidth = 2.5
 
-        for ($i = 0; $i -le 10; $i++) {
-            [float]$t = $i / 10.0
-            [float]$x = 1.5 + (11.0 - 1.5) * $t
-            [float]$y = 1.0 + (8.0 - 1.0) * $t
-            $g.FillEllipse($penBrush, $x - $thick/2, $y - $thick/2, $thick, $thick)
-        }
-        for ($i = 0; $i -le 10; $i++) {
-            [float]$t = $i / 10.0
-            [float]$x = 11.0 + (1.5 - 11.0) * $t
-            [float]$y = 8.0 + (15.0 - 8.0) * $t
-            $g.FillEllipse($penBrush, $x - $thick/2, $y - $thick/2, $thick, $thick)
-        }
+        $pen = New-Object System.Drawing.Pen($green, $strokeWidth)
+        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
 
-        $cbBrush = New-Object System.Drawing.SolidBrush($lightGreen)
-        $g.FillRectangle($cbBrush, 11.5, 4.0, 4.0, 8.0)
+        # Draw ">" symbol
+        $g.DrawLine($pen, $promptX, $promptY, $promptX + 4, $promptY + 4)
+        $g.DrawLine($pen, $promptX, $promptY + 8, $promptX + 4, $promptY + 4)
+
+        # Cursor block
+        $cursorBrush = New-Object System.Drawing.SolidBrush($green)
+        $g.FillRectangle($cursorBrush, 7.5, 3.5, 2.5, 7)
+
+        # Tiny line
+        $lineBrush = New-Object System.Drawing.SolidBrush($white)
+        $g.FillRectangle($lineBrush, 11, 9, 4, 2)
     }
 
     $g.Dispose()
