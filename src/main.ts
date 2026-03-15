@@ -29,9 +29,12 @@ async function createTab(name?: string, noteBlocks?: Array<{ id: string; content
         const cwdEl = document.getElementById('status-cwd');
         if (cwdEl) {
           let shortCwd = tab.cwd;
+          // Unix-style: /Users/xxx -> ~
           shortCwd = shortCwd.replace(/^\/Users\/[^/]+/, '~');
-          shortCwd = shortCwd.replace(/^[A-Za-z]:\\Users\\[^\\]+\\/i, '~\\');
-          shortCwd = shortCwd.replace(/^[A-Za-z]:\\?/i, '');
+          // Windows-style: C:\Users\xxx -> ~\xxx
+          shortCwd = shortCwd.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/i, '$1:\\~');
+          // Windows-style: 保留盘符，移除末尾反斜杠
+          shortCwd = shortCwd.replace(/^([A-Za-z]):\\$/i, '$1:');
           cwdEl.textContent = shortCwd || '';
           cwdEl.title = tab.cwd || '';
         }
@@ -92,9 +95,9 @@ async function updateCwdDisplay(tabId: string, newCwd?: string) {
   // Unix-style: /Users/xxx -> ~
   shortCwd = shortCwd.replace(/^\/Users\/[^/]+/, '~');
   // Windows-style: C:\Users\xxx -> ~\xxx
-  shortCwd = shortCwd.replace(/^[A-Za-z]:\\Users\\[^\\]+\\/i, '~\\');
-  // Windows-style: G:\ -> (show just the path after drive)
-  shortCwd = shortCwd.replace(/^[A-Za-z]:\\?/i, '');
+  shortCwd = shortCwd.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/i, '$1:\\~');
+  // Windows-style: 保留盘符，移除末尾反斜杠
+  shortCwd = shortCwd.replace(/^([A-Za-z]):\\$/i, '$1:');
   console.log('updateCwdDisplay: short =', shortCwd);
   cwdEl.textContent = shortCwd || '';
   cwdEl.title = cwd || '';
@@ -664,8 +667,12 @@ let _closeHistoryPanel: (() => void) | null = null;
       el.className = 'history-item';
       // Only shorten paths for home directory, show full path otherwise
       let shortCwd = item.cwd;
-      if (item.cwd.startsWith('C:\\Users\\') || item.cwd.startsWith('/Users/')) {
-        shortCwd = item.cwd.replace(/^C:\\Users\\[^\\]+/, '~').replace(/^\/Users\/[^/]+/, '~');
+      if (item.cwd.match(/^[A-Za-z]:\\Users\\/)) {
+        // Windows: C:\Users\Yvo\... -> C:\~\...
+        shortCwd = item.cwd.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/, '$1:\\~\\');
+      } else if (item.cwd.startsWith('/Users/')) {
+        // Unix: /Users/xxx -> ~
+        shortCwd = item.cwd.replace(/^\/Users\/[^/]+/, '~');
       }
       const timeStr = `${item.time.getMonth()+1}/${item.time.getDate()} ${item.time.getHours().toString().padStart(2,'0')}:${item.time.getMinutes().toString().padStart(2,'0')}`;
 
@@ -793,7 +800,9 @@ api.onCwdChanged((tabId, cwd) => {
   if (tabId === appState.activeTabId) {
     const el = document.getElementById('status-cwd');
     if (el) {
-      let sc = cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^[A-Za-z]:\\Users\\[^\\]+\\/i, '~\\').replace(/^[A-Za-z]:\\?/i, '');
+      let sc = cwd.replace(/^\/Users\/[^/]+/, '~');
+      sc = sc.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/i, '$1:\\~');
+      sc = sc.replace(/^([A-Za-z]):\\$/i, '$1:');
       console.log('>>> Set to:', sc);
       el.textContent = sc;
       el.title = cwd;
