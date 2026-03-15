@@ -139,6 +139,14 @@ impl OutputParser {
                     }
                 }
 
+                // Check for Windows drive switch (e.g., "G:", "D:")
+                if is_drive_letter(&content) {
+                    let new_cwd = format!("{}\\", content.to_uppercase());
+                    eprintln!("Updating CWD (drive switch) to: '{}'", new_cwd);
+                    state.update_cwd(new_cwd.clone());
+                    on_cwd_changed(tab_id.to_string(), new_cwd);
+                }
+
                 // Detect AI launch
                 if state.ai_tool.is_none() {
                     if let Some(ai) = is_ai_command(&content) {
@@ -298,6 +306,15 @@ fn is_windows_path(path: &str) -> bool {
         return true;
     }
     false
+}
+
+fn is_drive_letter(cmd: &str) -> bool {
+    // Check if it's a single drive letter like "G:" or "d:"
+    if cmd.len() != 2 {
+        return false;
+    }
+    let chars: Vec<char> = cmd.chars().collect();
+    chars[0].is_ascii_alphabetic() && chars[1] == ':'
 }
 
 /// Extract current working directory from Windows-style prompt
