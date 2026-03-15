@@ -199,12 +199,14 @@ export class TerminalView {
       this.terminal.write(data);
     });
 
-    // Paste image support
+    // Paste image support - use capture phase to intercept before xterm handles it
     this.wrapper.addEventListener('paste', (e: ClipboardEvent) => {
+      console.log('Paste event detected on wrapper (capture)');
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {
         if (item.type.startsWith('image/')) {
+          console.log('Image found in clipboard:', item.type);
           e.preventDefault();
           e.stopPropagation();
           const blob = item.getAsFile();
@@ -212,14 +214,24 @@ export class TerminalView {
           const reader = new FileReader();
           reader.onload = async () => {
             const dataUrl = reader.result as string;
-            const filePath = await api.saveClipboardImage(dataUrl);
-            if (filePath) api.writeTerminal(tabId, filePath);
+            console.log('Image loaded, dataUrl length:', dataUrl.length);
+            try {
+              const filePath = await api.saveClipboardImage(dataUrl);
+              console.log('Image saved to:', filePath);
+              if (filePath) {
+                api.writeTerminal(tabId, filePath);
+                console.log('File path written to terminal');
+              }
+            } catch (err) {
+              console.error('Failed to save image:', err);
+            }
           };
           reader.readAsDataURL(blob);
           return;
         }
       }
-    });
+      console.log('No image found in clipboard, items:', items.length);
+    }, true); // capture phase
 
     // Scroll-to-bottom button
     this.scrollBtn = document.createElement('button');
