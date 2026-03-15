@@ -160,6 +160,15 @@ export class TerminalView {
 
     // 拦截键盘事件，在 xterm 内部处理之前阻止 Ctrl+C
     this.terminal.onKey(({ key, domEvent }) => {
+      // Alt+K: 打开技巧面板
+      if (domEvent.altKey && domEvent.key.toLowerCase() === 'k') {
+        const toggleTips = (window as any).toggleTipsPanel;
+        if (typeof toggleTips === 'function') {
+          toggleTips();
+        }
+        return false;
+      }
+
       // 检查是否有选中文本或正在选择
       const hasSelection = this.terminal.hasSelection();
       if (this.mouseSelectionInProgress || hasSelection) {
