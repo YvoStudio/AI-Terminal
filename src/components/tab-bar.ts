@@ -1,5 +1,6 @@
 import { api } from '../api';
 import { appState } from './app-state';
+import { isWindows, getAvailableShells } from '../platform';
 
 export class TabBar {
   private tabListEl: HTMLElement;
@@ -36,6 +37,22 @@ export class TabBar {
       e.stopPropagation(); this.closeContextMenu(); this.startEditing(titleEl, tabId);
     });
 
+    const colorItem = document.createElement('div');
+    colorItem.className = 'tab-context-menu-color';
+    const colors = ['#ff6b6b', '#feca57', '#48dbfb', '#1dd1a1', '#5f27cd', '#ff9ff3', '#54a0ff', '#00d2d3', '#ff9f43', '#ee5253', '#10ac84', '#2e86de', '#c8d6e5', '#222f3e'];
+    const currentColor = appState.tabs.get(tabId)?.color ?? '';
+    colors.forEach(color => {
+      const colorDot = document.createElement('span');
+      colorDot.className = 'tab-context-color-dot' + (color === currentColor ? ' selected' : '');
+      colorDot.style.backgroundColor = color;
+      if (!color) colorDot.style.background = 'linear-gradient(45deg, #fff 45%, #333 45%, #333 55%, #fff 55%)';
+      colorDot.addEventListener('click', (e) => {
+        e.stopPropagation(); this.closeContextMenu();
+        appState.setColor(tabId, color);
+      });
+      colorItem.appendChild(colorDot);
+    });
+
     const addHistoryItem = document.createElement('div');
     addHistoryItem.className = 'tab-context-menu-item';
     addHistoryItem.textContent = '加入记录';
@@ -43,35 +60,35 @@ export class TabBar {
       e.stopPropagation(); this.closeContextMenu();
       const tab = appState.tabs.get(tabId);
       if (tab) {
-        const cwd = await api.getTerminalCwd(tabId);
-        api.addHistory(tabId, tab.title, cwd, tab.shell);
+        // 使用 appState 中实时的 cwd，而不是 getTerminalCwd（返回的是初始目录）
+        console.log('[加入记录] tab.cwd =', tab.cwd, 'tab.aiTool =', tab.aiTool);
+        const cwd = tab.cwd || '';
+        console.log('[加入记录] saving with cwd =', cwd, 'aiTool =', tab.aiTool);
+        api.addHistory(tabId, tab.title, cwd, tab.shell, tab.aiTool || undefined);
       }
     });
 
     menu.appendChild(renameItem);
+    menu.appendChild(colorItem);
     menu.appendChild(addHistoryItem);
 
     // Shell switching only on Windows
-    const isWindows = navigator.userAgent.includes('Windows');
     if (isWindows) {
       const sep = document.createElement('div');
       sep.className = 'tab-context-menu-sep';
 
       const currentShell = appState.tabs.get(tabId)?.shell ?? 'cmd';
-      const shells: Array<{ label: string; shell: 'cmd' | 'powershell' | 'wsl' }> = [
-        { label: 'CMD', shell: 'cmd' },
-        { label: 'PowerShell', shell: 'powershell' },
-        { label: 'WSL', shell: 'wsl' },
-      ];
-      const shellItems = shells.map(({ label, shell }) => {
+      const shellLabels: Record<string, string> = { cmd: 'CMD', powershell: 'PowerShell', wsl: 'WSL', bash: 'Bash' };
+      const shells = getAvailableShells();
+      const shellItems = shells.map(shell => {
         const item = document.createElement('div');
         item.className = 'tab-context-menu-item';
         const dot = shell === currentShell
           ? '<span class="tab-context-menu-dot"></span>'
           : '<span class="tab-context-menu-dot-placeholder"></span>';
-        item.innerHTML = `切换到 ${label}${dot}`;
+        item.innerHTML = `切换到 ${shellLabels[shell] || shell}${dot}`;
         item.addEventListener('click', (e) => {
-          e.stopPropagation(); this.closeContextMenu(); this.onSwitchShell(tabId, shell);
+          e.stopPropagation(); this.closeContextMenu(); this.onSwitchShell(tabId, shell as 'cmd' | 'powershell' | 'wsl');
         });
         return item;
       });
@@ -123,6 +140,7 @@ export class TabBar {
       const el = document.createElement('div');
       el.className = `tab${id === appState.activeTabId ? ' active' : ''}`;
       el.dataset.tabId = id;
+      if (tab.color) el.style.setProperty('--tab-color', tab.color);
 
       const indicator = document.createElement('span');
       indicator.className = `tab-indicator ${tab.status}`;
@@ -148,8 +166,19 @@ export class TabBar {
         if (e.button !== 0) return;
         // Ignore if clicking close button or editing title
         if ((e.target as HTMLElement).closest('.tab-close') || (e.target as HTMLElement).closest('[contenteditable="true"]')) return;
+        e.preventDefault();
         const startX = e.clientX;
         let dragging = false;
+        const cleanup = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          document.removeEventListener('mouseleave', onLeave);
+          if (!dragging) return;
+          el.classList.remove('dragging');
+          document.body.classList.remove('tab-dragging');
+          this.tabListEl.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over-left', 'drag-over-right'));
+          this.dragTabId = null;
+        };
         const onMove = (ev: MouseEvent) => {
           if (!dragging && Math.abs(ev.clientX - startX) > 5) {
             dragging = true;
@@ -171,14 +200,9 @@ export class TabBar {
           });
         };
         const onUp = (ev: MouseEvent) => {
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          if (!dragging) return;
-          el.classList.remove('dragging');
-          document.body.classList.remove('tab-dragging');
+          if (!dragging) { cleanup(); return; }
           // Find drop target
           const tabs = Array.from(this.tabListEl.querySelectorAll('.tab'));
-          tabs.forEach(t => t.classList.remove('drag-over-left', 'drag-over-right'));
           for (const t of tabs) {
             if (t === el) continue;
             const rect = t.getBoundingClientRect();
@@ -196,10 +220,12 @@ export class TabBar {
               break;
             }
           }
-          this.dragTabId = null;
+          cleanup();
         };
+        const onLeave = () => cleanup();
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
+        document.addEventListener('mouseleave', onLeave);
       });
 
       this.tabListEl.appendChild(el);

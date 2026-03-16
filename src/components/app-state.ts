@@ -12,8 +12,11 @@ export interface TabState {
   title: string;
   status: TabStatus;
   shell: ShellType;
+  color: string;
+  aiTool: string;
   sidebarEntries: SidebarEntry[];
   noteBlocks: NoteBlock[];
+  cwd: string;
 }
 
 class AppState {
@@ -29,7 +32,7 @@ class AppState {
     const index = this.tabOrder.length + 1;
     const tab: TabState = {
       id, title: `Terminal ${index}`, status: 'active', shell: 'cmd',
-      sidebarEntries: [], noteBlocks: [],
+      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '',
     };
     this.tabs.set(id, tab);
     this.tabOrder.push(id);
@@ -66,10 +69,31 @@ class AppState {
     this.notify();
   }
 
+  setColor(id: string, color: string) {
+    const tab = this.tabs.get(id);
+    if (!tab) return;
+    tab.color = color;
+    this.notify();
+  }
+
   setStatus(id: string, status: TabStatus) {
     const tab = this.tabs.get(id);
     if (!tab) return;
     tab.status = status;
+    this.notify();
+  }
+
+  setAiTool(id: string, aiTool: string) {
+    const tab = this.tabs.get(id);
+    if (!tab) return;
+    tab.aiTool = aiTool;
+    this.notify();
+  }
+
+  setCwd(id: string, cwd: string) {
+    const tab = this.tabs.get(id);
+    if (!tab) return;
+    tab.cwd = cwd;
     this.notify();
   }
 
@@ -113,7 +137,7 @@ class AppState {
   persistTabs() {
     const saved: SavedTab[] = this.tabOrder.map(id => {
       const tab = this.tabs.get(id)!;
-      return { name: tab.title, shell: tab.shell, noteBlocks: tab.noteBlocks.map(b => ({ id: b.id, content: b.content })) };
+      return { name: tab.title, shell: tab.shell, noteBlocks: tab.noteBlocks.map(b => ({ id: b.id, content: b.content })), cwd: tab.cwd };
     });
     api.saveTabs(saved);
   }

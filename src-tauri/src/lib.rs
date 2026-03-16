@@ -27,7 +27,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            app.manage(Mutex::new(PtyManager::new()));
+            app.manage(Arc::new(Mutex::new(PtyManager::new())));
             app.manage(Arc::new(Mutex::new(OutputParser::new())));
             Ok(())
         })

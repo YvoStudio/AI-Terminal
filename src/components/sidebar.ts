@@ -14,16 +14,20 @@ export class Sidebar {
     const sidebar = document.getElementById('sidebar')!;
     let startX = 0, startWidth = 0;
     handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
       startX = e.clientX; startWidth = sidebar.offsetWidth;
+      const cleanup = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('mouseleave', cleanup);
+      };
       const onMove = (e: MouseEvent) => {
         sidebar.style.width = Math.max(180, Math.min(500, startWidth + e.clientX - startX)) + 'px';
       };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      };
+      const onUp = () => cleanup();
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
+      document.addEventListener('mouseleave', cleanup);
     });
   }
 

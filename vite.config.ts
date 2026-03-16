@@ -5,8 +5,8 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig({
   clearScreen: false,
   server: {
-    port: 1420,
-    strictPort: true,
+    port: 1450,
+    strictPort: false,
     host: host || false,
     hmr: host
       ? { protocol: "ws", host, port: 1421 }

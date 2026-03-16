@@ -21,6 +21,8 @@ pub struct SavedTab {
     pub note_blocks: Vec<SavedNoteBlock>,
     #[serde(default = "default_shell_str")]
     pub shell: String,
+    #[serde(default)]
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +32,8 @@ pub struct HistoryEntry {
     pub timestamp: u64,
     #[serde(default = "default_shell_str")]
     pub shell: String,
+    #[serde(default)]
+    pub ai_tool: Option<String>,
 }
 
 fn default_shell_str() -> String { "cmd".to_string() }
@@ -60,6 +64,7 @@ fn make_pty_callback(
     app: AppHandle,
     tab_id: String,
     parser_arc: Arc<Mutex<OutputParser>>,
+    pty_state: Arc<Mutex<PtyManager>>,
 ) -> impl Fn(String) + Send + 'static {
     move |data: String| {
         let _ = app.emit(&format!("terminal-output-{}", tab_id), data.clone());
@@ -81,8 +86,15 @@ fn make_pty_callback(
                 |tid, name| {
                     let _ = app.emit("tab-auto-rename", serde_json::json!({ "tabId": tid, "name": name }));
                 },
+                |tid, cwd, ai_tool| {
+                    let _ = app.emit("tab-ai-detected", serde_json::json!({ "tabId": tid, "cwd": cwd, "aiTool": ai_tool }));
+                },
                 |tid, cwd| {
-                    let _ = app.emit("tab-claude-detected", serde_json::json!({ "tabId": tid, "cwd": cwd }));
+                    eprintln!(">>> Backend: CWD changed for tab {} to {}", tid, cwd);
+                    // Update PtyManager's cwd so get_terminal_cwd returns the latest value
+                    let mgr = pty_state.lock().unwrap();
+                    mgr.update_cwd(&tid, cwd.clone());
+                    let _ = app.emit("tab-cwd-changed", serde_json::json!({ "tabId": tid, "cwd": cwd }));
                 },
             );
         }
@@ -92,7 +104,7 @@ fn make_pty_callback(
 #[tauri::command]
 pub fn create_terminal(
     app: AppHandle,
-    pty_state: State<'_, Mutex<PtyManager>>,
+    pty_state: State<'_, Arc<Mutex<PtyManager>>>,
     parser_state: State<'_, Arc<Mutex<OutputParser>>>,
     cwd: Option<String>,
 ) -> Result<String, String> {
@@ -104,7 +116,8 @@ pub fn create_terminal(
     }
 
     let parser_arc = Arc::clone(&*parser_state);
-    let cb = make_pty_callback(app, tab_id.clone(), parser_arc);
+    let pty_arc = Arc::clone(&*pty_state);
+    let cb = make_pty_callback(app, tab_id.clone(), parser_arc, pty_arc);
     let mut mgr = pty_state.lock().map_err(|e| e.to_string())?;
     mgr.create(tab_id.clone(), cwd, cb)?;
 
@@ -114,7 +127,7 @@ pub fn create_terminal(
 #[tauri::command]
 pub fn switch_shell(
     app: AppHandle,
-    pty_state: State<'_, Mutex<PtyManager>>,
+    pty_state: State<'_, Arc<Mutex<PtyManager>>>,
     parser_state: State<'_, Arc<Mutex<OutputParser>>>,
     tab_id: String,
     shell: String,
@@ -145,15 +158,19 @@ pub fn switch_shell(
         parser.init_tab(&tab_id);
     }
 
+    // Create new PTY with same cwd
     let parser_arc = Arc::clone(&*parser_state);
-    let cb = make_pty_callback(app, tab_id.clone(), parser_arc);
+    let pty_arc = Arc::clone(&*pty_state);
+    let cb = make_pty_callback(app, tab_id.clone(), parser_arc, pty_arc);
     let mut mgr = pty_state.lock().map_err(|e| e.to_string())?;
-    mgr.create_with_shell(tab_id, cwd, shell_exe, cb)
+    mgr.create_with_shell(tab_id.clone(), cwd, shell_exe, cb)?;
+
+    Ok(())
 }
 
 #[tauri::command]
 pub fn write_terminal(
-    state: State<'_, Mutex<PtyManager>>,
+    state: State<'_, Arc<Mutex<PtyManager>>>,
     tab_id: String,
     data: String,
 ) -> Result<(), String> {
@@ -163,7 +180,7 @@ pub fn write_terminal(
 
 #[tauri::command]
 pub fn resize_terminal(
-    state: State<'_, Mutex<PtyManager>>,
+    state: State<'_, Arc<Mutex<PtyManager>>>,
     tab_id: String,
     cols: u16,
     rows: u16,
@@ -174,7 +191,7 @@ pub fn resize_terminal(
 
 #[tauri::command]
 pub fn close_terminal(
-    pty_state: State<'_, Mutex<PtyManager>>,
+    pty_state: State<'_, Arc<Mutex<PtyManager>>>,
     parser_state: State<'_, Arc<Mutex<OutputParser>>>,
     tab_id: String,
 ) -> Result<(), String> {
@@ -187,7 +204,7 @@ pub fn close_terminal(
 
 #[tauri::command]
 pub fn get_terminal_cwd(
-    state: State<'_, Mutex<PtyManager>>,
+    state: State<'_, Arc<Mutex<PtyManager>>>,
     tab_id: String,
 ) -> Result<String, String> {
     let mgr = state.lock().map_err(|e| e.to_string())?;
@@ -242,7 +259,7 @@ pub fn load_history(app: AppHandle) -> Result<Vec<HistoryEntry>, String> {
 }
 
 #[tauri::command]
-pub fn add_history(app: AppHandle, tab_id: String, name: String, cwd: String, shell: Option<String>) -> Result<(), String> {
+pub fn add_history(app: AppHandle, tab_id: String, name: String, cwd: String, shell: Option<String>, ai_tool: Option<String>) -> Result<(), String> {
     let _ = tab_id;
     let path = history_file(&app);
     if let Some(parent) = path.parent() { fs::create_dir_all(parent).ok(); }
@@ -257,7 +274,7 @@ pub fn add_history(app: AppHandle, tab_id: String, name: String, cwd: String, sh
         .unwrap_or_default()
         .as_millis() as u64;
 
-    history.insert(0, HistoryEntry { name, cwd, timestamp: ts, shell: shell.unwrap_or_else(default_shell_str) });
+    history.insert(0, HistoryEntry { name, cwd, timestamp: ts, shell: shell.unwrap_or_else(default_shell_str), ai_tool });
     history.truncate(20);
 
     let json = serde_json::to_string(&history).map_err(|e| e.to_string())?;
@@ -437,7 +454,12 @@ pub fn delete_history_entry(app: AppHandle, index: usize) -> Result<(), String> 
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+    // Windows: use USERPROFILE, Unix: use HOME
+    if cfg!(windows) {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    } else {
+        std::env::var("HOME").ok().map(PathBuf::from)
+    }
 }
 
 fn parse_claude_session(path: &PathBuf) -> Result<ClaudeSession, String> {

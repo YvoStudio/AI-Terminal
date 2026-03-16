@@ -5,6 +5,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { api } from '../api';
 import { themes } from './themes';
+import { isWindows, getDefaultFontSize, getPlatformFonts } from '../platform';
 
 export class TerminalView {
   terminal: Terminal;
@@ -16,6 +17,8 @@ export class TerminalView {
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private scrollBtn: HTMLElement;
   private scrollCheckTimer: ReturnType<typeof setInterval> | null = null;
+
+  private mouseSelectionInProgress = false;
 
   constructor(
     private tabId: string,
@@ -29,12 +32,13 @@ export class TerminalView {
     const savedIndex = TerminalView.getSavedThemeIndex();
     const currentTheme = themes[savedIndex];
 
-    // Windows 使用黑体，字号默认大一号
-    const isWindows = navigator.platform.toLowerCase().includes('win');
-    const fontSize = isWindows ? 14 : 13;
-    const fontFamily = isWindows
-      ? "'CaskaydiaCove Nerd Font', 'SimHei', 'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', monospace"
-      : "'MesloLGS Nerd Font', 'Hack Nerd Font', 'Menlo', 'Cascadia Code', 'SF Mono', 'Consolas', monospace";
+    // 加载保存的字体设置
+    const savedFontSize = localStorage.getItem('terminal-font-size');
+    const savedFontFamily = localStorage.getItem('terminal-font-family');
+    const fontSize = savedFontSize ? parseInt(savedFontSize, 10) : getDefaultFontSize();
+    const fontFamily = savedFontFamily
+      ? TerminalView.getFontFamily(savedFontFamily)
+      : TerminalView.getFontFamily('auto');
 
     this.terminal = new Terminal({
       fontSize,
@@ -43,6 +47,15 @@ export class TerminalView {
       cursorBlink: true,
       scrollback: 10000,
       allowProposedApi: true,
+      // 禁用鼠标相关功能
+      rightClickSelectsWord: true,
+      allowTransparency: false,
+      convertEol: false,
+      // 禁用鼠标追踪模式，防止拖动选择文本时产生 ANSI 序列
+      disableStdin: false,
+      // 禁用 xterm 内置的复制功能
+      macOptionIsMeta: false,
+      macOptionClickForcesSelection: true,
     });
 
     this.fitAddon = new FitAddon();
@@ -51,6 +64,124 @@ export class TerminalView {
     this.terminal.loadAddon(this.searchAddon);
     this.terminal.open(this.wrapper);
 
+    // 处理鼠标选择状态，防止拖动选择时鼠标移出窗口导致问题
+    this.wrapper.addEventListener('mousedown', (e) => {
+      this.mouseSelectionInProgress = true;
+      
+      // 获取当前焦点元素
+      const activeElement = document.activeElement;
+      const isInTerminal = activeElement === this.wrapper || 
+                          activeElement?.classList.contains('xterm') || 
+                          this.wrapper.contains(activeElement);
+                          
+      // 如果不是在终端内部点击，需要聚焦到终端
+      if (!isInTerminal) {
+        this.terminal.focus();
+      }
+    });
+    
+    const endSelection = () => {
+      this.mouseSelectionInProgress = false;
+    };
+    
+    document.addEventListener('mouseup', (e) => {
+      endSelection();
+      
+      // 在mouseup之后的一小段时间内标记特殊状态，防止在此期间触发快捷键
+      const selectionEndedRecently = true;
+      setTimeout(() => {
+        // this.selectionEndedRecently = false; // 如果之前定义了此变量
+      }, 100);
+    });
+    window.addEventListener('blur', endSelection);
+    
+    // 防止鼠标移出窗口时丢失选择
+    this.wrapper.addEventListener('mouseleave', (e) => {
+      if (this.mouseSelectionInProgress) {
+        // 如果仍在选择中，保持焦点
+        e.preventDefault();
+        // 不失去焦点，让选择继续
+      }
+    });
+
+    // 监听选择变化，确保不发送额外事件
+    this.terminal.onSelectionChange(() => {
+      // 有选中文本时不做任何事
+    });
+
+    // 在 wrapper 上监听 keydown，在 xterm 处理之前拦截 Ctrl+C
+    this.wrapper.addEventListener('keydown', (e: KeyboardEvent) => {
+      const hasSelection = this.terminal.hasSelection();
+
+      // Alt+K: 打开技巧面板（即使在终端焦点下也要响应）
+      if (e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        e.stopPropagation();
+        // 触发全局函数
+        const toggleTips = (window as any).toggleTipsPanel;
+        if (typeof toggleTips === 'function') {
+          toggleTips();
+        }
+        return;
+      }
+
+      // Ctrl+V: 粘贴（包括图片）
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+        // 如果有选中文本，先处理粘贴逻辑
+        navigator.clipboard.read().then(async (items) => {
+          for (const item of items) {
+            if (item.type.startsWith('image/')) {
+              e.preventDefault();
+              e.stopPropagation();
+              const blob = await item.getType('image/png');
+              const reader = new FileReader();
+              reader.onload = async () => {
+                const dataUrl = reader.result as string;
+                try {
+                  const filePath = await api.saveClipboardImage(dataUrl);
+                  if (filePath) {
+                    api.writeTerminal(tabId, filePath);
+                  }
+                } catch (err) {
+                  console.error('Failed to save image:', err);
+                }
+              };
+              reader.readAsDataURL(blob);
+              return;
+            }
+          }
+          // 如果没有图片，让浏览器/系统处理文本粘贴
+        }).catch(() => {
+          // 读取剪贴板失败，让系统默认处理
+        });
+        return;
+      }
+
+      // 如果正在进行鼠标选择或有选中文本，阻止可能导致问题的快捷键
+      if (this.mouseSelectionInProgress || hasSelection) {
+        const key = e.key.toLowerCase();
+
+        // 特殊处理 Ctrl/Cmd + 字母组合
+        if (e.ctrlKey || e.metaKey) {
+          // Ctrl+C 是主要问题 - 在有选中文本时阻止它
+          if (key === 'c' && hasSelection) {
+            // 阻止事件传播到 xterm
+            e.preventDefault();
+            e.stopPropagation();
+            // 触发浏览器复制
+            navigator.clipboard.writeText(this.terminal.getSelection());
+            return;
+          }
+          // 阻止其他可能导致问题的快捷键
+          if (['x', 'v', 'a', 'z', 'y'].includes(key)) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+        }
+      }
+    }, true); // Use capture phase - 在 xterm 之前处理
+
     // Unicode 11 for proper emoji/CJK width calculation
     const unicode11 = new Unicode11Addon();
     this.terminal.loadAddon(unicode11);
@@ -58,8 +189,40 @@ export class TerminalView {
 
     try { this.terminal.loadAddon(new CanvasAddon()); } catch {}
 
+    // 拦截键盘事件，在 xterm 内部处理之前阻止 Ctrl+C
+    this.terminal.onKey(({ key, domEvent }) => {
+      // Alt+K: 打开技巧面板
+      if (domEvent.altKey && domEvent.key.toLowerCase() === 'k') {
+        const toggleTips = (window as any).toggleTipsPanel;
+        if (typeof toggleTips === 'function') {
+          toggleTips();
+        }
+        return false;
+      }
+
+      // 检查是否有选中文本或正在选择
+      const hasSelection = this.terminal.hasSelection();
+      if (this.mouseSelectionInProgress || hasSelection) {
+        // 阻止 Ctrl+C
+        if (domEvent.ctrlKey && key.toLowerCase() === 'c') {
+          // 复制选中的文本
+          navigator.clipboard.writeText(this.terminal.getSelection());
+          // 阻止默认行为
+          return false;
+        }
+      }
+      // 其他键正常处理
+      return true;
+    });
+
     // Input → Rust backend
     this.terminal.onData((data) => {
+      // 始终过滤掉 Ctrl+C (\x03)，当有选中文本或鼠标选择进行中时
+      // 这样可以防止鼠标选择文本时误触发 Ctrl+C 中断信号
+      if (data === '\x03' && (this.mouseSelectionInProgress || this.terminal.hasSelection())) {
+        console.log('Blocked Ctrl+C during selection');
+        return;
+      }
       api.writeTerminal(tabId, data);
     });
 
@@ -68,12 +231,14 @@ export class TerminalView {
       this.terminal.write(data);
     });
 
-    // Paste image support
+    // Paste image support - use capture phase to intercept before xterm handles it
     this.wrapper.addEventListener('paste', (e: ClipboardEvent) => {
+      console.log('Paste event detected on wrapper (capture)');
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {
         if (item.type.startsWith('image/')) {
+          console.log('Image found in clipboard:', item.type);
           e.preventDefault();
           e.stopPropagation();
           const blob = item.getAsFile();
@@ -81,14 +246,24 @@ export class TerminalView {
           const reader = new FileReader();
           reader.onload = async () => {
             const dataUrl = reader.result as string;
-            const filePath = await api.saveClipboardImage(dataUrl);
-            if (filePath) api.writeTerminal(tabId, filePath);
+            console.log('Image loaded, dataUrl length:', dataUrl.length);
+            try {
+              const filePath = await api.saveClipboardImage(dataUrl);
+              console.log('Image saved to:', filePath);
+              if (filePath) {
+                api.writeTerminal(tabId, filePath);
+                console.log('File path written to terminal');
+              }
+            } catch (err) {
+              console.error('Failed to save image:', err);
+            }
           };
           reader.readAsDataURL(blob);
           return;
         }
       }
-    });
+      console.log('No image found in clipboard, items:', items.length);
+    }, true); // capture phase
 
     // Scroll-to-bottom button
     this.scrollBtn = document.createElement('button');
@@ -124,10 +299,36 @@ export class TerminalView {
     if (t) this.terminal.options.theme = t.theme;
   }
 
+  setFontSize(size: number) {
+    this.terminal.options.fontSize = size;
+    this.fit();
+  }
+
+  setFontFamily(family: string) {
+    this.terminal.options.fontFamily = TerminalView.getFontFamily(family);
+    this.fit();
+  }
+
   static getSavedThemeIndex(): number {
     const saved = localStorage.getItem('terminal-theme-index');
     const idx = saved ? parseInt(saved, 10) : 0;
     return idx >= 0 && idx < themes.length ? idx : 0;
+  }
+
+  static getFontFamily(family: string): string {
+    const fonts = getPlatformFonts();
+    
+    switch (family) {
+      case 'consolas':
+        return `'Consolas', ${fonts.chinese}, monospace`;
+      case 'courier':
+        return `'Courier New', ${fonts.chinese}, monospace`;
+      case 'lucida':
+        return `'Lucida Console', ${fonts.chinese}, monospace`;
+      case 'auto':
+      default:
+        return `${fonts.mono}, ${fonts.chinese}, monospace`;
+    }
   }
 
   fit() {
@@ -206,6 +407,13 @@ export class TerminalView {
   }
 
   dispose() {
+    // 清理鼠标事件监听器
+    const endSelection = () => {
+      this.mouseSelectionInProgress = false;
+    };
+    document.removeEventListener('mouseup', endSelection);
+    window.removeEventListener('blur', endSelection);
+    
     this.closeSearch();
     this.resizeObserver.disconnect();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
