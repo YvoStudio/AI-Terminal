@@ -34,7 +34,8 @@ export class TabBar {
     renameItem.className = 'tab-context-menu-item';
     renameItem.textContent = '重命名标签';
     renameItem.addEventListener('click', (e) => {
-      e.stopPropagation(); this.closeContextMenu(); this.startEditing(titleEl, tabId);
+      e.stopPropagation(); this.closeContextMenu();
+      requestAnimationFrame(() => this.startEditing(titleEl, tabId));
     });
 
     const colorItem = document.createElement('div');

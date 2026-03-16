@@ -19,6 +19,7 @@ export class TerminalView {
   private scrollCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   private mouseSelectionInProgress = false;
+  private userScrolledUp = false;
 
   constructor(
     private tabId: string,
@@ -271,13 +272,29 @@ export class TerminalView {
     this.scrollBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11.5l-5-5h10z"/></svg>';
     this.scrollBtn.title = '回到底部';
     this.scrollBtn.addEventListener('click', () => {
+      this.userScrolledUp = false;
       this.terminal.scrollToBottom();
       this.terminal.focus();
     });
     this.wrapper.appendChild(this.scrollBtn);
 
+    // Track user scroll: mouse wheel means user is scrolling manually
+    this.wrapper.addEventListener('wheel', () => {
+      const buf = this.terminal.buffer.active;
+      // After wheel, check if user scrolled away from bottom
+      requestAnimationFrame(() => {
+        this.userScrolledUp = buf.viewportY < buf.baseY - 3;
+      });
+    });
+
     this.terminal.onScroll(() => this.updateScrollBtn());
-    this.terminal.onWriteParsed(() => this.updateScrollBtn());
+    this.terminal.onWriteParsed(() => {
+      // If new content arrives and user hasn't scrolled up, stay at bottom
+      if (!this.userScrolledUp) {
+        this.terminal.scrollToBottom();
+      }
+      this.updateScrollBtn();
+    });
     // Periodic check for scroll position (catches mouse wheel and other scroll events)
     this.scrollCheckTimer = setInterval(() => this.updateScrollBtn(), 500);
 
@@ -290,7 +307,8 @@ export class TerminalView {
 
   private updateScrollBtn() {
     const buf = this.terminal.buffer.active;
-    const atBottom = buf.viewportY >= buf.baseY;
+    const atBottom = buf.baseY - buf.viewportY <= 3;
+    if (atBottom) this.userScrolledUp = false;
     this.scrollBtn.classList.toggle('visible', !atBottom);
   }
 
@@ -317,35 +335,37 @@ export class TerminalView {
 
   static getFontFamily(family: string): string {
     const fonts = getPlatformFonts();
-    
-    switch (family) {
-      case 'consolas':
-        return `'Consolas', ${fonts.chinese}, monospace`;
-      case 'courier':
-        return `'Courier New', ${fonts.chinese}, monospace`;
-      case 'lucida':
-        return `'Lucida Console', ${fonts.chinese}, monospace`;
-      case 'auto':
-      default:
-        return `${fonts.mono}, ${fonts.chinese}, monospace`;
-    }
+    const cn = fonts.chinese;
+
+    const fontMap: Record<string, string> = {
+      // macOS fonts
+      'menlo': `'Menlo', ${cn}, monospace`,
+      'monaco': `'Monaco', ${cn}, monospace`,
+      'meslo-nerd': `'MesloLGS Nerd Font', 'Menlo', ${cn}, monospace`,
+      'hack-nerd': `'Hack Nerd Font', 'Menlo', ${cn}, monospace`,
+      // Windows fonts
+      'consolas': `'Consolas', ${cn}, monospace`,
+      'cascadia': `'Cascadia Code', ${cn}, monospace`,
+      'lucida': `'Lucida Console', ${cn}, monospace`,
+      'caskaydia-nerd': `'CaskaydiaCove Nerd Font', 'Consolas', ${cn}, monospace`,
+      // Shared
+      'courier': `'Courier New', ${cn}, monospace`,
+    };
+
+    return fontMap[family] || `${fonts.mono}, ${cn}, monospace`;
   }
 
   fit() {
     try {
-      // Preserve scroll position across resize to prevent jumping to top
       const buf = this.terminal.buffer.active;
-      const wasAtBottom = buf.viewportY >= buf.baseY;
       const savedViewportY = buf.viewportY;
 
       this.fitAddon.fit();
-      // Report 1 less col to PTY to prevent edge-case line wrapping
-      // (scrollbar width and sub-pixel rounding can cause off-by-one)
       const safeCols = Math.max(1, this.terminal.cols - 1);
       api.resizeTerminal(this.tabId, safeCols, this.terminal.rows);
 
-      // Restore scroll: if user was at bottom, stay at bottom; otherwise try to keep position
-      if (wasAtBottom) {
+      // If user hasn't scrolled up, always stay at bottom
+      if (!this.userScrolledUp) {
         this.terminal.scrollToBottom();
       } else {
         this.terminal.scrollToLine(savedViewportY);

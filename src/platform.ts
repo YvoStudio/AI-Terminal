@@ -16,7 +16,7 @@ export const platformConfig = {
     mono: isMac ? "'SF Mono', 'Menlo', monospace" : isWindows ? "'Consolas', monospace" : "'Cascadia Code', 'Ubuntu Mono', monospace",
     chinese: isWindows ? "'SimHei', 'Microsoft YaHei', sans-serif" : isMac ? "system-ui, 'PingFang SC', sans-serif" : "'Noto Sans CJK SC', 'WenQuanYi Zen Hei', sans-serif",
   },
-  fontSize: isWindows ? 15 : 14,
+  fontSize: isWindows ? 15 : 13,
   titleBar: isMac ? 'native' : 'custom' as const,
   shells: isWindows ? ['cmd', 'powershell', 'wsl'] : ['bash'],
 } as const;

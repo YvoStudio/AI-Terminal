@@ -3,7 +3,28 @@ import { appState } from './components/app-state';
 import { TabBar } from './components/tab-bar';
 import { TerminalView } from './components/terminal-view';
 import { themes } from './components/themes';
-import { isMac, shouldUseNativeTitleBar } from './platform';
+import { isMac, isWindows, shouldUseNativeTitleBar } from './platform';
+
+function getFontFamilyOptions(): string {
+  if (isMac) {
+    return `
+      <option value="auto">默认 (SF Mono)</option>
+      <option value="menlo">Menlo</option>
+      <option value="monaco">Monaco</option>
+      <option value="courier">Courier New</option>
+      <option value="meslo-nerd">MesloLGS Nerd Font</option>
+      <option value="hack-nerd">Hack Nerd Font</option>
+    `;
+  } else {
+    return `
+      <option value="auto">默认 (Consolas)</option>
+      <option value="cascadia">Cascadia Code</option>
+      <option value="courier">Courier New</option>
+      <option value="lucida">Lucida Console</option>
+      <option value="caskaydia-nerd">CaskaydiaCove Nerd Font</option>
+    `;
+  }
+}
 
 const terminalViews = new Map<string, TerminalView>();
 const container = document.getElementById('terminal-container')!;
@@ -137,9 +158,11 @@ if (shouldUseNativeTitleBar()) {
 }
 
 // On Windows we need decorations:false — set via Tauri API
-import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-  getCurrentWindow().setDecorations(false).catch(() => {});
-});
+if (!shouldUseNativeTitleBar()) {
+  import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+    getCurrentWindow().setDecorations(false).catch(() => {});
+  });
+}
 
 // Double-click tab bar to maximize/restore
 document.getElementById('tab-bar')!.addEventListener('dblclick', (e) => {
@@ -435,6 +458,7 @@ function toggleTipsPanel() {
         <div class="tips-setting-item">
           <label>字号</label>
           <select id="font-size-select">
+            <option value="11">11</option>
             <option value="12">12</option>
             <option value="13">13</option>
             <option value="14">14</option>
@@ -447,10 +471,7 @@ function toggleTipsPanel() {
         <div class="tips-setting-item">
           <label>字体</label>
           <select id="font-family-select">
-            <option value="auto">自动 (平台默认)</option>
-            <option value="consolas">Consolas (推荐)</option>
-            <option value="courier">Courier New</option>
-            <option value="lucida">Lucida Console</option>
+            ${getFontFamilyOptions()}
           </select>
         </div>
       </div>

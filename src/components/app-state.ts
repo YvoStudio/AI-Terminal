@@ -26,7 +26,7 @@ class AppState {
   private listeners: Array<() => void> = [];
 
   subscribe(fn: () => void) { this.listeners.push(fn); }
-  private notify() { this.listeners.forEach(fn => fn()); }
+  private notify() { this.listeners.forEach(fn => { try { fn(); } catch(e) { console.error('[AppState] listener error:', e); } }); }
 
   addTab(id: string): TabState {
     const index = this.tabOrder.length + 1;
@@ -79,7 +79,12 @@ class AppState {
   setStatus(id: string, status: TabStatus) {
     const tab = this.tabs.get(id);
     if (!tab) return;
-    tab.status = status;
+    // If this is the active tab, don't mark as done-unseen — user is already viewing it
+    if (id === this.activeTabId && status === 'done-unseen') {
+      tab.status = 'active';
+    } else {
+      tab.status = status;
+    }
     this.notify();
   }
 

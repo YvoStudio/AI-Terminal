@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Terminal - 为 AI 编程工具优化的终端</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            min-height: 100vh;
+        }
+        .hero {
+            text-align: center;
+            padding: 80px 20px 60px;
+            background: linear-gradient(180deg, #161b22 0%, #0d1117 100%);
+        }
+        .hero img {
+            width: 120px;
+            height: 120px;
+            border-radius: 24px;
+            margin-bottom: 24px;
+        }
+        .hero h1 {
+            font-size: 42px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            background: linear-gradient(135deg, #4ade80, #22d3ee);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .hero p {
+            font-size: 18px;
+            color: #8b949e;
+            max-width: 600px;
+            margin: 0 auto 40px;
+            line-height: 1.6;
+        }
+        .download-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            background: #238636;
+            color: #fff;
+            text-decoration: none;
+            padding: 14px 32px;
+            border-radius: 8px;
+            font-size: 17px;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        .download-btn:hover { background: #2ea043; }
+        .download-btn svg { width: 20px; height: 20px; fill: currentColor; }
+        .version {
+            margin-top: 12px;
+            font-size: 14px;
+            color: #484f58;
+        }
+        .features {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 20px 60px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 20px;
+        }
+        .feature {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 24px;
+        }
+        .feature h3 {
+            font-size: 16px;
+            margin-bottom: 8px;
+            color: #4ade80;
+        }
+        .feature p {
+            font-size: 14px;
+            color: #8b949e;
+            line-height: 1.5;
+        }
+        .install-guide {
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 0 20px 80px;
+        }
+        .install-guide h2 {
+            font-size: 24px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .steps {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 28px;
+        }
+        .step {
+            margin-bottom: 20px;
+        }
+        .step:last-child { margin-bottom: 0; }
+        .step-num {
+            display: inline-block;
+            width: 28px;
+            height: 28px;
+            line-height: 28px;
+            text-align: center;
+            background: #238636;
+            border-radius: 50%;
+            font-size: 14px;
+            font-weight: 600;
+            margin-right: 10px;
+            flex-shrink: 0;
+        }
+        .step-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+        .step-desc {
+            font-size: 14px;
+            color: #8b949e;
+            line-height: 1.5;
+            margin-left: 38px;
+        }
+        code {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 2px 8px;
+            font-family: "SF Mono", "Fira Code", monospace;
+            font-size: 13px;
+            color: #f0883e;
+        }
+        .cmd-block {
+            display: block;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 14px 18px;
+            margin: 10px 0 0 38px;
+            font-family: "SF Mono", "Fira Code", monospace;
+            font-size: 14px;
+            color: #e6edf3;
+            position: relative;
+            cursor: pointer;
+            user-select: all;
+            word-break: break-all;
+        }
+        .cmd-block::after {
+            content: "点击复制";
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 12px;
+            color: #484f58;
+            font-family: -apple-system, sans-serif;
+            pointer-events: none;
+        }
+        .cmd-block.copied::after {
+            content: "已复制!";
+            color: #4ade80;
+        }
+        .warn {
+            background: #1c1305;
+            border: 1px solid #bb8009;
+            border-radius: 8px;
+            padding: 14px 18px;
+            margin: 16px 0 0 38px;
+            font-size: 13px;
+            color: #d29922;
+            line-height: 1.5;
+        }
+        .footer {
+            text-align: center;
+            padding: 30px 20px;
+            color: #484f58;
+            font-size: 13px;
+            border-top: 1px solid #21262d;
+        }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <img src="icon.png" alt="AI Terminal">
+        <h1>AI Terminal</h1>
+        <p>专为 AI 编程工具（Claude Code、OpenCode、Codex 等）优化的跨平台终端，自动识别 AI 活动、解析工具调用、智能侧边栏</p>
+        <a href="AI Terminal_0.1.0_aarch64.dmg" class="download-btn">
+            <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+            下载 macOS 版 (Apple Silicon)
+        </a>
+        <div class="version">v0.1.0 · macOS 12+ · Apple Silicon (M1/M2/M3/M4)</div>
+    </div>
+
+    <div class="features">
+        <div class="feature">
+            <h3>AI 感知</h3>
+            <p>自动检测 Claude Code / Aider 活动状态，标签页显示运行状态（活跃 / 已完成）</p>
+        </div>
+        <div class="feature">
+            <h3>智能侧边栏</h3>
+            <p>解析 AI 工具调用（Read / Edit / Write / Bash），以时间线形式展示操作历史</p>
+        </div>
+        <div class="feature">
+            <h3>记事本草稿</h3>
+            <p>内置记事本面板，在 AI 运行时提前编写下一条 Prompt，随时粘贴发送</p>
+        </div>
+        <div class="feature">
+            <h3>多标签终端</h3>
+            <p>多标签管理、拖拽排序、右键切换 Shell、标签状态持久化</p>
+        </div>
+        <div class="feature">
+            <h3>会话历史</h3>
+            <p>扫描 Claude 会话记录，支持查看历史对话和一键恢复（Resume）</p>
+        </div>
+        <div class="feature">
+            <h3>丰富主题</h3>
+            <p>内置多款主题（Pure Black、One Dark、Dracula、Tokyo Night 等），WebGL 加速渲染</p>
+        </div>
+    </div>
+
+    <div class="install-guide">
+        <h2>安装说明</h2>
+        <div class="steps">
+            <div class="step">
+                <span class="step-num">1</span>
+                <span class="step-title">下载并安装</span>
+                <div class="step-desc">下载 .dmg 文件，双击打开后将 AI Terminal 拖入 Applications 文件夹</div>
+            </div>
+            <div class="step">
+                <span class="step-num">2</span>
+                <span class="step-title">解除安全限制</span>
+                <div class="step-desc">
+                    由于应用未经 Apple 签名，首次打开会提示"已损坏"或"无法验证开发者"。<br>
+                    打开「终端」应用，执行以下命令：
+                </div>
+                <div class="cmd-block" onclick="copyCmd(this)">xattr -cr /Applications/AI\ Terminal.app</div>
+                <div class="warn">
+                    如果你没有将 App 放在 Applications 文件夹，请将命令中的路径替换为 App 的实际位置。
+                </div>
+            </div>
+            <div class="step">
+                <span class="step-num">3</span>
+                <span class="step-title">打开应用</span>
+                <div class="step-desc">执行命令后即可正常打开 AI Terminal，后续无需重复操作。</div>
+            </div>
+        </div>
+    </div>
+
+    <footer class="footer">AI Terminal &copy; 2026</footer>
+
+    <script>
+        function copyCmd(el) {
+            navigator.clipboard.writeText(el.textContent.trim());
+            el.classList.add('copied');
+            setTimeout(() => el.classList.remove('copied'), 1500);
+        }
+    </script>
+</body>
+</html>
