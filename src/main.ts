@@ -304,8 +304,7 @@ appState.subscribe(() => renderNoteBlocks());
   document.addEventListener('click', () => { if (tipsOpen && tipsEl) { tipsEl.remove(); tipsEl = null; tipsOpen = false; } });
 })();
 
-// Shared panel close helpers (so attach & history can dismiss each other)
-let _closeAttachMenu: (() => void) | null = null;
+// Shared panel close helpers
 let _closeHistoryPanel: (() => void) | null = null;
 
 // History panel (unified: Claude sessions first, then plain history)
@@ -334,7 +333,7 @@ let _closeHistoryPanel: (() => void) | null = null;
   historyBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (historyOpen && historyEl) { closeHistory(); return; }
-    if (_closeAttachMenu) _closeAttachMenu();
+    // close other panels if needed
 
     historyEl = document.createElement('div');
     historyEl.className = 'tips-panel';
@@ -464,46 +463,17 @@ let _closeHistoryPanel: (() => void) | null = null;
   document.addEventListener('click', () => { closeHistory(); });
 })();
 
-// Attach button — file/dir picker menu
-(() => {
-  const attachBtn = document.getElementById('btn-attach')!;
-  let menuOpen = false;
-  let menuEl: HTMLElement | null = null;
-
-  function closeAttach() { if (menuOpen && menuEl) { menuEl.remove(); menuEl = null; menuOpen = false; attachBtn.classList.remove('menu-open'); } }
-  _closeAttachMenu = closeAttach;
-
-  attachBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (menuOpen && menuEl) { closeAttach(); return; }
-    if (_closeHistoryPanel) _closeHistoryPanel();
-
-    menuEl = document.createElement('div');
-    menuEl.className = 'attach-menu';
-    menuEl.innerHTML = `
-      <div class="attach-menu-item" data-type="file">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13 1H5a1 1 0 00-1 1v2H3a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1v-2h1a1 1 0 001-1V3l-2-2zm-3 13H4V6h6v8zm3-3h-1V5a1 1 0 00-1-1H6V3h4l2 2v6z"/></svg>
-        文件
-      </div>
-      <div class="attach-menu-item" data-type="dir">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M14 3H7.5L6 1.5H2a1 1 0 00-1 1v11a1 1 0 001 1h12a1 1 0 001-1V4a1 1 0 00-1-1z"/></svg>
-        目录
-      </div>
-    `;
-    menuEl.addEventListener('click', async (ev) => {
-      const item = (ev.target as HTMLElement).closest('.attach-menu-item') as HTMLElement | null;
-      if (!item || !appState.activeTabId) return;
-      menuEl?.remove(); menuEl = null; menuOpen = false;
-      const type = item.dataset.type;
-      const p = type === 'dir' ? await api.selectDirectory() : await api.selectFile();
-      if (p) api.writeTerminal(appState.activeTabId, p);
-    });
-    document.body.appendChild(menuEl);
-    menuOpen = true;
-    attachBtn.classList.add('menu-open');
-  });
-  document.addEventListener('click', () => { closeAttach(); });
-})();
+// Attach buttons — direct file/dir picker (no submenu)
+document.getElementById('btn-attach-file')!.addEventListener('click', async () => {
+  if (!appState.activeTabId) return;
+  const p = await api.selectFile();
+  if (p) api.writeTerminal(appState.activeTabId, p);
+});
+document.getElementById('btn-attach-dir')!.addEventListener('click', async () => {
+  if (!appState.activeTabId) return;
+  const p = await api.selectDirectory();
+  if (p) api.writeTerminal(appState.activeTabId, p);
+});
 
 // Backend events — auto-send notepad blocks when Claude is waiting
 api.onTabStatusChanged((tabId, status) => {
