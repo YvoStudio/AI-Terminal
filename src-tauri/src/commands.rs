@@ -110,9 +110,13 @@ pub fn create_terminal(
 ) -> Result<String, String> {
     let tab_id = Uuid::new_v4().to_string();
 
+    let initial_cwd = cwd.clone().unwrap_or_else(|| {
+        std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()
+    });
+
     {
         let mut parser = parser_state.lock().map_err(|e| e.to_string())?;
-        parser.init_tab(&tab_id);
+        parser.init_tab_with_cwd(&tab_id, &initial_cwd);
     }
 
     let parser_arc = Arc::clone(&*parser_state);
@@ -152,10 +156,11 @@ pub fn switch_shell(
         mgr.close(&tab_id);
     }
 
-    // Re-init parser state for the tab
+    // Re-init parser state for the tab, preserving cwd
     {
         let mut parser = parser_state.lock().map_err(|e| e.to_string())?;
-        parser.init_tab(&tab_id);
+        let cwd_str = cwd.clone().unwrap_or_default();
+        parser.init_tab_with_cwd(&tab_id, &cwd_str);
     }
 
     // Create new PTY with same cwd
@@ -566,6 +571,14 @@ fn parse_session_user_messages(path: &PathBuf, limit: usize) -> Result<Vec<Strin
     // Return last N messages
     let start = if messages.len() > limit { messages.len() - limit } else { 0 };
     Ok(messages[start..].to_vec())
+}
+
+// ── Clipboard ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn read_clipboard_text() -> Result<String, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.get_text().map_err(|e| e.to_string())
 }
 
 // ── Clipboard image ────────────────────────────────────────────────────────

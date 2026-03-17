@@ -66,6 +66,16 @@ impl OutputParser {
             .or_insert_with(TabState::new);
     }
 
+    pub fn init_tab_with_cwd(&mut self, tab_id: &str, cwd: &str) {
+        let state = self
+            .states
+            .entry(tab_id.to_string())
+            .or_insert_with(TabState::new);
+        if !cwd.is_empty() {
+            state.cwd = cwd.to_string();
+        }
+    }
+
     pub fn remove_tab(&mut self, tab_id: &str) {
         self.states.remove(tab_id);
     }
@@ -92,6 +102,16 @@ impl OutputParser {
             .entry(tab_id.to_string())
             .or_insert_with(TabState::new);
         let now = now_ms();
+
+        // Parse OSC 7 (cwd notification) before stripping ANSI
+        // Format: \x1b]7;file://hostname/path\x07  or  \x1b]7;file://hostname/path\x1b\\
+        if let Some(new_cwd) = extract_osc7_cwd(raw) {
+            eprintln!("OSC 7 cwd detected: '{}'", new_cwd);
+            if new_cwd != state.cwd {
+                state.update_cwd(new_cwd.clone());
+                on_cwd_changed(tab_id.to_string(), new_cwd);
+            }
+        }
 
         // Bell char → done-unseen
         if raw.contains('\x07') && !state.is_active {
@@ -219,6 +239,55 @@ impl OutputParser {
         state.mute_until = now_ms() + ms;
         state.buffer.clear();
     }
+}
+
+/// Extract cwd from OSC 7 escape sequence
+/// Format: \x1b]7;file://hostname/path\x07  or  \x1b]7;file://hostname/path\x1b\\
+fn extract_osc7_cwd(raw: &str) -> Option<String> {
+    // Find OSC 7 sequence start
+    let marker = "\x1b]7;";
+    let start = raw.find(marker)?;
+    let after = &raw[start + marker.len()..];
+
+    // Find the terminator: BEL (\x07) or ST (\x1b\\)
+    let end = after.find('\x07')
+        .or_else(|| after.find("\x1b\\"))?;
+    let uri = &after[..end];
+
+    // Parse file:// URI — format: file://hostname/path or file:///path
+    if let Some(path_start) = uri.strip_prefix("file://") {
+        // Skip hostname (find the next /)
+        if let Some(slash_pos) = path_start.find('/') {
+            let path = &path_start[slash_pos..];
+            // URL-decode percent-encoded characters (e.g., %20 for space, CJK chars)
+            let decoded = percent_decode(path);
+            if !decoded.is_empty() {
+                return Some(decoded);
+            }
+        }
+    }
+    None
+}
+
+/// Simple percent-decoding for file URIs
+fn percent_decode(s: &str) -> String {
+    let mut result = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(
+                &s[i + 1..i + 3], 16
+            ) {
+                result.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
 }
 
 fn truncate_str(s: &str, max_bytes: usize) -> &str {

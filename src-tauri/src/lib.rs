@@ -47,6 +47,7 @@ pub fn run() {
             commands::select_file,
             commands::select_image,
             commands::select_directory,
+            commands::read_clipboard_text,
             commands::save_clipboard_image,
             commands::clear_badge,
             commands::list_claude_sessions,

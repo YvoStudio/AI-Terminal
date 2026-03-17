@@ -645,9 +645,12 @@ let _closeHistoryPanel: (() => void) | null = null;
       const preview = s.user_messages.length > 0
         ? s.user_messages.map(m => m.slice(0, 50)).join(' → ')
         : '';
+      // Use first user message as display name instead of slug
+      const firstMsg = s.user_messages.length > 0 ? s.user_messages[0] : '';
+      const displayName = firstMsg.length > 30 ? firstMsg.slice(0, 30) + '…' : (firstMsg || s.slug);
       items.push({
         type: 'session',
-        name: s.slug,
+        name: displayName,
         cwd: s.cwd,
         time: s.timestamp ? new Date(s.timestamp) : new Date(0),
         sessionId: s.session_id,
@@ -732,7 +735,7 @@ let _closeHistoryPanel: (() => void) | null = null;
         console.log('[History Click] type:', item.type, 'cwd:', item.cwd, 'name:', item.name, 'aiTool:', item.aiTool);
         if (item.type === 'session') {
           console.log('[History Click] Creating session tab:', item.slug, item.cwd, 'sessionId:', item.sessionId);
-          const tabId = await createTab(`↻ ${item.slug}`, undefined, item.cwd || undefined);
+          const tabId = await createTab(`↻ ${item.name}`, undefined, item.cwd || undefined);
           console.log('[History Click] Created tab:', tabId);
           setTimeout(() => api.writeTerminal(tabId, `claude --resume ${item.sessionId}\n`), 500);
           switchToTab(tabId);

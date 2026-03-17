@@ -144,6 +144,10 @@ export const api = {
     return invoke<string>('select_directory');
   },
 
+  async readClipboardText(): Promise<string> {
+    return invoke<string>('read_clipboard_text');
+  },
+
   async saveClipboardImage(dataUrl: string): Promise<string> {
     return invoke<string>('save_clipboard_image', { dataUrl });
   },
