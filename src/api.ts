@@ -154,6 +154,10 @@ export const api = {
     return invoke<string>('save_clipboard_image', { dataUrl });
   },
 
+  async convertImagePath(filePath: string): Promise<string> {
+    return invoke<string>('convert_image_path', { filePath });
+  },
+
   async listClaudeSessions(projectCwd?: string): Promise<ClaudeSession[]> {
     return invoke<ClaudeSession[]>('list_claude_sessions', { projectCwd: projectCwd ?? null });
   },

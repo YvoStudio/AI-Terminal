@@ -49,6 +49,7 @@ pub fn run() {
             commands::select_directory,
             commands::read_clipboard_text,
             commands::save_clipboard_image,
+            commands::convert_image_path,
             commands::clear_badge,
             commands::list_claude_sessions,
             commands::get_claude_session_history,

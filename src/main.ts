@@ -1,5 +1,6 @@
 import { api } from './api';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { appState } from './components/app-state';
 import { TabBar } from './components/tab-bar';
 import { TerminalView } from './components/terminal-view';
@@ -285,6 +286,7 @@ function renderNoteBlocks(force = false) {
     const textarea = document.createElement('textarea');
     textarea.placeholder = '输入文本...';
     textarea.value = block.content;
+    textarea.dataset.blockId = block.id;
     textarea.rows = 3;
     textarea.addEventListener('input', () => {
       block.content = textarea.value;
@@ -314,6 +316,53 @@ function renderNoteBlocks(force = false) {
           };
           reader.readAsDataURL(blob);
           return;
+        }
+      }
+    });
+
+    // Drag and drop support
+    textarea.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      textarea.style.borderColor = 'var(--accent-blue)';
+    });
+    textarea.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      textarea.style.borderColor = '';
+    });
+    textarea.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      textarea.style.borderColor = '';
+      const items = e.dataTransfer?.items;
+      if (!items) return;
+      
+      for (const item of Array.from(items)) {
+        if (item.kind === 'file') {
+          const file = item.getAsFile();
+          if (!file) continue;
+          
+          if (file.type.startsWith('image/')) {
+            // Image file - save and show preview
+            const reader = new FileReader();
+            reader.onload = async () => {
+              try {
+                const filePath = await api.saveClipboardImage(reader.result as string);
+                if (filePath) {
+                  if (!block.images) block.images = [];
+                  block.images.push(filePath);
+                  appState.persistTabs();
+                  renderNoteBlocks(true);
+                }
+              } catch (err) { console.error('Failed to save dropped image:', err); }
+            };
+            reader.readAsDataURL(file);
+          } else {
+            // Other file - insert file path (name only for browser security)
+            const insertText = `"${file.name}" `;
+            const pos = textarea.selectionStart;
+            textarea.value = textarea.value.slice(0, pos) + insertText + textarea.value.slice(pos);
+            block.content = textarea.value;
+            appState.persistTabs();
+          }
         }
       }
     });
@@ -840,6 +889,10 @@ let _closeHistoryPanel: (() => void) | null = null;
           // Auto-start AI tool if saved
           if (item.aiTool === 'claude') {
             setTimeout(() => api.writeTerminal(tabId, 'claude\n'), 500);
+          } else if (item.aiTool === 'opencode') {
+            setTimeout(() => api.writeTerminal(tabId, 'opencode\n'), 500);
+          } else if (item.aiTool === 'codex') {
+            setTimeout(() => api.writeTerminal(tabId, 'codex\n'), 500);
           }
           switchToTab(tabId);
         }
@@ -1132,3 +1185,138 @@ async function init() {
 }
 
 init();
+
+// Global drag-drop support with Tauri - using tauri://drag-drop event for full file paths
+let dragCounter = 0;
+
+// Listen for Tauri drag-drop events to get full file paths
+listen<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-drop', async (event) => {
+  const tabId = appState.activeTabId;
+  if (!tabId || !event.payload.paths || event.payload.paths.length === 0) return;
+
+  // Determine if we're dropping on notepad or terminal by checking element at drop position
+  const pos = event.payload.position;
+  const elementAtDrop = document.elementFromPoint(pos.x, pos.y);
+  const notepadEl = document.getElementById('notepad');
+
+  // Check if notepad is visible and drop is within notepad area
+  const isNotepadVisible = notepadEl && !notepadEl.classList.contains('hidden');
+  const isInNotepadArea = elementAtDrop && notepadEl?.contains(elementAtDrop);
+
+  // Try to find textarea - either directly under drop or the focused textarea in notepad
+  let notepadTextarea: HTMLTextAreaElement | null = null;
+  if (isNotepadVisible && isInNotepadArea) {
+    // First try: check if drop is directly on a textarea
+    if (elementAtDrop?.tagName === 'TEXTAREA') {
+      notepadTextarea = elementAtDrop as HTMLTextAreaElement;
+    } else {
+      // Second try: find closest textarea ancestor
+      const closestTextarea = elementAtDrop?.closest('#notepad-blocks textarea') as HTMLTextAreaElement | null;
+      if (closestTextarea) {
+        notepadTextarea = closestTextarea;
+      } else {
+        // Third try: use the currently focused textarea if it's in notepad
+        const activeEl = document.activeElement;
+        if (activeEl?.tagName === 'TEXTAREA' && notepadEl.contains(activeEl)) {
+          notepadTextarea = activeEl as HTMLTextAreaElement;
+        }
+      }
+    }
+  }
+
+  for (const filePath of event.payload.paths) {
+    const isImage = /\.(jpg|jpeg|png|gif|bmp|webp|svg|ico)$/i.test(filePath);
+
+    if (notepadTextarea) {
+      // Dropping on notepad - insert file path or image markdown
+      const cursorPos = notepadTextarea.selectionStart || 0;
+      const currentValue = notepadTextarea.value;
+      const before = currentValue.substring(0, cursorPos);
+      const after = currentValue.substring(cursorPos);
+
+      // Find the corresponding block
+      const tab = appState.tabs.get(tabId);
+      const blockId = notepadTextarea.dataset.blockId;
+      const block = tab?.noteBlocks.find(b => b.id === blockId);
+
+      if (isImage) {
+        if (block) {
+          // Copy image to temp and add to block's images array
+          try {
+            const imgPath = await api.convertImagePath(filePath);
+            if (imgPath) {
+              if (!block.images) block.images = [];
+              block.images.push(imgPath);
+              appState.persistTabs();
+              renderNoteBlocks(true);
+            }
+          } catch (err) {
+            console.error('Failed to process dropped image:', err);
+          }
+        } else {
+          // Fallback: insert image markdown with original path
+          const imageMarkdown = `![image](${filePath})`;
+          notepadTextarea.value = before + imageMarkdown + after;
+          notepadTextarea.selectionStart = notepadTextarea.selectionEnd = cursorPos + imageMarkdown.length;
+        }
+      } else {
+        // Insert file path as text
+        const quotedPath = `"${filePath}"`;
+        notepadTextarea.value = before + quotedPath + after;
+        notepadTextarea.selectionStart = notepadTextarea.selectionEnd = cursorPos + quotedPath.length;
+        // Trigger input event to update block content
+        notepadTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } else {
+      // Dropping on terminal - write file path
+      if (isImage) {
+        // For images, copy to app directory and get the asset URL
+        try {
+          const imgPath = await api.convertImagePath(filePath);
+          if (imgPath) {
+            api.writeTerminal(tabId, imgPath + ' ');
+          } else {
+            // Fallback: just write the original path
+            api.writeTerminal(tabId, `"${filePath}" `);
+          }
+        } catch (err) {
+          console.error('Failed to process dropped image:', err);
+          api.writeTerminal(tabId, `"${filePath}" `);
+        }
+      } else {
+        // Non-image files: write quoted path
+        api.writeTerminal(tabId, `"${filePath}" `);
+      }
+    }
+  }
+});
+
+// Visual feedback for drag operations
+document.addEventListener('dragenter', (e) => {
+  e.preventDefault();
+  dragCounter++;
+  document.body.style.opacity = '0.7';
+});
+
+document.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'copy';
+  }
+});
+
+document.addEventListener('dragleave', (e) => {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter === 0) {
+    document.body.style.opacity = '';
+  }
+});
+
+document.addEventListener('drop', (e) => {
+  // Prevent default browser drop handling
+  // Tauri will emit tauri://drag-drop event with full paths
+  e.preventDefault();
+  dragCounter = 0;
+  document.body.style.opacity = '';
+});

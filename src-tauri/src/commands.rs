@@ -607,3 +607,33 @@ pub fn save_clipboard_image(app: AppHandle, data_url: String) -> Result<String, 
 
     Ok(file_path.to_string_lossy().to_string())
 }
+
+#[tauri::command]
+pub fn convert_image_path(file_path: String) -> Result<String, String> {
+    // Read the source image file
+    let bytes = fs::read(&file_path).map_err(|e| format!("Failed to read image: {}", e))?;
+
+    // Get file extension from original path
+    let ext = PathBuf::from(&file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_lowercase();
+
+    // Create temp directory for images
+    let temp_dir = std::env::temp_dir().join("ai-terminal-images");
+    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+
+    // Generate unique filename
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let filename = format!("drag-{}.{}.{}", ts, Uuid::new_v4().to_string().split('-').next().unwrap_or("x"), ext);
+    let dest_path = temp_dir.join(&filename);
+
+    // Write the file
+    fs::write(&dest_path, bytes).map_err(|e| e.to_string())?;
+
+    Ok(dest_path.to_string_lossy().to_string())
+}
