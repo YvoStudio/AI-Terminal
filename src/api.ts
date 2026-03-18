@@ -34,6 +34,7 @@ export interface HistoryEntry {
   cwd: string;
   timestamp: number;
   shell: 'cmd' | 'powershell' | 'wsl';
+  ai_tool?: string;
 }
 
 // Keep track of per-tab event listeners so we can unlisten on close

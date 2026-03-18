@@ -1119,7 +1119,12 @@ async function init() {
   setupThemePicker();
   const savedTabs = await api.loadTabs();
   if (savedTabs.length > 0) {
-    for (const saved of savedTabs) await createTab(saved.name, saved.noteBlocks, saved.cwd || undefined, saved.shell);
+    for (const saved of savedTabs) {
+      // 验证 shell 值，无效则使用默认值 cmd
+      const validShells: Array<'cmd' | 'powershell' | 'wsl'> = ['cmd', 'powershell', 'wsl'];
+      const shell = saved.shell && validShells.includes(saved.shell) ? saved.shell : undefined;
+      await createTab(saved.name, saved.noteBlocks, saved.cwd || undefined, shell);
+    }
   } else {
     createTab();
   }
