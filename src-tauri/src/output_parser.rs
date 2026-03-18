@@ -113,6 +113,15 @@ impl OutputParser {
             }
         }
 
+        // Parse OSC 0/2 (terminal title) — Claude Code sets this to session name
+        // Format: \x1b]0;title\x07  or  \x1b]2;title\x07
+        if let Some(title) = extract_osc_title(raw) {
+            eprintln!("OSC title detected: '{}'", title);
+            if state.ai_tool.is_some() && !title.is_empty() {
+                on_rename(tab_id.to_string(), title);
+            }
+        }
+
         // Bell char → done-unseen
         if raw.contains('\x07') && !state.is_active {
             on_status(tab_id.to_string(), TabStatus::DoneUnseen);
@@ -241,6 +250,24 @@ impl OutputParser {
     }
 }
 
+/// Extract terminal title from OSC 0 or OSC 2 escape sequence
+/// Format: \x1b]0;title\x07  or  \x1b]2;title\x07
+fn extract_osc_title(raw: &str) -> Option<String> {
+    // Try OSC 2 first (set window title), then OSC 0 (set icon name + title)
+    for marker in &["\x1b]2;", "\x1b]0;"] {
+        if let Some(start) = raw.find(marker) {
+            let after = &raw[start + marker.len()..];
+            let end = after.find('\x07')
+                .or_else(|| after.find("\x1b\\"))?;
+            let title = after[..end].trim();
+            if !title.is_empty() && title.len() < 200 && !title.contains('\n') {
+                return Some(title.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Extract cwd from OSC 7 escape sequence
 /// Format: \x1b]7;file://hostname/path\x07  or  \x1b]7;file://hostname/path\x1b\\
 fn extract_osc7_cwd(raw: &str) -> Option<String> {
@@ -261,7 +288,14 @@ fn extract_osc7_cwd(raw: &str) -> Option<String> {
             let path = &path_start[slash_pos..];
             // URL-decode percent-encoded characters (e.g., %20 for space, CJK chars)
             let decoded = percent_decode(path);
-            if !decoded.is_empty() {
+            // Validate: must look like an absolute path, no control chars or quotes
+            if !decoded.is_empty()
+                && decoded.starts_with('/')
+                && !decoded.contains('"')
+                && !decoded.contains('\n')
+                && !decoded.contains('\x1b')
+                && decoded.len() < 500
+            {
                 return Some(decoded);
             }
         }

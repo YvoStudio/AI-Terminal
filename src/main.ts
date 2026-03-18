@@ -1,4 +1,5 @@
 import { api } from './api';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { appState } from './components/app-state';
 import { TabBar } from './components/tab-bar';
 import { TerminalView } from './components/terminal-view';
@@ -237,9 +238,30 @@ function sendNoteBlock(tabId: string, blockId: string) {
   const tab = appState.tabs.get(tabId);
   if (!tab) return;
   const block = tab.noteBlocks.find(b => b.id === blockId);
-  if (!block || !block.content.trim()) return;
-  api.writeTerminal(tabId, block.content);
+  if (!block) return;
+  const hasText = block.content.trim().length > 0;
+  const hasImages = block.images && block.images.length > 0;
+  if (!hasText && !hasImages) return;
+  // Send images first (as file paths), then text content
+  if (hasImages) {
+    for (const imgPath of block.images!) {
+      api.writeTerminal(tabId, imgPath + ' ');
+    }
+  }
+  if (hasText) {
+    api.writeTerminal(tabId, block.content);
+  }
   removeNoteBlock(tabId, blockId);
+}
+
+function showImagePreview(src: string) {
+  const overlay = document.createElement('div');
+  overlay.className = 'image-preview-overlay';
+  const img = document.createElement('img');
+  img.src = src;
+  overlay.appendChild(img);
+  overlay.addEventListener('click', () => overlay.remove());
+  document.body.appendChild(overlay);
 }
 
 let lastRenderedTabId: string | null = null;
@@ -269,10 +291,78 @@ function renderNoteBlocks(force = false) {
       textarea.style.height = textarea.scrollHeight + 'px';
       appState.persistTabs();
     });
+    textarea.addEventListener('paste', async (e) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          const blob = item.getAsFile();
+          if (!blob) return;
+          const reader = new FileReader();
+          reader.onload = async () => {
+            try {
+              const filePath = await api.saveClipboardImage(reader.result as string);
+              if (filePath) {
+                if (!block.images) block.images = [];
+                block.images.push(filePath);
+                appState.persistTabs();
+                renderNoteBlocks(true);
+              }
+            } catch (err) { console.error('Failed to save pasted image:', err); }
+          };
+          reader.readAsDataURL(blob);
+          return;
+        }
+      }
+    });
     requestAnimationFrame(() => { textarea.style.height = 'auto'; textarea.style.height = textarea.scrollHeight + 'px'; });
+
+    // Image previews
+    if (block.images && block.images.length > 0) {
+      const imgContainer = document.createElement('div');
+      imgContainer.className = 'note-block-images';
+      for (const imgPath of block.images) {
+        const imgWrap = document.createElement('div');
+        imgWrap.className = 'note-block-img-wrap';
+        const img = document.createElement('img');
+        img.src = convertFileSrc(imgPath);
+        img.title = imgPath;
+        img.style.cursor = 'pointer';
+        img.addEventListener('click', (e) => {
+          e.stopPropagation();
+          showImagePreview(convertFileSrc(imgPath));
+        });
+        const rmBtn = document.createElement('button');
+        rmBtn.className = 'note-block-img-remove';
+        rmBtn.textContent = '×';
+        rmBtn.addEventListener('click', () => {
+          block.images = (block.images || []).filter(p => p !== imgPath);
+          appState.persistTabs();
+          renderNoteBlocks(true);
+        });
+        imgWrap.appendChild(img);
+        imgWrap.appendChild(rmBtn);
+        imgContainer.appendChild(imgWrap);
+      }
+      el.appendChild(imgContainer);
+    }
 
     const actions = document.createElement('div');
     actions.className = 'note-block-actions';
+    const imgBtn = document.createElement('button');
+    imgBtn.className = 'note-block-btn';
+    imgBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M14 1H2a1 1 0 00-1 1v12a1 1 0 001 1h12a1 1 0 001-1V2a1 1 0 00-1-1zm-1 12H3l3-4 2 2.5L11 7l2 6z"/><circle cx="5.5" cy="5.5" r="1.5"/></svg>';
+    imgBtn.title = '插入图片';
+    imgBtn.addEventListener('click', async () => {
+      const p = await api.selectImage();
+      if (p) {
+        if (!block.images) block.images = [];
+        block.images.push(p);
+        appState.persistTabs();
+        renderNoteBlocks(true);
+      }
+    });
     const sendBtn = document.createElement('button');
     sendBtn.className = 'note-block-btn send';
     sendBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M1 1l14 7-14 7V9l10-1-10-1z"/></svg> 发送';
@@ -281,6 +371,7 @@ function renderNoteBlocks(force = false) {
     deleteBtn.className = 'note-block-btn delete';
     deleteBtn.textContent = '删除';
     deleteBtn.addEventListener('click', () => removeNoteBlock(tabId, block.id));
+    actions.appendChild(imgBtn);
     actions.appendChild(deleteBtn);
     actions.appendChild(sendBtn);
     el.appendChild(textarea);
@@ -737,7 +828,8 @@ let _closeHistoryPanel: (() => void) | null = null;
           console.log('[History Click] Creating session tab:', item.slug, item.cwd, 'sessionId:', item.sessionId);
           const tabId = await createTab(`↻ ${item.name}`, undefined, item.cwd || undefined);
           console.log('[History Click] Created tab:', tabId);
-          setTimeout(() => api.writeTerminal(tabId, `claude --resume ${item.sessionId}\n`), 500);
+          const nameArg = item.name ? ` -n '${item.name.replace(/'/g, "'\\''")}'` : '';
+          setTimeout(() => api.writeTerminal(tabId, `claude --resume ${item.sessionId}${nameArg}\n`), 500);
           switchToTab(tabId);
         } else {
           console.log('[History Click] Creating history tab:', item.name, item.cwd, item.shell, 'aiTool:', item.aiTool);
@@ -797,7 +889,10 @@ api.onTabStatusChanged((tabId, status) => {
 });
 api.onTabAutoRenamed((tabId, name) => {
   const tab = appState.tabs.get(tabId);
-  if (tab && tab.title.startsWith('Terminal ')) {
+  if (!tab || tab.title === name) return;
+  // Always update if AI tool is active (Claude session name change via OSC title)
+  // Otherwise only update default "Terminal X" names (auto-rename after 5 inputs)
+  if (tab.aiTool || tab.title.startsWith('Terminal ') || tab.title.startsWith('↻ ')) {
     appState.renameTab(tabId, name);
     api.updateHistoryName(tabId, name);
   }
@@ -820,6 +915,8 @@ api.onAiDetected((tabId, cwd, aiTool) => {
 // 监听 cwd 变化事件
 api.onCwdChanged((tabId, cwd) => {
   console.log('>>> CWD event:', tabId, cwd);
+  // Ignore invalid cwd (garbage from terminal output)
+  if (!cwd || cwd.length > 500 || cwd.includes('"') || cwd.includes('\n')) return;
   appState.setCwd(tabId, cwd);
   // 立即更新底栏
   if (tabId === appState.activeTabId) {

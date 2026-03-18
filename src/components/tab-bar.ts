@@ -124,6 +124,10 @@ export class TabBar {
       this.editingTabId = null;
       appState.renameTab(tabId, newName);
       api.updateHistoryName(tabId, newName);
+      // If Claude is active in this tab, rename the Claude session too
+      if (tab.aiTool === 'claude' && newName !== tab.title) {
+        api.writeTerminal(tabId, `/rename ${newName}\n`);
+      }
     };
     titleEl.addEventListener('blur', finishEdit, { once: true });
     titleEl.addEventListener('keydown', (e) => {
@@ -201,7 +205,7 @@ export class TabBar {
           });
         };
         const onUp = (ev: MouseEvent) => {
-          if (!dragging) { cleanup(); return; }
+          if (!dragging) { cleanup(); this.onSwitchTab(id); return; }
           // Find drop target
           const tabs = Array.from(this.tabListEl.querySelectorAll('.tab'));
           for (const t of tabs) {

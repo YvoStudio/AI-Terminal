@@ -3,6 +3,7 @@ import { api, type TabStatus, type SidebarEntry, type SavedTab } from '../api';
 export interface NoteBlock {
   id: string;
   content: string;
+  images?: string[]; // file paths of attached images
 }
 
 export type ShellType = 'cmd' | 'powershell' | 'wsl';
@@ -133,7 +134,7 @@ class AppState {
 
   renameTab(id: string, name: string) {
     const tab = this.tabs.get(id);
-    if (!tab) return;
+    if (!tab || tab.title === name) return;
     tab.title = name;
     this.notify();
     this.persistTabs();
