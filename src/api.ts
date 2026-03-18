@@ -19,6 +19,7 @@ export interface SavedTab {
   noteBlocks?: Array<{ id: string; content: string }>;
   shell?: 'cmd' | 'powershell' | 'wsl';
   cwd?: string;
+  aiTool?: string;
 }
 
 export interface ClaudeSession {

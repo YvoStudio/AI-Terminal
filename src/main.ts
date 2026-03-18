@@ -30,10 +30,11 @@ function getFontFamilyOptions(): string {
 const terminalViews = new Map<string, TerminalView>();
 const container = document.getElementById('terminal-container')!;
 
-async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl'): Promise<string> {
+async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string): Promise<string> {
   const tabId = await api.createTerminal(cwd);
   const tab = appState.addTab(tabId);
   if (typeof name === 'string') tab.title = name;
+  if (aiTool) tab.aiTool = aiTool;
   if (noteBlocks && noteBlocks.length > 0) {
     tab.noteBlocks = noteBlocks.map(b => ({ id: b.id, content: b.content }));
     blockCounter = Math.max(blockCounter, ...noteBlocks.map(b => parseInt(b.id.replace('b', '')) || 0));
@@ -1123,7 +1124,7 @@ async function init() {
       // 验证 shell 值，无效则使用默认值 cmd
       const validShells: Array<'cmd' | 'powershell' | 'wsl'> = ['cmd', 'powershell', 'wsl'];
       const shell = saved.shell && validShells.includes(saved.shell) ? saved.shell : undefined;
-      await createTab(saved.name, saved.noteBlocks, saved.cwd || undefined, shell);
+      await createTab(saved.name, saved.noteBlocks, saved.cwd || undefined, shell, saved.aiTool);
     }
   } else {
     createTab();

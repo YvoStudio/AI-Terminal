@@ -143,7 +143,7 @@ class AppState {
   persistTabs() {
     const saved: SavedTab[] = this.tabOrder.map(id => {
       const tab = this.tabs.get(id)!;
-      return { name: tab.title, shell: tab.shell, noteBlocks: tab.noteBlocks.map(b => ({ id: b.id, content: b.content })), cwd: tab.cwd };
+      return { name: tab.title, shell: tab.shell, noteBlocks: tab.noteBlocks.map(b => ({ id: b.id, content: b.content })), cwd: tab.cwd, aiTool: tab.aiTool };
     });
     api.saveTabs(saved);
   }
