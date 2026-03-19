@@ -65,6 +65,27 @@ export class TerminalView {
     this.terminal.loadAddon(this.searchAddon);
     this.terminal.open(this.wrapper);
 
+    // Intercept key events inside xterm before it processes them
+    this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      // Cmd+V / Ctrl+V: paste via Tauri backend
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && e.type === 'keydown') {
+        api.readClipboardText().then(text => {
+          if (text) this.terminal.paste(text);
+        }).catch(() => {
+          navigator.clipboard.readText().then(text => {
+            if (text) this.terminal.paste(text);
+          }).catch(() => {});
+        });
+        return false; // prevent xterm default handling
+      }
+      // Shift+Enter: send Kitty protocol sequence
+      if (e.shiftKey && e.key === 'Enter' && e.type === 'keydown') {
+        api.writeTerminal(tabId, '\x1b[13;2u');
+        return false;
+      }
+      return true;
+    });
+
     // 处理鼠标选择状态，防止拖动选择时鼠标移出窗口导致问题
     this.wrapper.addEventListener('mousedown', (e) => {
       this.mouseSelectionInProgress = true;
@@ -110,7 +131,7 @@ export class TerminalView {
       // 有选中文本时不做任何事
     });
 
-    // 在 wrapper 上监听 keydown，在 xterm 处理之前拦截 Ctrl+C
+    // 在 wrapper 上监听 keydown（capture 阶段，在 xterm 处理之前拦截）
     this.wrapper.addEventListener('keydown', (e: KeyboardEvent) => {
       const hasSelection = this.terminal.hasSelection();
 
@@ -123,30 +144,6 @@ export class TerminalView {
         if (typeof toggleTips === 'function') {
           toggleTips();
         }
-        return;
-      }
-
-      // Shift+Enter: send newline escape sequence instead of carriage return
-      // This allows AI tools (Claude Code etc.) to distinguish newline from submit
-      if (e.shiftKey && e.key === 'Enter') {
-        e.preventDefault();
-        e.stopPropagation();
-        api.writeTerminal(tabId, '\x1b[13;2u');
-        return;
-      }
-
-      // Ctrl+V / Cmd+V: read clipboard via Tauri backend to avoid macOS WebView paste permission popup
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-        e.preventDefault();
-        e.stopPropagation();
-        api.readClipboardText().then(text => {
-          if (text) api.writeTerminal(tabId, text);
-        }).catch(() => {
-          // Fallback: try browser clipboard API
-          navigator.clipboard.readText().then(text => {
-            if (text) api.writeTerminal(tabId, text);
-          }).catch(() => {});
-        });
         return;
       }
 
