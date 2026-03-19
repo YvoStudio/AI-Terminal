@@ -4,6 +4,7 @@ import { CanvasAddon } from '@xterm/addon-canvas';
 import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { api } from '../api';
+import { appState } from './app-state';
 import { themes } from './themes';
 import { isWindows, getDefaultFontSize, getPlatformFonts } from '../platform';
 
@@ -58,31 +59,56 @@ export class TerminalView {
     this.terminal.loadAddon(this.searchAddon);
     this.terminal.open(this.wrapper);
 
+    // Workaround: macOS WebView IME swallows first Shift+key after idle.
+    // Track last keydown time; if idle > 1s, manually send Shift+printable chars.
+    let lastKeyTime = Date.now();
+
     // Intercept key events inside xterm before it processes them
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (e.type !== 'keydown') return true;
+      const now = Date.now();
+      const wasIdle = now - lastKeyTime > 1000;
+      // Only update lastKeyTime for non-modifier keys
+      if (e.type === 'keydown' && !['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) lastKeyTime = now;
+      // Block both keydown and keyup for intercepted keys
       const key = e.key.toLowerCase();
       // Alt+K: toggle tips panel
       if (e.altKey && key === 'k') {
-        const toggleTips = (window as any).toggleTipsPanel;
-        if (typeof toggleTips === 'function') toggleTips();
+        if (e.type === 'keydown') {
+          const toggleTips = (window as any).toggleTipsPanel;
+          if (typeof toggleTips === 'function') toggleTips();
+        }
         return false;
       }
       // Cmd+C / Ctrl+C: copy selection instead of sending SIGINT
       if ((e.ctrlKey || e.metaKey) && key === 'c' && this.terminal.hasSelection()) {
-        navigator.clipboard.writeText(this.terminal.getSelection());
+        if (e.type === 'keydown') navigator.clipboard.writeText(this.terminal.getSelection());
         return false;
       }
       // Cmd+V / Ctrl+V: paste via Tauri backend
       if ((e.ctrlKey || e.metaKey) && key === 'v') {
-        api.readClipboardText().then(text => {
-          if (text) this.terminal.paste(text);
-        }).catch(() => {});
+        if (e.type === 'keydown') {
+          e.preventDefault(); // prevent browser paste event
+          api.readClipboardText().then(text => {
+            if (text) this.terminal.paste(text);
+          }).catch(() => {});
+        }
         return false;
       }
-      // Shift+Enter: send Kitty protocol sequence
+      // Shift+Enter: Kitty sequence for AI tools, plain newline for regular shell
       if (e.key === 'Enter' && e.shiftKey) {
-        api.writeTerminal(tabId, '\x1b[13;2u');
+        if (e.type === 'keydown') {
+          const tab = appState.tabs.get(tabId);
+          if (tab?.aiTool) {
+            api.writeTerminal(tabId, '\x1b[13;2u');
+          } else {
+            api.writeTerminal(tabId, '\n');
+          }
+        }
+        return false;
+      }
+      // Workaround: macOS WebView IME swallows first Shift+key after idle.
+      if (e.type === 'keydown' && wasIdle && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
+        api.writeTerminal(tabId, e.key);
         return false;
       }
       return true;
@@ -142,13 +168,17 @@ export class TerminalView {
 
     // Input → Rust backend
     this.terminal.onData((data) => {
+      // Fix: macOS WebView IME composition converts ASCII to fullwidth on first keypress after idle
+      // Convert fullwidth ASCII (！-～ U+FF01-FF5E) back to halfwidth
+      const fixed = data.replace(/[\uff01-\uff5e]/g, c =>
+        String.fromCharCode(c.charCodeAt(0) - 0xfee0)
+      );
       // 始终过滤掉 Ctrl+C (\x03)，当有选中文本或鼠标选择进行中时
-      // 这样可以防止鼠标选择文本时误触发 Ctrl+C 中断信号
-      if (data === '\x03' && (this.mouseSelectionInProgress || this.terminal.hasSelection())) {
+      if (fixed === '\x03' && (this.mouseSelectionInProgress || this.terminal.hasSelection())) {
         console.log('Blocked Ctrl+C during selection');
         return;
       }
-      api.writeTerminal(tabId, data);
+      api.writeTerminal(tabId, fixed);
     });
 
     // Listen for output from Rust backend

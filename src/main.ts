@@ -993,6 +993,33 @@ window.addEventListener('focus', () => {
   }
 });
 
+// Workaround: when xterm's textarea loses focus (e.g. clicking tab bar),
+// the first keypress is swallowed. Detect this and re-dispatch the event.
+document.addEventListener('keydown', (e) => {
+  const active = document.activeElement;
+  const isInput = active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA' ||
+                  (active as HTMLElement)?.contentEditable === 'true';
+  // If focus is not in any input and not in xterm's textarea, refocus terminal
+  if (!isInput && appState.activeTabId) {
+    const view = terminalViews.get(appState.activeTabId);
+    if (view) {
+      const xtermTA = view.terminal.textarea;
+      if (xtermTA && active !== xtermTA) {
+        xtermTA.focus();
+        // Re-dispatch the same key event to the now-focused textarea
+        xtermTA.dispatchEvent(new KeyboardEvent('keydown', {
+          key: e.key, code: e.code, keyCode: e.keyCode,
+          shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey,
+          bubbles: true, cancelable: true,
+        }));
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+    }
+  }
+}, true); // capture phase — before xterm sees it
+
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
   const activeElement = document.activeElement;
