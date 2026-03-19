@@ -223,6 +223,17 @@ export class TerminalView {
       e.stopPropagation();
     }, true); // capture phase
 
+    // Right-click context menu for paste
+    this.wrapper.addEventListener('contextmenu', (e: MouseEvent) => {
+      e.preventDefault();
+      // Read clipboard and paste
+      api.readClipboardText().then(text => {
+        if (text) {
+          this.terminal.paste(text);
+        }
+      }).catch(() => {});
+    });
+
     // Scroll-to-bottom button
     this.scrollBtn = document.createElement('button');
     this.scrollBtn.className = 'terminal-scroll-bottom';
