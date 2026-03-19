@@ -266,6 +266,16 @@ pub fn load_history(app: AppHandle) -> Result<Vec<HistoryEntry>, String> {
 #[tauri::command]
 pub fn add_history(app: AppHandle, tab_id: String, name: String, cwd: String, shell: Option<String>, ai_tool: Option<String>) -> Result<(), String> {
     let _ = tab_id;
+
+    // Skip saving if cwd is the user's home directory (or empty)
+    if cwd.is_empty() {
+        return Ok(());
+    }
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        if std::path::Path::new(&cwd) == std::path::Path::new(&home) {
+            return Ok(());
+        }
+    }
     let path = history_file(&app);
     if let Some(parent) = path.parent() { fs::create_dir_all(parent).ok(); }
 

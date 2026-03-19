@@ -48,14 +48,7 @@ export class TerminalView {
       cursorBlink: true,
       scrollback: 10000,
       allowProposedApi: true,
-      // 禁用鼠标相关功能
       rightClickSelectsWord: true,
-      allowTransparency: false,
-      convertEol: false,
-      // 禁用鼠标追踪模式，防止拖动选择文本时产生 ANSI 序列
-      disableStdin: false,
-      // 禁用 xterm 内置的复制功能
-      macOptionIsMeta: false,
       macOptionClickForcesSelection: true,
     });
 
@@ -67,18 +60,29 @@ export class TerminalView {
 
     // Intercept key events inside xterm before it processes them
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.type !== 'keydown') return true;
+      const key = e.key.toLowerCase();
+      // Alt+K: toggle tips panel
+      if (e.altKey && key === 'k') {
+        const toggleTips = (window as any).toggleTipsPanel;
+        if (typeof toggleTips === 'function') toggleTips();
+        return false;
+      }
+      // Cmd+C / Ctrl+C: copy selection instead of sending SIGINT
+      if ((e.ctrlKey || e.metaKey) && key === 'c' && this.terminal.hasSelection()) {
+        navigator.clipboard.writeText(this.terminal.getSelection());
+        return false;
+      }
       // Cmd+V / Ctrl+V: paste via Tauri backend
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-        if (e.type === 'keydown') {
-          api.readClipboardText().then(text => {
-            if (text) this.terminal.paste(text);
-          }).catch(() => {});
-        }
+      if ((e.ctrlKey || e.metaKey) && key === 'v') {
+        api.readClipboardText().then(text => {
+          if (text) this.terminal.paste(text);
+        }).catch(() => {});
         return false;
       }
       // Shift+Enter: send Kitty protocol sequence
-      if (e.shiftKey && e.key === 'Enter') {
-        if (e.type === 'keydown') api.writeTerminal(tabId, '\x1b[13;2u');
+      if (e.key === 'Enter' && e.shiftKey) {
+        api.writeTerminal(tabId, '\x1b[13;2u');
         return false;
       }
       return true;
@@ -129,79 +133,12 @@ export class TerminalView {
       // 有选中文本时不做任何事
     });
 
-    // 在 wrapper 上监听 keydown（capture 阶段，在 xterm 处理之前拦截）
-    this.wrapper.addEventListener('keydown', (e: KeyboardEvent) => {
-      const hasSelection = this.terminal.hasSelection();
-
-      // Alt+K: 打开技巧面板（即使在终端焦点下也要响应）
-      if (e.altKey && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        e.stopPropagation();
-        // 触发全局函数
-        const toggleTips = (window as any).toggleTipsPanel;
-        if (typeof toggleTips === 'function') {
-          toggleTips();
-        }
-        return;
-      }
-
-      // 如果正在进行鼠标选择或有选中文本，阻止可能导致问题的快捷键
-      if (this.mouseSelectionInProgress || hasSelection) {
-        const key = e.key.toLowerCase();
-
-        // 特殊处理 Ctrl/Cmd + 字母组合
-        if (e.ctrlKey || e.metaKey) {
-          // Ctrl+C 是主要问题 - 在有选中文本时阻止它
-          if (key === 'c' && hasSelection) {
-            // 阻止事件传播到 xterm
-            e.preventDefault();
-            e.stopPropagation();
-            // 触发浏览器复制
-            navigator.clipboard.writeText(this.terminal.getSelection());
-            return;
-          }
-          // 阻止其他可能导致问题的快捷键
-          if (['x', 'v', 'a', 'z', 'y'].includes(key)) {
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
-        }
-      }
-    }, true); // Use capture phase - 在 xterm 之前处理
-
     // Unicode 11 for proper emoji/CJK width calculation
     const unicode11 = new Unicode11Addon();
     this.terminal.loadAddon(unicode11);
     this.terminal.unicode.activeVersion = '11';
 
     try { this.terminal.loadAddon(new CanvasAddon()); } catch {}
-
-    // 拦截键盘事件，在 xterm 内部处理之前阻止 Ctrl+C
-    this.terminal.onKey(({ key, domEvent }) => {
-      // Alt+K: 打开技巧面板
-      if (domEvent.altKey && domEvent.key.toLowerCase() === 'k') {
-        const toggleTips = (window as any).toggleTipsPanel;
-        if (typeof toggleTips === 'function') {
-          toggleTips();
-        }
-        return false;
-      }
-
-      // 检查是否有选中文本或正在选择
-      const hasSelection = this.terminal.hasSelection();
-      if (this.mouseSelectionInProgress || hasSelection) {
-        // 阻止 Ctrl+C
-        if (domEvent.ctrlKey && key.toLowerCase() === 'c') {
-          // 复制选中的文本
-          navigator.clipboard.writeText(this.terminal.getSelection());
-          // 阻止默认行为
-          return false;
-        }
-      }
-      // 其他键正常处理
-      return true;
-    });
 
     // Input → Rust backend
     this.terminal.onData((data) => {

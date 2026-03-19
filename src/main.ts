@@ -985,6 +985,14 @@ api.onCwdChanged((tabId, cwd) => {
   }
 });
 
+// Re-focus terminal when window regains focus (fixes first Shift+key being swallowed)
+window.addEventListener('focus', () => {
+  if (appState.activeTabId) {
+    const view = terminalViews.get(appState.activeTabId);
+    if (view) view.focus();
+  }
+});
+
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
   const activeElement = document.activeElement;
