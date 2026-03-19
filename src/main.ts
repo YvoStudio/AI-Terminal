@@ -683,6 +683,47 @@ function toggleTipsPanel() {
       terminalViews.forEach(view => view.setFontFamily(fontFamilySelect.value));
     });
   }
+
+  // Double-click to copy AI commands
+  const cmdElements = _tipsEl.querySelectorAll('.tips-cmd');
+  cmdElements.forEach(cmd => {
+    cmd.addEventListener('dblclick', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const commandText = cmd.textContent || '';
+      if (commandText) {
+        try {
+          await navigator.clipboard.writeText(commandText);
+          // Show toast notification
+          const toast = document.createElement('div');
+          toast.className = 'tips-toast';
+          toast.textContent = '已复制';
+          toast.style.cssText = `
+            position: fixed;
+            bottom: 60px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--accent-green);
+            color: #000;
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 10000;
+            animation: fade-in 0.2s ease-out;
+          `;
+          document.body.appendChild(toast);
+          setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transition = 'opacity 0.2s ease-out';
+            setTimeout(() => toast.remove(), 200);
+          }, 1500);
+        } catch (err) {
+          console.error('复制失败:', err);
+        }
+      }
+    });
+  });
 }
 
 // Bind tips button click

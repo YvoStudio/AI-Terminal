@@ -150,6 +150,10 @@ export const api = {
     return invoke<string>('read_clipboard_text');
   },
 
+  async writeClipboardText(text: string): Promise<void> {
+    return invoke('write_clipboard_text', { text });
+  },
+
   async saveClipboardImage(dataUrl: string): Promise<string> {
     return invoke<string>('save_clipboard_image', { dataUrl });
   },
