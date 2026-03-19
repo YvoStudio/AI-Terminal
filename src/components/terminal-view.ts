@@ -68,19 +68,17 @@ export class TerminalView {
     // Intercept key events inside xterm before it processes them
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       // Cmd+V / Ctrl+V: paste via Tauri backend
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && e.type === 'keydown') {
-        api.readClipboardText().then(text => {
-          if (text) this.terminal.paste(text);
-        }).catch(() => {
-          navigator.clipboard.readText().then(text => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+        if (e.type === 'keydown') {
+          api.readClipboardText().then(text => {
             if (text) this.terminal.paste(text);
           }).catch(() => {});
-        });
-        return false; // prevent xterm default handling
+        }
+        return false;
       }
       // Shift+Enter: send Kitty protocol sequence
-      if (e.shiftKey && e.key === 'Enter' && e.type === 'keydown') {
-        api.writeTerminal(tabId, '\x1b[13;2u');
+      if (e.shiftKey && e.key === 'Enter') {
+        if (e.type === 'keydown') api.writeTerminal(tabId, '\x1b[13;2u');
         return false;
       }
       return true;
@@ -253,6 +251,9 @@ export class TerminalView {
         }
       }
       console.log('No image found in clipboard, items:', items.length);
+      // Prevent xterm's own paste handler — text paste is handled by our Cmd+V keydown handler
+      e.preventDefault();
+      e.stopPropagation();
     }, true); // capture phase
 
     // Scroll-to-bottom button

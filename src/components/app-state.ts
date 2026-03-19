@@ -83,6 +83,8 @@ class AppState {
     // If this is the active tab, don't mark as done-unseen — user is already viewing it
     if (id === this.activeTabId && status === 'done-unseen') {
       tab.status = 'active';
+      // Clear Dock badge since user is already viewing this tab
+      api.clearBadge();
     } else {
       tab.status = status;
     }

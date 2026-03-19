@@ -944,9 +944,8 @@ api.onTabStatusChanged((tabId, status) => {
 api.onTabAutoRenamed((tabId, name) => {
   const tab = appState.tabs.get(tabId);
   if (!tab || tab.title === name) return;
-  // Always update if AI tool is active (Claude session name change via OSC title)
-  // Otherwise only update default "Terminal X" names (auto-rename after 5 inputs)
-  if (tab.aiTool || tab.title.startsWith('Terminal ') || tab.title.startsWith('↻ ')) {
+  // Only auto-rename default names; never overwrite user-renamed tabs
+  if (tab.title.startsWith('Terminal ') || tab.title.startsWith('↻ ')) {
     appState.renameTab(tabId, name);
     api.updateHistoryName(tabId, name);
   }
