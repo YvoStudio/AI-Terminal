@@ -279,6 +279,9 @@ pub fn add_history(app: AppHandle, tab_id: String, name: String, cwd: String, sh
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // Remove existing entry with same cwd (keep only latest)
+    history.retain(|e| e.cwd != cwd);
+
     history.insert(0, HistoryEntry { name, cwd, timestamp: ts, shell: shell.unwrap_or_else(default_shell_str), ai_tool });
     history.truncate(20);
 

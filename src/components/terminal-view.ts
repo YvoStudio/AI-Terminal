@@ -141,7 +141,12 @@ export class TerminalView {
         e.stopPropagation();
         api.readClipboardText().then(text => {
           if (text) api.writeTerminal(tabId, text);
-        }).catch(() => {});
+        }).catch(() => {
+          // Fallback: try browser clipboard API
+          navigator.clipboard.readText().then(text => {
+            if (text) api.writeTerminal(tabId, text);
+          }).catch(() => {});
+        });
         return;
       }
 
