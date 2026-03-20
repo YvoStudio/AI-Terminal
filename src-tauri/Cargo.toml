@@ -23,6 +23,7 @@ uuid = { version = "1", features = ["v4"] }
 strip-ansi-escapes = "0.2"
 base64 = "0.22"
 arboard = "3"
+png = "0.17"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
