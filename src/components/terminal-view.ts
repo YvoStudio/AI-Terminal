@@ -207,7 +207,6 @@ export class TerminalView {
       e.preventDefault();
       e.stopPropagation();
     }, true); // capture phase
-    }, true); // capture phase
 
     // Right-click: copy if there's a selection, otherwise paste
     this.wrapper.addEventListener('contextmenu', (e: MouseEvent) => {

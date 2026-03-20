@@ -985,8 +985,10 @@ api.onTabStatusChanged((tabId, status) => {
 api.onTabAutoRenamed((tabId, name) => {
   const tab = appState.tabs.get(tabId);
   if (!tab || tab.title === name) return;
-  // Only auto-rename default names; never overwrite user-renamed tabs
-  if (tab.title.startsWith('Terminal ') || tab.title.startsWith('↻ ')) {
+  // Strip any lingering status prefixes from saved tab names
+  const cleanTitle = tab.title.replace(/^[*·.●○]\s+/, '');
+  // Allow rename for: default names, restored names, or AI-detected tabs (OSC title updates)
+  if (tab.title.startsWith('Terminal ') || tab.title.startsWith('↻ ') || tab.aiTool || cleanTitle !== tab.title) {
     appState.renameTab(tabId, name);
     api.updateHistoryName(tabId, name);
   }
