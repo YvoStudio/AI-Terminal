@@ -122,8 +122,28 @@ impl OutputParser {
             }
         }
 
-        // Bell char → done-unseen
-        if raw.contains('\x07') && !state.is_active {
+        // Bell char → done-unseen (but ignore BEL inside OSC sequences)
+        let has_standalone_bell = raw.contains('\x07') && {
+            // Check if there's a BEL that's NOT part of an OSC sequence terminator
+            let mut found = false;
+            let bytes = raw.as_bytes();
+            for (i, &b) in bytes.iter().enumerate() {
+                if b == 0x07 {
+                    // Look back to see if this BEL terminates an OSC sequence (\x1b]...)
+                    let before = &raw[..i];
+                    let is_osc_terminator = before.rfind("\x1b]").map_or(false, |osc_start| {
+                        // Check there's no other terminator between OSC start and this BEL
+                        !before[osc_start..].contains("\x1b\\")
+                    });
+                    if !is_osc_terminator {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            found
+        };
+        if has_standalone_bell && !state.is_active {
             on_status(tab_id.to_string(), TabStatus::DoneUnseen);
         }
 
@@ -259,7 +279,15 @@ fn extract_osc_title(raw: &str) -> Option<String> {
             let after = &raw[start + marker.len()..];
             let end = after.find('\x07')
                 .or_else(|| after.find("\x1b\\"))?;
-            let title = after[..end].trim();
+            let mut title = after[..end].trim();
+            // Strip status prefixes set by Claude Code / AI tools (e.g. "* task", ". task", "● task")
+            if let Some(rest) = title.strip_prefix("* ")
+                .or_else(|| title.strip_prefix(". "))
+                .or_else(|| title.strip_prefix("● "))
+                .or_else(|| title.strip_prefix("○ "))
+            {
+                title = rest.trim();
+            }
             if !title.is_empty() && title.len() < 200 && !title.contains('\n') {
                 return Some(title.to_string());
             }

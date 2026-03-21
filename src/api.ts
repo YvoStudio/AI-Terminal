@@ -154,6 +154,11 @@ export const api = {
     return invoke('write_clipboard_text', { text });
   },
 
+  /** Read clipboard image via backend, save to temp file, return path (empty if no image) */
+  async readClipboardImage(): Promise<string> {
+    return invoke<string>('read_clipboard_image');
+  },
+
   async saveClipboardImage(dataUrl: string): Promise<string> {
     return invoke<string>('save_clipboard_image', { dataUrl });
   },

@@ -600,6 +600,36 @@ pub fn write_clipboard_text(text: String) -> Result<(), String> {
     clipboard.set_text(text).map_err(|e| e.to_string())
 }
 
+/// Read clipboard image (if any) via arboard, save to temp file, return path.
+/// Returns empty string if clipboard has no image.
+#[tauri::command]
+pub fn read_clipboard_image() -> Result<String, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let img = match clipboard.get_image() {
+        Ok(img) => img,
+        Err(_) => return Ok(String::new()), // no image in clipboard
+    };
+
+    // Encode as PNG using the png crate
+    let temp_dir = std::env::temp_dir().join("ai-terminal-images");
+    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let file_path = temp_dir.join(format!("paste-{}.png", ts));
+
+    let file = fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    let w = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(w, img.width as u32, img.height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+    writer.write_image_data(&img.bytes).map_err(|e| e.to_string())?;
+
+    Ok(file_path.to_string_lossy().to_string())
+}
+
 // ── Clipboard image ────────────────────────────────────────────────────────
 
 #[tauri::command]

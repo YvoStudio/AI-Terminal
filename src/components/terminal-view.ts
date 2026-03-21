@@ -69,6 +69,11 @@ export class TerminalView {
       const wasIdle = now - lastKeyTime > 1000;
       // Only update lastKeyTime for non-modifier keys
       if (e.type === 'keydown' && !['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) lastKeyTime = now;
+      // Block standalone modifier keys when there's a selection — prevents xterm from
+      // scrolling to bottom when user presses Cmd/Ctrl before Cmd+C to copy
+      if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key) && this.terminal.hasSelection()) {
+        return false;
+      }
       // Block both keydown and keyup for intercepted keys
       const key = e.key.toLowerCase();
       // Alt+K: toggle tips panel
@@ -84,13 +89,24 @@ export class TerminalView {
         if (e.type === 'keydown') navigator.clipboard.writeText(this.terminal.getSelection());
         return false;
       }
-      // Cmd+V / Ctrl+V: paste via Tauri backend
+      // Cmd+V / Ctrl+V: paste via Tauri backend (text + image, no browser clipboard API)
       if ((e.ctrlKey || e.metaKey) && key === 'v') {
         if (e.type === 'keydown') {
-          e.preventDefault(); // prevent browser paste event
-          api.readClipboardText().then(text => {
-            if (text) this.terminal.paste(text);
-          }).catch(() => {});
+          (async () => {
+            try {
+              // Try image first
+              const imgPath = await api.readClipboardImage();
+              if (imgPath) {
+                api.writeTerminal(tabId, imgPath);
+                return;
+              }
+            } catch {}
+            // Fall back to text
+            try {
+              const text = await api.readClipboardText();
+              if (text) this.terminal.paste(text);
+            } catch {}
+          })();
         }
         return false;
       }
@@ -186,52 +202,25 @@ export class TerminalView {
       this.terminal.write(data);
     });
 
-    // Paste image support - use capture phase to intercept before xterm handles it
+    // Block browser paste events — all paste is handled by Cmd+V keydown or right-click via Tauri backend
     this.wrapper.addEventListener('paste', (e: ClipboardEvent) => {
-      console.log('Paste event detected on wrapper (capture)');
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      for (const item of items) {
-        if (item.type.startsWith('image/')) {
-          console.log('Image found in clipboard:', item.type);
-          e.preventDefault();
-          e.stopPropagation();
-          const blob = item.getAsFile();
-          if (!blob) return;
-          const reader = new FileReader();
-          reader.onload = async () => {
-            const dataUrl = reader.result as string;
-            console.log('Image loaded, dataUrl length:', dataUrl.length);
-            try {
-              const filePath = await api.saveClipboardImage(dataUrl);
-              console.log('Image saved to:', filePath);
-              if (filePath) {
-                api.writeTerminal(tabId, filePath);
-                console.log('File path written to terminal');
-              }
-            } catch (err) {
-              console.error('Failed to save image:', err);
-            }
-          };
-          reader.readAsDataURL(blob);
-          return;
-        }
-      }
-      console.log('No image found in clipboard, items:', items.length);
-      // Prevent xterm's own paste handler — text paste is handled by our Cmd+V keydown handler
       e.preventDefault();
       e.stopPropagation();
     }, true); // capture phase
 
-    // Right-click context menu for paste
+    // Right-click: copy if there's a selection, otherwise paste
     this.wrapper.addEventListener('contextmenu', (e: MouseEvent) => {
       e.preventDefault();
-      // Read clipboard and paste
-      api.readClipboardText().then(text => {
-        if (text) {
-          this.terminal.paste(text);
-        }
-      }).catch(() => {});
+      if (this.terminal.hasSelection()) {
+        navigator.clipboard.writeText(this.terminal.getSelection());
+        this.terminal.clearSelection();
+      } else {
+        api.readClipboardText().then(text => {
+          if (text) {
+            this.terminal.paste(text);
+          }
+        }).catch(() => {});
+      }
     });
 
     // Scroll-to-bottom button
@@ -255,7 +244,14 @@ export class TerminalView {
       });
     });
 
-    this.terminal.onScroll(() => this.updateScrollBtn());
+    this.terminal.onScroll(() => {
+      // Update userScrolledUp on any scroll event (wheel, keyboard, mouse drag selection, etc.)
+      const buf = this.terminal.buffer.active;
+      const atBottom = buf.baseY - buf.viewportY <= 3;
+      if (!atBottom) this.userScrolledUp = true;
+      else this.userScrolledUp = false;
+      this.updateScrollBtn();
+    });
     this.terminal.onWriteParsed(() => {
       // If new content arrives and user hasn't scrolled up, stay at bottom
       if (!this.userScrolledUp) {
