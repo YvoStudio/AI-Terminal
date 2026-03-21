@@ -97,10 +97,14 @@ export class TerminalView {
               // Try image first
               const imgPath = await api.readClipboardImage();
               if (imgPath) {
-                api.writeTerminal(tabId, imgPath);
+                api.writeTerminal(tabId, imgPath + ' ');
                 return;
               }
-            } catch {}
+            } catch (err) {
+              // Image read failed - may not be an image or format not supported
+              // Fall back to text paste
+              console.log('[Paste] Image read failed:', err);
+            }
             // Fall back to text
             try {
               const text = await api.readClipboardText();
