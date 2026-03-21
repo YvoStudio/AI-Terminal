@@ -289,10 +289,17 @@ pub fn add_history(app: AppHandle, tab_id: String, name: String, cwd: String, sh
         .unwrap_or_default()
         .as_millis() as u64;
 
-    // Remove existing entry with same cwd (keep only latest)
-    history.retain(|e| e.cwd != cwd);
+    // Remove existing entry with same cwd AND same ai_tool (keep only latest per cwd+tool combo)
+    history.retain(|e| !(e.cwd == cwd && e.ai_tool == ai_tool));
 
-    history.insert(0, HistoryEntry { name, cwd, timestamp: ts, shell: shell.unwrap_or_else(default_shell_str), ai_tool });
+    // Use first user message or tab name for display
+    let display_name = if name.is_empty() {
+        cwd.split('\\').last().unwrap_or(&cwd).to_string()
+    } else {
+        name
+    };
+
+    history.insert(0, HistoryEntry { name: display_name, cwd, timestamp: ts, shell: shell.unwrap_or_else(default_shell_str), ai_tool });
     history.truncate(20);
 
     let json = serde_json::to_string(&history).map_err(|e| e.to_string())?;
