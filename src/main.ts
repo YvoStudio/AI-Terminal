@@ -822,8 +822,12 @@ let _closeHistoryPanel: (() => void) | null = null;
     // Build unified list
     const items: UnifiedItem[] = [];
 
-    // Claude sessions
-    for (const s of sessions) {
+    // Claude sessions (deduplicate by cwd, keep newest)
+    const seenSessionCwds = new Set<string>();
+    const sortedSessions = [...sessions].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    for (const s of sortedSessions) {
+      if (seenSessionCwds.has(s.cwd)) continue;
+      seenSessionCwds.add(s.cwd);
       const preview = s.user_messages.length > 0
         ? s.user_messages.map(m => m.slice(0, 50)).join(' → ')
         : '';
@@ -842,7 +846,7 @@ let _closeHistoryPanel: (() => void) | null = null;
     }
 
     // Plain history (deduplicate against sessions by cwd)
-    const sessionCwds = new Set(sessions.map(s => s.cwd));
+    const sessionCwds = seenSessionCwds;
     entries.forEach((h, i) => {
       if (sessionCwds.has(h.cwd)) return;
       items.push({
@@ -985,8 +989,8 @@ api.onTabStatusChanged((tabId, status) => {
 api.onTabAutoRenamed((tabId, name) => {
   const tab = appState.tabs.get(tabId);
   if (!tab || tab.title === name) return;
-  // Strip any lingering status prefixes from saved tab names
-  const cleanTitle = tab.title.replace(/^[*·.●○]\s+/, '');
+  // Strip any lingering status prefixes from saved tab names (ASCII and Unicode variants)
+  const cleanTitle = tab.title.replace(/^[*·.●○✳⠂⠿◆◇]\s+/, '');
   // Allow rename for: default names, restored names, or AI-detected tabs (OSC title updates)
   if (tab.title.startsWith('Terminal ') || tab.title.startsWith('↻ ') || tab.aiTool || cleanTitle !== tab.title) {
     appState.renameTab(tabId, name);

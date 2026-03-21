@@ -280,11 +280,17 @@ fn extract_osc_title(raw: &str) -> Option<String> {
             let end = after.find('\x07')
                 .or_else(|| after.find("\x1b\\"))?;
             let mut title = after[..end].trim();
-            // Strip status prefixes set by Claude Code / AI tools (e.g. "* task", ". task", "● task")
+            // Strip status prefixes set by Claude Code / AI tools
+            // Claude Code uses: ✳ (U+2733), ⠂ (U+2802), ● (U+25CF), ○ (U+25CB), * , .
             if let Some(rest) = title.strip_prefix("* ")
                 .or_else(|| title.strip_prefix(". "))
                 .or_else(|| title.strip_prefix("● "))
                 .or_else(|| title.strip_prefix("○ "))
+                .or_else(|| title.strip_prefix("✳ "))
+                .or_else(|| title.strip_prefix("⠂ "))
+                .or_else(|| title.strip_prefix("⠿ "))
+                .or_else(|| title.strip_prefix("◆ "))
+                .or_else(|| title.strip_prefix("◇ "))
             {
                 title = rest.trim();
             }
