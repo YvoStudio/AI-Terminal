@@ -62,7 +62,16 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(powershell -File scripts/gen-icon.ps1)",
-      "Bash(powershell -ExecutionPolicy Bypass -File scripts/gen-icon.ps1)"
+      "Bash(powershell -ExecutionPolicy Bypass -File scripts/gen-icon.ps1)",
+      "Bash(sshpass:*)",
+      "Bash(git reset:*)",
+      "Bash(git push:*)",
+      "Bash(git stash:*)",
+      "Bash(export PATH=\"$HOME/.cargo/bin:$PATH\")",
+      "Bash(open:*)",
+      "Bash(cargo check:*)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3:*)"
     ]
   }
 }
