@@ -110,14 +110,19 @@ export class TerminalView {
         }
         return false;
       }
-      // Shift+Enter: Kitty sequence for AI tools, plain newline for regular shell
+      // Shift+Enter: newline without executing command
+      // For AI tools: send Kitty sequence for multiline input
+      // For regular shell: send \r\n (not just \n, to ensure proper line break)
       if (e.key === 'Enter' && e.shiftKey) {
         if (e.type === 'keydown') {
           const tab = appState.tabs.get(tabId);
           if (tab?.aiTool) {
+            // AI tools support kitty protocol for multiline
             api.writeTerminal(tabId, '\x1b[13;2u');
           } else {
-            api.writeTerminal(tabId, '\n');
+            // Regular shell: send \r\n for proper line break
+            // Some shells need both CR and LF for proper newline
+            api.writeTerminal(tabId, '\r\n');
           }
         }
         return false;

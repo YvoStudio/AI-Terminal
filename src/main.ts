@@ -1280,26 +1280,35 @@ listen<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-dr
   const elementAtDrop = document.elementFromPoint(pos.x, pos.y);
   const notepadEl = document.getElementById('notepad');
 
-  // Check if notepad is visible and drop is within notepad area
+  // Check if notepad is visible
   const isNotepadVisible = notepadEl && !notepadEl.classList.contains('hidden');
-  const isInNotepadArea = elementAtDrop && notepadEl?.contains(elementAtDrop);
+
+  // More lenient check: if drop is in right half of screen and notepad is visible, assume notepad
+  const windowWidth = window.innerWidth;
+  const isInRightHalf = pos.x > windowWidth * 0.6;
 
   // Try to find textarea - either directly under drop or the focused textarea in notepad
   let notepadTextarea: HTMLTextAreaElement | null = null;
-  if (isNotepadVisible && isInNotepadArea) {
-    // First try: check if drop is directly on a textarea
-    if (elementAtDrop?.tagName === 'TEXTAREA') {
-      notepadTextarea = elementAtDrop as HTMLTextAreaElement;
-    } else {
-      // Second try: find closest textarea ancestor
-      const closestTextarea = elementAtDrop?.closest('#notepad-blocks textarea') as HTMLTextAreaElement | null;
-      if (closestTextarea) {
-        notepadTextarea = closestTextarea;
+  if (isNotepadVisible) {
+    // First check: is drop in right half of screen (notepad area)?
+    if (isInRightHalf || (elementAtDrop && notepadEl.contains(elementAtDrop))) {
+      // First try: check if drop is directly on a textarea
+      if (elementAtDrop?.tagName === 'TEXTAREA') {
+        notepadTextarea = elementAtDrop as HTMLTextAreaElement;
       } else {
-        // Third try: use the currently focused textarea if it's in notepad
-        const activeEl = document.activeElement;
-        if (activeEl?.tagName === 'TEXTAREA' && notepadEl.contains(activeEl)) {
-          notepadTextarea = activeEl as HTMLTextAreaElement;
+        // Second try: find closest textarea ancestor
+        const closestTextarea = elementAtDrop?.closest('#notepad-blocks textarea') as HTMLTextAreaElement | null;
+        if (closestTextarea) {
+          notepadTextarea = closestTextarea;
+        } else {
+          // Third try: use the currently focused textarea if it's in notepad
+          const activeEl = document.activeElement;
+          if (activeEl?.tagName === 'TEXTAREA' && notepadEl.contains(activeEl)) {
+            notepadTextarea = activeEl as HTMLTextAreaElement;
+          } else {
+            // Fourth try: find first textarea in notepad (drop on blank area)
+            notepadTextarea = notepadEl.querySelector('textarea');
+          }
         }
       }
     }
