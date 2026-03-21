@@ -107,3 +107,34 @@ No test suite or linter is configured. Rust backend is in `src-tauri/` and uses 
 - **macOS**: Dock icon bounce + red badge counter for background task completion
 - **Windows**: Taskbar flash notification; cmd/powershell/WSL shell switching supported
 - **Icons**: Generated via `scripts/gen-icon.ps1` (GDI+ PNG-in-ICO, sizes 256/128/64/48/32/16) and `scripts/gen-png.ps1`
+
+---
+
+## 问题追踪与回归检查
+
+### 技能使用
+- **报告问题**: `/bug-tracker report <问题描述>`
+- **查看清单**: `/bug-tracker list`
+- **标记解决**: `/bug-tracker resolve <ID> <修复方案>`
+- **回归检查**: `/bug-tracker check`
+
+### 问题清单文件
+- `docs/问题追踪清单.md` - 所有已报告和已修复的问题清单
+
+### 回归检查清单（修改代码后必须验证）
+
+| 功能 | 测试方法 | 问题 ID |
+|------|----------|---------|
+| 右键粘贴终端 | 右击终端区域，应粘贴剪贴板内容 | #001 |
+| 双击复制 AI 命令 | 打开使用技巧面板，双击命令，应显示「已复制」 | #002 |
+| 拖拽文件到终端 | 拖拽文件到终端，应输入文件路径 | #003 |
+| 拖拽图片到 Notepad | 拖拽图片到笔记板，应显示图片预览 | #004 |
+| Ctrl+V 粘贴图片 | 复制图片后 Ctrl+V，应插入路径 | #005 |
+| Dock 红点清除 | 切换到已完成标签，角标应消失 | #006 |
+| 标签名保护 | 用户自定义名称不应被自动覆盖 | #007 |
+
+### 开发流程
+1. **开发新功能前** - 先读取 `docs/问题追踪清单.md` 了解已知问题
+2. **修改代码后** - 对照回归检查清单逐项验证
+3. **修复问题后** - 更新清单，移动到「已解决」部分
+4. **提交前** - 确认没有重新引入已修复的问题
