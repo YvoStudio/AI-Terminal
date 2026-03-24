@@ -67,11 +67,13 @@ export class TerminalView {
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       const now = Date.now();
       const wasIdle = now - lastKeyTime > 1000;
-      // Only update lastKeyTime for non-modifier keys
-      if (e.type === 'keydown' && !['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) lastKeyTime = now;
+      // Update lastKeyTime for keydown, but NOT for Shift alone (Shift+char needs idle detection)
+      if (e.type === 'keydown' && e.key !== 'Shift') lastKeyTime = now;
       // Block standalone modifier keys when there's a selection — prevents xterm from
-      // scrolling to bottom when user presses Cmd/Ctrl before Cmd+C to copy
+      // scrolling to bottom when user presses Cmd/Ctrl before Cmd+C to copy.
+      // But always update lastKeyTime to prevent idle-workaround misfires.
       if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key) && this.terminal.hasSelection()) {
+        lastKeyTime = now; // prevent idle workaround from misfiring after modifier press
         return false;
       }
       // Block both keydown and keyup for intercepted keys
@@ -132,8 +134,9 @@ export class TerminalView {
         return false;
       }
       // Workaround: macOS WebView IME swallows first Shift+key after idle.
-      if (e.type === 'keydown' && wasIdle && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
-        api.writeTerminal(tabId, e.key);
+      // Block both keydown and keyup to prevent xterm from processing the key twice.
+      if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1 && wasIdle) {
+        if (e.type === 'keydown') api.writeTerminal(tabId, e.key);
         return false;
       }
       return true;
