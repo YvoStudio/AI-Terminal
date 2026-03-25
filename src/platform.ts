@@ -13,7 +13,7 @@ export const isLinux = platform === 'linux';
 
 export const platformConfig = {
   font: {
-    mono: isMac ? "'SF Mono', 'Menlo', monospace" : isWindows ? "'Consolas', monospace" : "'Cascadia Code', 'Ubuntu Mono', monospace",
+    mono: isMac ? "'SF Mono', 'Menlo', monospace" : isWindows ? "'Cascadia Code', 'Consolas', monospace" : "'Cascadia Code', 'Ubuntu Mono', monospace",
     chinese: isWindows ? "'SimHei', 'Microsoft YaHei', sans-serif" : isMac ? "system-ui, 'PingFang SC', sans-serif" : "'Noto Sans CJK SC', 'WenQuanYi Zen Hei', sans-serif",
   },
   fontSize: isWindows ? 15 : 13,

@@ -80,6 +80,7 @@ pub fn run() {
             commands::read_clipboard_image,
             commands::save_clipboard_image,
             commands::convert_image_path,
+            commands::notify_task_done,
             commands::clear_badge,
             commands::list_claude_sessions,
             commands::get_claude_session_history,

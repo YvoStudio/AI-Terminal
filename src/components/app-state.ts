@@ -27,7 +27,7 @@ class AppState {
   private listeners: Array<() => void> = [];
 
   subscribe(fn: () => void) { this.listeners.push(fn); }
-  private notify() { this.listeners.forEach(fn => { try { fn(); } catch(e) { console.error('[AppState] listener error:', e); } }); }
+  private notify() { this.listeners.forEach(fn => { try { fn(); } catch (e) { console.error('[AppState] listener error:', e); } }); }
 
   addTab(id: string): TabState {
     const index = this.tabOrder.length + 1;
@@ -80,14 +80,12 @@ class AppState {
   setStatus(id: string, status: TabStatus) {
     const tab = this.tabs.get(id);
     if (!tab) return;
-    // If this is the active tab, don't mark as done-unseen — user is already viewing it
-    if (id === this.activeTabId && status === 'done-unseen') {
+    if (id === this.activeTabId && status === 'waiting') {
       tab.status = 'active';
-      // Clear Dock badge since user is already viewing this tab
-      api.clearBadge();
-    } else {
-      tab.status = status;
+      this.notify();
+      return;
     }
+    tab.status = status;
     this.notify();
   }
 
@@ -145,7 +143,17 @@ class AppState {
   persistTabs() {
     const saved: SavedTab[] = this.tabOrder.map(id => {
       const tab = this.tabs.get(id)!;
-      return { name: tab.title, shell: tab.shell, noteBlocks: tab.noteBlocks.map(b => ({ id: b.id, content: b.content })), cwd: tab.cwd, aiTool: tab.aiTool };
+      return {
+        name: tab.title,
+        shell: tab.shell,
+        noteBlocks: tab.noteBlocks.map(b => ({
+          id: b.id,
+          content: b.content,
+          images: b.images ? [...b.images] : undefined,
+        })),
+        cwd: tab.cwd,
+        aiTool: tab.aiTool,
+      };
     });
     api.saveTabs(saved);
   }

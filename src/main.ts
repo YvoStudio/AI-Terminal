@@ -5,7 +5,7 @@ import { appState } from './components/app-state';
 import { TabBar } from './components/tab-bar';
 import { TerminalView } from './components/terminal-view';
 import { themes } from './components/themes';
-import { isMac, isWindows, shouldUseNativeTitleBar } from './platform';
+import { getDefaultFontSize, isMac, isWindows, shouldUseNativeTitleBar } from './platform';
 
 function getFontFamilyOptions(): string {
   if (isMac) {
@@ -28,16 +28,82 @@ function getFontFamilyOptions(): string {
   }
 }
 
+function getCleanFontFamilyOptions(): string {
+  if (isMac) {
+    return `
+      <option value="auto">默认 (SF Mono)</option>
+      <option value="menlo">Menlo</option>
+      <option value="monaco">Monaco</option>
+      <option value="courier">Courier New</option>
+      <option value="meslo-nerd">MesloLGS Nerd Font</option>
+      <option value="hack-nerd">Hack Nerd Font</option>
+    `;
+  }
+
+  return `
+      <option value="auto">默认 (Cascadia Code)</option>
+      <option value="cascadia">Cascadia Code</option>
+      <option value="courier">Courier New</option>
+      <option value="lucida">Lucida Console</option>
+      <option value="caskaydia-nerd">CaskaydiaCove Nerd Font</option>
+    `;
+}
+
 const terminalViews = new Map<string, TerminalView>();
 const container = document.getElementById('terminal-container')!;
+let windowHasFocus = document.hasFocus();
 
-async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string): Promise<string> {
+function getPendingDoneCount(): number {
+  let count = 0;
+  for (const tab of appState.tabs.values()) {
+    if (tab.status === 'done-unseen') count += 1;
+  }
+  return count;
+}
+
+function syncPendingAttention(requestAttention = false): void {
+  const pendingCount = getPendingDoneCount();
+  if (pendingCount > 0) {
+    api.notifyTaskDone(pendingCount, requestAttention);
+  } else {
+    api.clearBadge();
+  }
+}
+
+function maybeShowSystemNotification(tabId: string): void {
+  if (windowHasFocus && tabId === appState.activeTabId) return;
+  if (!('Notification' in window)) return;
+
+  const tab = appState.tabs.get(tabId);
+  const title = tab?.title || 'AI Terminal';
+  const body = `${title} 输出已完成，等待查看`;
+
+  const show = () => {
+    try {
+      new Notification('AI Terminal', { body, tag: `task-done-${tabId}` });
+    } catch {}
+  };
+
+  if (Notification.permission === 'granted') {
+    show();
+  } else if (Notification.permission === 'default') {
+    void Notification.requestPermission().then(permission => {
+      if (permission === 'granted') show();
+    });
+  }
+}
+
+async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string; images?: string[] }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string): Promise<string> {
   const tabId = await api.createTerminal(cwd);
   const tab = appState.addTab(tabId);
   if (typeof name === 'string') tab.title = name;
   if (aiTool) tab.aiTool = aiTool;
   if (noteBlocks && noteBlocks.length > 0) {
-    tab.noteBlocks = noteBlocks.map(b => ({ id: b.id, content: b.content }));
+    tab.noteBlocks = noteBlocks.map(b => ({
+      id: b.id,
+      content: b.content,
+      images: b.images ? [...b.images] : undefined,
+    }));
     blockCounter = Math.max(blockCounter, ...noteBlocks.map(b => parseInt(b.id.replace('b', '')) || 0));
   }
 
@@ -87,11 +153,14 @@ function closeTab(tabId: string) {
 }
 
 function switchToTab(tabId: string) {
+  closeTipsPanel();
   for (const [id, view] of terminalViews) {
     if (id === tabId) { view.show(); view.focus(); } else { view.hide(); }
   }
+  clearPendingDoneTimer(tabId);
+  markDoneAcknowledged(tabId);
   appState.switchTab(tabId);
-  api.clearBadge();
+  syncPendingAttention(false);
   // 切换标签时更新 cwd 显示
   updateCwdDisplay(tabId);
 }
@@ -257,6 +326,21 @@ function sendNoteBlock(tabId: string, blockId: string) {
 }
 
 function showImagePreview(src: string) {
+  items.splice(
+    0,
+    items.length,
+    { label: '新建标签', detail: 'Ctrl+T', action: () => createTab() },
+    { label: '关闭标签', detail: 'Ctrl+W', action: () => { if (appState.activeTabId) closeTab(appState.activeTabId); } },
+    { label: '终端搜索', detail: 'Ctrl+F', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.toggleSearch(); } } },
+    { label: '切换笔记面板', action: () => setNotepadVisible(notepadEl.classList.contains('hidden')) },
+    { label: '清空终端', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.clear(); } } },
+    ...themes.map((t, i) => ({ label: `主题: ${t.name}`, action: () => applyThemeToAll(i) })),
+    ...appState.tabOrder.map((id) => {
+      const tab = appState.tabs.get(id)!;
+      return { label: `切换到 ${tab.title}`, action: () => switchToTab(id) };
+    }),
+  );
+
   const overlay = document.createElement('div');
   overlay.className = 'image-preview-overlay';
   const img = document.createElement('img');
@@ -288,6 +372,7 @@ function renderNoteBlocks(force = false) {
     textarea.value = block.content;
     textarea.dataset.blockId = block.id;
     textarea.rows = 3;
+    textarea.placeholder = '输入文本...';
     textarea.addEventListener('input', () => {
       block.content = textarea.value;
       textarea.style.height = 'auto';
@@ -404,6 +489,8 @@ function renderNoteBlocks(force = false) {
     imgBtn.className = 'note-block-btn';
     imgBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M14 1H2a1 1 0 00-1 1v12a1 1 0 001 1h12a1 1 0 001-1V2a1 1 0 00-1-1zm-1 12H3l3-4 2 2.5L11 7l2 6z"/><circle cx="5.5" cy="5.5" r="1.5"/></svg>';
     imgBtn.title = '插入图片';
+    imgBtn.title = '插入图片';
+    imgBtn.title = '插入图片';
     imgBtn.addEventListener('click', async () => {
       const p = await api.selectImage();
       if (p) {
@@ -416,9 +503,11 @@ function renderNoteBlocks(force = false) {
     const sendBtn = document.createElement('button');
     sendBtn.className = 'note-block-btn send';
     sendBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M1 1l14 7-14 7V9l10-1-10-1z"/></svg> 发送';
+    sendBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M1 1l14 7-14 7V9l10-1-10-1z"/></svg> 发送';
     sendBtn.addEventListener('click', () => sendNoteBlock(tabId, block.id));
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'note-block-btn delete';
+    deleteBtn.textContent = '删除';
     deleteBtn.textContent = '删除';
     deleteBtn.addEventListener('click', () => removeNoteBlock(tabId, block.id));
     actions.appendChild(imgBtn);
@@ -431,6 +520,7 @@ function renderNoteBlocks(force = false) {
 
   const addBtn = document.createElement('div');
   addBtn.className = 'notepad-empty';
+  addBtn.textContent = '+ 点击添加文本块';
   addBtn.textContent = '+ 点击添加文本块';
   addBtn.addEventListener('click', () => { if (appState.activeTabId) addNoteBlock(appState.activeTabId); });
   notepadBlocksEl.appendChild(addBtn);
@@ -484,12 +574,170 @@ let _tipsOpen = false;
 // 暴露为全局函数，供 terminal-view.ts 调用
 (window as any).toggleTipsPanel = toggleTipsPanel;
 
+function closeTipsPanel() {
+  if (_tipsEl) {
+    _tipsEl.remove();
+    _tipsEl = null;
+  }
+  _tipsOpen = false;
+}
+
+function getCurrentTerminalFontSize(): number {
+  const firstView = terminalViews.values().next().value as TerminalView | undefined;
+  const activeView = appState.activeTabId ? terminalViews.get(appState.activeTabId) : undefined;
+  const view = activeView || firstView;
+  const optionSize = view?.terminal.options.fontSize;
+  return typeof optionSize === 'number' ? optionSize : getDefaultFontSize();
+}
+
+const TIPS_PANEL_HTML = `
+      <h3>使用技巧</h3>
+      <div class="tips-columns">
+        <div class="tips-column">
+          <div class="tips-section">
+            <div class="tips-section-title">底栏工具</div>
+            <div class="tips-item"><span class="tips-icon">📄</span>插入文件路径</div>
+            <div class="tips-item"><span class="tips-icon">📁</span>插入目录路径</div>
+            <div class="tips-item"><span class="tips-icon">🕘</span>历史面板可恢复标签或会话</div>
+            <div class="tips-item"><span class="tips-icon">🎨</span>右下角可切换主题</div>
+          </div>
+          <div class="tips-section">
+            <div class="tips-section-title">快捷键</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+T</span> 新建标签</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+W</span> 关闭标签</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+[</span> / <span class="tips-key">Ctrl+]</span> 切换标签</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+1-9</span> 跳转到指定标签</div>
+            <div class="tips-item"><span class="tips-key">Ctrl+F</span> 终端内搜索</div>
+            <div class="tips-item"><span class="tips-key">Alt+K</span> 打开技巧面板</div>
+          </div>
+          <div class="tips-section">
+            <div class="tips-section-title">标签 & Notepad</div>
+            <div class="tips-item"><span class="tips-icon">✏️</span>双击标签名可重命名</div>
+            <div class="tips-item"><span class="tips-icon">↔️</span>拖动标签可排序</div>
+            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-red)">●</span>红点表示后台任务完成</div>
+            <div class="tips-item"><span class="tips-icon">🎨</span>右键标签可修改颜色</div>
+            <div class="tips-item"><span class="tips-icon">+</span>Notepad 可预写提示词</div>
+            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>点击发送文本块到当前终端</div>
+          </div>
+        </div>
+        <div class="tips-column tips-column-ai">
+          <div class="tips-tabs">
+            <button class="tips-tab active" data-tab="claude">Claude Code</button>
+            <button class="tips-tab" data-tab="opencode">OpenCode</button>
+            <button class="tips-tab" data-tab="codex">Codex</button>
+          </div>
+          <div class="tips-tab-content active" data-content="claude">
+            <div class="tips-section">
+              <div class="tips-section-title">启动命令</div>
+              <div class="tips-item"><span class="tips-cmd">claude</span> 启动交互模式</div>
+              <div class="tips-item"><span class="tips-cmd">claude --continue</span> 继续最近一次会话</div>
+              <div class="tips-item"><span class="tips-cmd">claude --resume</span> 打开会话选择器</div>
+              <div class="tips-item"><span class="tips-cmd">claude "prompt"</span> 执行单次任务</div>
+              <div class="tips-item"><span class="tips-cmd">claude --dangerously-skip-permissions</span> 跳过权限确认</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">交互命令</div>
+              <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
+              <div class="tips-item"><span class="tips-cmd">/clear</span> 清空对话</div>
+              <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型</div>
+              <div class="tips-item"><span class="tips-cmd">/cost</span> 查看用量</div>
+              <div class="tips-item"><span class="tips-cmd">/help</span> 查看全部命令</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">上下文引用</div>
+              <div class="tips-item"><span class="tips-cmd">@file</span> 引用文件内容</div>
+              <div class="tips-item"><span class="tips-cmd">@dir</span> 引用目录结构</div>
+              <div class="tips-item"><span class="tips-cmd">@url</span> 抓取网页内容</div>
+              <div class="tips-item"><span class="tips-cmd">@git</span> 引用 Git 历史</div>
+              <div class="tips-item"><span class="tips-cmd">@terminal</span> 引用终端输出</div>
+            </div>
+          </div>
+          <div class="tips-tab-content" data-content="opencode">
+            <div class="tips-section">
+              <div class="tips-section-title">启动命令</div>
+              <div class="tips-item"><span class="tips-cmd">opencode</span> 启动交互界面</div>
+              <div class="tips-item"><span class="tips-cmd">opencode --continue</span> 继续最近会话</div>
+              <div class="tips-item"><span class="tips-cmd">opencode run "prompt"</span> 运行单次任务</div>
+              <div class="tips-item"><span class="tips-cmd">opencode --help</span> 查看完整参数</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">内置命令</div>
+              <div class="tips-item"><span class="tips-cmd">/help</span> 查看帮助</div>
+              <div class="tips-item"><span class="tips-cmd">/init</span> 初始化项目说明</div>
+              <div class="tips-item"><span class="tips-cmd">/undo</span> 撤销上一条变更</div>
+              <div class="tips-item"><span class="tips-cmd">/redo</span> 恢复撤销内容</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">提示</div>
+              <div class="tips-item"><span class="tips-cmd">@file</span> 可在提示中引用文件</div>
+              <div class="tips-item"><span class="tips-note">Agent</span> 支持子任务与多代理</div>
+              <div class="tips-item"><span class="tips-note">build / plan</span> 支持不同工作模式</div>
+              <div class="tips-item"><span class="tips-note">说明</span> 以 <span class="tips-cmd">/help</span> 与官网文档为准</div>
+            </div>
+          </div>
+          <div class="tips-tab-content" data-content="codex">
+            <div class="tips-section">
+              <div class="tips-section-title">启动命令</div>
+              <div class="tips-item"><span class="tips-cmd">codex</span> 启动交互模式</div>
+              <div class="tips-item"><span class="tips-cmd">codex --full-auto</span> 自动执行更多步骤</div>
+              <div class="tips-item"><span class="tips-cmd">codex --auto-edit</span> 自动应用代码修改</div>
+              <div class="tips-item"><span class="tips-cmd">codex --help</span> 查看完整参数</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">交互命令</div>
+              <div class="tips-item"><span class="tips-cmd">/help</span> 查看帮助</div>
+              <div class="tips-item"><span class="tips-cmd">/status</span> 查看当前会话与环境状态</div>
+              <div class="tips-item"><span class="tips-cmd">/mode</span> 切换执行模式</div>
+              <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">提示</div>
+              <div class="tips-item"><span class="tips-note">并行代理</span> 适合多任务并行处理</div>
+              <div class="tips-item"><span class="tips-note">终端 / IDE / App</span> 都可配合使用</div>
+              <div class="tips-item"><span class="tips-note">模型与模式</span> 建议随任务复杂度调整</div>
+              <div class="tips-item"><span class="tips-note">说明</span> 以 <span class="tips-cmd">/help</span> 与官方文档为准</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tips-settings">
+        <div class="tips-setting-item">
+          <label>字号</label>
+          <select id="font-size-select">
+            <option value="11">11</option>
+            <option value="12">12</option>
+            <option value="13">13</option>
+            <option value="14">14</option>
+            <option value="15">15</option>
+            <option value="16">16</option>
+            <option value="18">18</option>
+            <option value="20">20</option>
+          </select>
+        </div>
+        <div class="tips-setting-item">
+          <label>字体</label>
+          <select id="font-family-select">
+            ${getCleanFontFamilyOptions()}
+          </select>
+        </div>
+      </div>
+    `;
+
+function isCopyableTipCommand(text: string): boolean {
+  const value = text.trim();
+  return value.startsWith('claude')
+    || value.startsWith('opencode')
+    || value.startsWith('codex')
+    || value.startsWith('/')
+    || value.startsWith('@');
+}
+
 function toggleTipsPanel() {
-  if (_tipsOpen && _tipsEl) { _tipsEl.remove(); _tipsEl = null; _tipsOpen = false; return; }
-  if (_tipsEl) _tipsEl.remove();
+  if (_tipsOpen && _tipsEl) { closeTipsPanel(); return; }
+  if (_tipsEl) closeTipsPanel();
   _tipsEl = document.createElement('div');
   _tipsEl.className = 'tips-panel tips-panel-wide';
-  _tipsEl.innerHTML = `
+  /* _tipsEl.innerHTML = `
       <h3>使用技巧</h3>
       <div class="tips-columns">
         <div class="tips-column">
@@ -616,7 +864,8 @@ function toggleTipsPanel() {
           </select>
         </div>
       </div>
-    `;
+    `; */
+  _tipsEl.innerHTML = TIPS_PANEL_HTML;
   _tipsEl.addEventListener('click', (e) => e.stopPropagation());
   _tipsEl.addEventListener('mousedown', (e) => e.stopPropagation());
   document.body.appendChild(_tipsEl);
@@ -656,9 +905,9 @@ function toggleTipsPanel() {
   // Load saved font settings
   const savedFontSize = localStorage.getItem('terminal-font-size');
   const savedFontFamily = localStorage.getItem('terminal-font-family');
-  if (savedFontSize) {
-    const fontSizeSelect = _tipsEl.querySelector('#font-size-select') as HTMLSelectElement;
-    if (fontSizeSelect) fontSizeSelect.value = savedFontSize;
+  const fontSizeSelect = _tipsEl.querySelector('#font-size-select') as HTMLSelectElement;
+  if (fontSizeSelect) {
+    fontSizeSelect.value = String(savedFontSize ? parseInt(savedFontSize, 10) : getCurrentTerminalFontSize());
   }
   if (savedFontFamily) {
     const fontFamilySelect = _tipsEl.querySelector('#font-family-select') as HTMLSelectElement;
@@ -666,7 +915,6 @@ function toggleTipsPanel() {
   }
 
   // Font size change handler
-  const fontSizeSelect = _tipsEl.querySelector('#font-size-select') as HTMLSelectElement;
   if (fontSizeSelect) {
     fontSizeSelect.addEventListener('change', () => {
       const size = parseInt(fontSizeSelect.value, 10);
@@ -691,7 +939,7 @@ function toggleTipsPanel() {
       e.preventDefault();
       e.stopPropagation();
       const commandText = cmd.textContent || '';
-      if (commandText) {
+      if (commandText && isCopyableTipCommand(commandText)) {
         try {
           await navigator.clipboard.writeText(commandText);
           // Show toast notification
@@ -968,8 +1216,100 @@ let _closeHistoryPanel: (() => void) | null = null;
 })();
 
 // Backend events — auto-send notepad blocks when Claude is waiting
+const pendingDoneTimers = new Map<string, number>();
+const lastExecutingAt = new Map<string, number>();
+const lastAcknowledgedAt = new Map<string, number>();
+
+function clearPendingDoneTimer(tabId: string): void {
+  const timer = pendingDoneTimers.get(tabId);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    pendingDoneTimers.delete(tabId);
+  }
+}
+
+function armPendingDoneTimer(tabId: string): void {
+  clearPendingDoneTimer(tabId);
+  const timer = window.setTimeout(() => {
+    pendingDoneTimers.delete(tabId);
+    const tab = appState.tabs.get(tabId);
+    if (!tab || tab.status === 'executing') return;
+    const nextStatus = shouldShowDoneUnseen(tabId) ? 'done-unseen' : 'active';
+    appState.setStatus(tabId, nextStatus);
+    syncPendingAttention(nextStatus === 'done-unseen');
+    if (nextStatus === 'done-unseen') maybeShowSystemNotification(tabId);
+  }, 700);
+  pendingDoneTimers.set(tabId, timer);
+}
+
+function markExecutingSeen(tabId: string): void {
+  lastExecutingAt.set(tabId, Date.now());
+}
+
+function markDoneAcknowledged(tabId: string): void {
+  lastAcknowledgedAt.set(tabId, Date.now());
+}
+
+function isLikelyStillExecuting(tabId: string): boolean {
+  const last = lastExecutingAt.get(tabId);
+  return last !== undefined && Date.now() - last < 1800;
+}
+
+function hasUnacknowledgedExecution(tabId: string): boolean {
+  const lastExec = lastExecutingAt.get(tabId) ?? 0;
+  const lastAck = lastAcknowledgedAt.get(tabId) ?? 0;
+  return lastExec > lastAck;
+}
+
+function shouldShowDoneUnseen(tabId: string): boolean {
+  return tabId !== appState.activeTabId || !windowHasFocus;
+}
+
+window.addEventListener('focus', () => {
+  windowHasFocus = true;
+  if (appState.activeTabId) {
+    clearPendingDoneTimer(appState.activeTabId);
+    markDoneAcknowledged(appState.activeTabId);
+    const activeTab = appState.tabs.get(appState.activeTabId);
+    if (activeTab?.status === 'done-unseen') {
+      appState.setStatus(appState.activeTabId, 'active');
+    }
+  }
+  syncPendingAttention(false);
+});
+
+window.addEventListener('blur', () => {
+  windowHasFocus = false;
+});
+
 api.onTabStatusChanged((tabId, status) => {
-  appState.setStatus(tabId, status);
+  const existingTab = appState.tabs.get(tabId);
+  if (existingTab?.status === 'done-unseen' && status !== 'done-unseen') {
+    clearPendingDoneTimer(tabId);
+    return;
+  }
+
+  if (status === 'executing') {
+    markExecutingSeen(tabId);
+    clearPendingDoneTimer(tabId);
+    appState.setStatus(tabId, status);
+    return;
+  }
+
+  if (status === 'done-unseen' || status === 'waiting') {
+    if (!hasUnacknowledgedExecution(tabId)) {
+      clearPendingDoneTimer(tabId);
+      appState.setStatus(tabId, 'active');
+      syncPendingAttention(false);
+      return;
+    }
+    armPendingDoneTimer(tabId);
+    appState.setStatus(tabId, isLikelyStillExecuting(tabId) ? 'executing' : 'active');
+  } else {
+    clearPendingDoneTimer(tabId);
+    appState.setStatus(tabId, status);
+    syncPendingAttention(false);
+  }
 
   // Auto-submit first notepad block when tab becomes "waiting" (Claude waiting for input)
   if (status === 'waiting') {
@@ -990,11 +1330,11 @@ api.onTabAutoRenamed((tabId, name) => {
   const tab = appState.tabs.get(tabId);
   if (!tab || tab.title === name) return;
   // Strip any lingering status prefixes from saved tab names (ASCII and Unicode variants)
-  const cleanTitle = tab.title.replace(/^[*·.●○✳⠂⠿◆◇]\s+/, '');
+  const cleanTitle = tab.title.replace(/^[*.\s●○◆◇■□✳✻•·∙⋅◉◎◌◍◐◑◒◓◴◵◶◷\u2800-\u28FF]+/u, '');
   // Allow rename for: default names, restored names, or AI-detected tabs (OSC title updates)
   if (tab.title.startsWith('Terminal ') || tab.title.startsWith('↻ ') || tab.aiTool || cleanTitle !== tab.title) {
     appState.renameTab(tabId, name);
-    api.updateHistoryName(tabId, name);
+    api.updateHistoryName(tabId, name, tab.cwd, tab.aiTool || undefined);
   }
 });
 api.onAiDetected((tabId, cwd, aiTool) => {
@@ -1123,6 +1463,7 @@ function toggleCommandPalette() {
   panel.className = 'command-palette';
   const input = document.createElement('input');
   input.type = 'text';
+  input.placeholder = '输入命令...';
   input.placeholder = '输入命令...';
   input.className = 'palette-input';
   const list = document.createElement('div');
