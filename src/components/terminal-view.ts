@@ -59,21 +59,62 @@ export class TerminalView {
     this.terminal.loadAddon(this.searchAddon);
     this.terminal.open(this.wrapper);
 
-    // Workaround: macOS WebView IME swallows first Shift+key after idle.
-    // Track last keydown time; if idle > 1s, manually send Shift+printable chars.
-    let lastKeyTime = Date.now();
+    // macOS Chinese IME Shift+key fix:
+    // Chinese IME uses Shift to toggle Chinese/English. When Shift is pressed quickly
+    // before another key, the IME may: (a) swallow the char, or (b) output it AND
+    // xterm also processes it → double input.
+    // Fix: Use preventDefault() in capture phase on xterm's textarea to stop the IME
+    // from seeing the event at all. We send the char directly ourselves.
+    let shiftDownTime = 0;
+    let shiftHeld = false;
+    let suppressOnDataUntil = 0;
+    const xtermTextarea = this.wrapper.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    if (xtermTextarea) {
+      // Capture-phase keydown on textarea: block IME and send char directly
+      xtermTextarea.addEventListener('keydown', (ev) => {
+        const e = ev as KeyboardEvent;
+        if (e.key === 'Shift') {
+          shiftDownTime = Date.now();
+          shiftHeld = true;
+          return;
+        }
+        // Only for non-letter chars (symbols/numbers like ?, !, @, etc.)
+        // Letters are handled fine by IME's Shift-toggle-to-English mode.
+        // Active while Shift is held to support rapid sequences (Shift+1,2,3).
+        if (e.shiftKey && shiftHeld && !e.ctrlKey && !e.metaKey && !e.altKey
+            && e.key.length === 1 && !/^[a-zA-Z]$/.test(e.key)) {
+          e.preventDefault();
+          api.writeTerminal(tabId, e.key);
+          suppressOnDataUntil = Date.now() + 500;
+        }
+      }, true);
+      xtermTextarea.addEventListener('keyup', (ev) => {
+        if ((ev as KeyboardEvent).key === 'Shift') shiftHeld = false;
+      }, true);
+      // Block IME composition on the WRAPPER (parent), so capture phase fires
+      // BEFORE xterm's own listeners on the textarea.
+      for (const evt of ['compositionstart', 'compositionupdate', 'compositionend', 'input'] as const) {
+        this.wrapper.addEventListener(evt, (e) => {
+          if (Date.now() < suppressOnDataUntil) {
+            e.stopImmediatePropagation();
+            e.stopPropagation();
+            e.preventDefault();
+            xtermTextarea.value = '';
+          }
+        }, true);
+      }
+    }
 
     // Intercept key events inside xterm before it processes them
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      const now = Date.now();
-      const wasIdle = now - lastKeyTime > 1000;
-      // Update lastKeyTime for keydown, but NOT for Shift alone (Shift+char needs idle detection)
-      if (e.type === 'keydown' && e.key !== 'Shift') lastKeyTime = now;
+      // Shift+non-letter: already handled by capture-phase listener above
+      if (e.shiftKey && shiftHeld && !e.ctrlKey && !e.metaKey && !e.altKey
+          && e.key.length === 1 && !/^[a-zA-Z]$/.test(e.key)) {
+        return false; // block xterm from also processing
+      }
       // Block standalone modifier keys when there's a selection — prevents xterm from
       // scrolling to bottom when user presses Cmd/Ctrl before Cmd+C to copy.
-      // But always update lastKeyTime to prevent idle-workaround misfires.
-      if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key) && this.terminal.hasSelection()) {
-        lastKeyTime = now; // prevent idle workaround from misfiring after modifier press
+      if (['Control', 'Alt', 'Meta'].includes(e.key) && this.terminal.hasSelection()) {
         return false;
       }
       // Block both keydown and keyup for intercepted keys
@@ -131,12 +172,6 @@ export class TerminalView {
             api.writeTerminal(tabId, '\r\n');
           }
         }
-        return false;
-      }
-      // Workaround: macOS WebView IME swallows first Shift+key after idle.
-      // Block both keydown and keyup to prevent xterm from processing the key twice.
-      if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1 && wasIdle) {
-        if (e.type === 'keydown') api.writeTerminal(tabId, e.key);
         return false;
       }
       return true;
@@ -201,6 +236,10 @@ export class TerminalView {
       const fixed = data.replace(/[\uff01-\uff5e]/g, c =>
         String.fromCharCode(c.charCodeAt(0) - 0xfee0)
       );
+      // Fallback: suppress IME duplicate that got through despite composition blocking
+      if (Date.now() < suppressOnDataUntil && fixed.length === 1) {
+        return;
+      }
       // 始终过滤掉 Ctrl+C (\x03)，当有选中文本或鼠标选择进行中时
       if (fixed === '\x03' && (this.mouseSelectionInProgress || this.terminal.hasSelection())) {
         console.log('Blocked Ctrl+C during selection');

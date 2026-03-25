@@ -7,6 +7,12 @@ use output_parser::OutputParser;
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+// Window visibility state for Alt+S toggle
+struct WindowState {
+    visible: bool,
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -26,9 +32,31 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             app.manage(Arc::new(Mutex::new(PtyManager::new())));
             app.manage(Arc::new(Mutex::new(OutputParser::new())));
+            app.manage(Arc::new(Mutex::new(WindowState { visible: true })));
+
+            let alt_s = Shortcut::new(Some(Modifiers::ALT), Code::KeyS);
+            app.global_shortcut().on_shortcut(alt_s, |app, _shortcut, event| {
+                if event.state() != ShortcutState::Pressed {
+                    return;
+                }
+                if let Some(win) = app.get_webview_window("main") {
+                    let state = app.state::<Arc<Mutex<WindowState>>>();
+                    let mut visible = state.lock().unwrap();
+
+                    visible.visible = !visible.visible;
+                    if visible.visible {
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    } else {
+                        let _ = win.hide();
+                    }
+                }
+            })?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
