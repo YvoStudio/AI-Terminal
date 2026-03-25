@@ -16,7 +16,7 @@ export interface SidebarEntry {
 
 export interface SavedTab {
   name: string;
-  noteBlocks?: Array<{ id: string; content: string }>;
+  noteBlocks?: Array<{ id: string; content: string; images?: string[] }>;
   shell?: 'cmd' | 'powershell' | 'wsl';
   cwd?: string;
   aiTool?: string;
@@ -130,8 +130,8 @@ export const api = {
     return invoke('add_history', { tabId, name, cwd, shell: shell ?? null, aiTool: aiTool ?? null });
   },
 
-  async updateHistoryName(tabId: string, newName: string): Promise<void> {
-    return invoke('update_history_name', { tabId, newName });
+  async updateHistoryName(tabId: string, newName: string, cwd?: string, aiTool?: string): Promise<void> {
+    return invoke('update_history_name', { tabId, newName, cwd: cwd ?? null, aiTool: aiTool ?? null });
   },
 
   async selectFile(): Promise<string> {
@@ -185,6 +185,10 @@ export const api = {
 
   async getClaudeSessionHistory(sessionId: string): Promise<string[]> {
     return invoke<string[]>('get_claude_session_history', { sessionId });
+  },
+
+  notifyTaskDone(pendingCount: number, requestAttention = true): void {
+    invoke('notify_task_done', { pendingCount, requestAttention }).catch(() => {});
   },
 
   clearBadge(): void {

@@ -1,4 +1,4 @@
-use crate::output_parser::{OutputParser, SidebarEntry, TabStatus};
+use crate::output_parser::{OutputParser, SidebarEntry};
 use crate::pty_manager::PtyManager;
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -12,17 +12,21 @@ use uuid::Uuid;
 pub struct SavedNoteBlock {
     pub id: String,
     pub content: String,
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedTab {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, rename = "noteBlocks", alias = "note_blocks")]
     pub note_blocks: Vec<SavedNoteBlock>,
     #[serde(default = "default_shell_str")]
     pub shell: String,
     #[serde(default)]
     pub cwd: String,
+    #[serde(default, rename = "aiTool", alias = "ai_tool")]
+    pub ai_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,10 +79,6 @@ fn make_pty_callback(
                 &data,
                 |tid, status| {
                     let _ = app_ref.emit("tab-status-changed", serde_json::json!({ "tabId": tid, "status": status }));
-                    // Notify user when a tab finishes (Dock bounce + badge)
-                    if matches!(status, TabStatus::DoneUnseen) {
-                        crate::notification::notify_task_done(app_ref, 1);
-                    }
                 },
                 |tid, entry| {
                     let _ = app.emit("sidebar-entry-added", serde_json::json!({ "tabId": tid, "entry": entry }));
@@ -233,6 +233,16 @@ pub fn clear_badge(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn notify_task_done(
+    app: AppHandle,
+    pending_count: u32,
+    request_attention: bool,
+) -> Result<(), String> {
+    crate::notification::sync_pending_tasks(&app, pending_count, request_attention);
+    Ok(())
+}
+
 // ── Tabs persistence ───────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -307,13 +317,25 @@ pub fn add_history(app: AppHandle, tab_id: String, name: String, cwd: String, sh
 }
 
 #[tauri::command]
-pub fn update_history_name(app: AppHandle, tab_id: String, new_name: String) -> Result<(), String> {
+pub fn update_history_name(
+    app: AppHandle,
+    tab_id: String,
+    new_name: String,
+    cwd: Option<String>,
+    ai_tool: Option<String>,
+) -> Result<(), String> {
     let _ = tab_id;
     let path = history_file(&app);
     if !path.exists() { return Ok(()); }
     let data = fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let mut history: Vec<HistoryEntry> = serde_json::from_str(&data).unwrap_or_default();
-    if let Some(entry) = history.first_mut() {
+
+    let target_cwd = cwd.unwrap_or_default();
+    if let Some(entry) = history.iter_mut().find(|entry| {
+        !target_cwd.is_empty() && entry.cwd == target_cwd && entry.ai_tool == ai_tool
+    }) {
+        entry.name = new_name;
+    } else if let Some(entry) = history.first_mut() {
         entry.name = new_name;
     }
     let json = serde_json::to_string(&history).map_err(|e| e.to_string())?;

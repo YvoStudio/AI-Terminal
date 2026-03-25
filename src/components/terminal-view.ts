@@ -279,6 +279,7 @@ export class TerminalView {
     this.scrollBtn.className = 'terminal-scroll-bottom';
     this.scrollBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11.5l-5-5h10z"/></svg>';
     this.scrollBtn.title = '回到底部';
+    this.scrollBtn.title = '回到底部';
     this.scrollBtn.addEventListener('click', () => {
       this.userScrolledUp = false;
       this.terminal.scrollToBottom();
@@ -401,6 +402,7 @@ export class TerminalView {
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = '搜索...';
+    input.placeholder = '搜索...';
     input.addEventListener('input', () => {
       if (input.value) this.searchAddon.findNext(input.value);
     });
@@ -412,10 +414,14 @@ export class TerminalView {
       }
     });
     const prevBtn = document.createElement('button');
+    prevBtn.textContent = '↑';
+    prevBtn.title = '上一个 (Shift+Enter)';
     prevBtn.textContent = '▲';
     prevBtn.title = '上一个 (Shift+Enter)';
     prevBtn.addEventListener('click', () => this.searchAddon.findPrevious(input.value));
     const nextBtn = document.createElement('button');
+    nextBtn.textContent = '↓';
+    nextBtn.title = '下一个 (Enter)';
     nextBtn.textContent = '▼';
     nextBtn.title = '下一个 (Enter)';
     nextBtn.addEventListener('click', () => this.searchAddon.findNext(input.value));

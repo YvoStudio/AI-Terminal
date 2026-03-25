@@ -24,6 +24,7 @@ struct TabState {
     buffer: String,
     mute_until: u64,
     is_active: bool,
+    was_executing: bool,
     user_input_count: u32,
     auto_renamed: bool,
     ai_tool: Option<String>,
@@ -37,6 +38,7 @@ impl TabState {
             buffer: String::new(),
             mute_until: 0,
             is_active: false,
+            was_executing: false,
             user_input_count: 0,
             auto_renamed: false,
             ai_tool: None,
@@ -115,9 +117,16 @@ impl OutputParser {
 
         // Parse OSC 0/2 (terminal title) — Claude Code sets this to session name
         // Format: \x1b]0;title\x07  or  \x1b]2;title\x07
-        if let Some(title) = extract_osc_title(raw) {
+        if let Some((title, has_status_prefix)) = extract_osc_title(raw) {
             eprintln!("OSC title detected: '{}'", title);
             if state.ai_tool.is_some() && !title.is_empty() {
+                let next_status = if has_status_prefix {
+                    state.was_executing = true;
+                    TabStatus::Executing
+                } else {
+                    TabStatus::Waiting
+                };
+                on_status(tab_id.to_string(), next_status);
                 on_rename(tab_id.to_string(), title);
             }
         }
@@ -143,7 +152,8 @@ impl OutputParser {
             }
             found
         };
-        if has_standalone_bell && !state.is_active {
+        if has_standalone_bell {
+            state.was_executing = false;
             on_status(tab_id.to_string(), TabStatus::DoneUnseen);
         }
 
@@ -165,6 +175,17 @@ impl OutputParser {
             }
 
             // User prompt: ❯ xxx
+            if state.ai_tool.is_some() && is_ai_waiting_prompt(trimmed) {
+                let next_status = if state.was_executing {
+                    state.was_executing = false;
+                    TabStatus::DoneUnseen
+                } else {
+                    TabStatus::Waiting
+                };
+                on_status(tab_id.to_string(), next_status);
+                continue;
+            }
+
             if let Some(content) = match_prompt(trimmed) {
                 if content.is_empty() {
                     continue;
@@ -258,6 +279,16 @@ impl OutputParser {
                 on_entry(tab_id.to_string(), entry);
             }
         }
+
+        if state.ai_tool.is_some() && is_ai_waiting_prompt(state.buffer.trim()) {
+            let next_status = if state.was_executing {
+                state.was_executing = false;
+                TabStatus::DoneUnseen
+            } else {
+                TabStatus::Waiting
+            };
+            on_status(tab_id.to_string(), next_status);
+        }
     }
 
     pub fn mute_tab(&mut self, tab_id: &str, ms: u64) {
@@ -272,34 +303,76 @@ impl OutputParser {
 
 /// Extract terminal title from OSC 0 or OSC 2 escape sequence
 /// Format: \x1b]0;title\x07  or  \x1b]2;title\x07
-fn extract_osc_title(raw: &str) -> Option<String> {
+fn extract_osc_title(raw: &str) -> Option<(String, bool)> {
     // Try OSC 2 first (set window title), then OSC 0 (set icon name + title)
     for marker in &["\x1b]2;", "\x1b]0;"] {
         if let Some(start) = raw.find(marker) {
             let after = &raw[start + marker.len()..];
             let end = after.find('\x07')
                 .or_else(|| after.find("\x1b\\"))?;
-            let mut title = after[..end].trim();
-            // Strip status prefixes set by Claude Code / AI tools
-            // Claude Code uses: ✳ (U+2733), ⠂ (U+2802), ● (U+25CF), ○ (U+25CB), * , .
-            if let Some(rest) = title.strip_prefix("* ")
-                .or_else(|| title.strip_prefix(". "))
-                .or_else(|| title.strip_prefix("● "))
-                .or_else(|| title.strip_prefix("○ "))
-                .or_else(|| title.strip_prefix("✳ "))
-                .or_else(|| title.strip_prefix("⠂ "))
-                .or_else(|| title.strip_prefix("⠿ "))
-                .or_else(|| title.strip_prefix("◆ "))
-                .or_else(|| title.strip_prefix("◇ "))
-            {
-                title = rest.trim();
-            }
+            let original = after[..end].trim();
+            let has_status_prefix = title_has_status_prefix(original);
+            let cleaned = strip_title_status_prefix(original);
+            let title = cleaned.as_str();
             if !title.is_empty() && title.len() < 200 && !title.contains('\n') {
-                return Some(title.to_string());
+                return Some((title.to_string(), has_status_prefix));
             }
         }
     }
     None
+}
+
+fn title_has_status_prefix(title: &str) -> bool {
+    for ch in title.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        return is_status_prefix_char(ch);
+    }
+    false
+}
+
+fn strip_title_status_prefix(title: &str) -> String {
+    let mut started = false;
+    let mut result = String::new();
+
+    for ch in title.chars() {
+        if !started {
+            if ch.is_whitespace() {
+                continue;
+            }
+
+            if is_status_prefix_char(ch) {
+                continue;
+            }
+
+            started = true;
+        }
+
+        result.push(ch);
+    }
+
+    result.trim().to_string()
+}
+
+fn is_status_prefix_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '*' | '.'
+            | '●' | '○'
+            | '◆' | '◇'
+            | '■' | '□'
+            | '✳' | '✻'
+            | '•' | '·'
+            | '∙' | '⋅'
+            | '◉' | '◎'
+            | '◌' | '◍'
+            | '◐' | '◑'
+            | '◒' | '◓'
+            | '◴' | '◵'
+            | '◶' | '◷'
+            | '⠁' | '⠂' | '⠄' | '⠆' | '⠇' | '⠋' | '⠙' | '⠸' | '⠼' | '⠿'
+    ) || ('\u{2800}'..='\u{28FF}').contains(&ch)
 }
 
 /// Extract cwd from OSC 7 escape sequence
@@ -378,6 +451,22 @@ fn now_ms() -> u64 {
 
 fn strip_ansi(s: &str) -> String {
     strip_ansi_escapes::strip_str(s)
+}
+
+fn is_ai_waiting_prompt(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    matches!(trimmed, ">" | ">>" | ">>>" | "$" | "❯" | "❯❯" | "›")
+        || trimmed.ends_with("\n>")
+        || trimmed.ends_with("\n>>")
+        || trimmed.ends_with("\n>>>")
+        || trimmed.ends_with("\n$")
+        || trimmed.ends_with("\n❯")
+        || trimmed.ends_with("\n❯❯")
+        || trimmed.ends_with("\n›")
 }
 
 fn match_prompt(line: &str) -> Option<String> {

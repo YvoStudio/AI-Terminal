@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "tauri:check": "G:\\AI\\ai-terminal\\src-tauri\\cargo.bat check",
-    "tauri:build": "G:\\AI\\ai-terminal\\src-tauri\\cargo.bat build",
+    "tauri:check": "cd src-tauri && cargo check",
+    "tauri:build": "cd src-tauri && cargo build",
     "tauri:dev": "npx @tauri-apps/cli dev"
   },
   "dependencies": {
