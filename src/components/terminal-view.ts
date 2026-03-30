@@ -67,7 +67,10 @@ export class TerminalView {
     // from seeing the event at all. We send the char directly ourselves.
     let shiftDownTime = 0;
     let shiftHeld = false;
-    let suppressOnDataUntil = 0;
+    // Track the specific char sent via Shift+key bypass, so we only suppress
+    // the exact IME duplicate — not unrelated subsequent keystrokes.
+    let suppressChar = '';
+    let suppressUntil = 0;
     const xtermTextarea = this.wrapper.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
     if (xtermTextarea) {
       // Capture-phase keydown on textarea: block IME and send char directly
@@ -85,7 +88,8 @@ export class TerminalView {
             && e.key.length === 1 && !/^[a-zA-Z]$/.test(e.key)) {
           e.preventDefault();
           api.writeTerminal(tabId, e.key);
-          suppressOnDataUntil = Date.now() + 500;
+          suppressChar = e.key;
+          suppressUntil = Date.now() + 150;
         }
       }, true);
       xtermTextarea.addEventListener('keyup', (ev) => {
@@ -95,7 +99,7 @@ export class TerminalView {
       // BEFORE xterm's own listeners on the textarea.
       for (const evt of ['compositionstart', 'compositionupdate', 'compositionend', 'input'] as const) {
         this.wrapper.addEventListener(evt, (e) => {
-          if (Date.now() < suppressOnDataUntil) {
+          if (Date.now() < suppressUntil) {
             e.stopImmediatePropagation();
             e.stopPropagation();
             e.preventDefault();
@@ -236,8 +240,10 @@ export class TerminalView {
       const fixed = data.replace(/[\uff01-\uff5e]/g, c =>
         String.fromCharCode(c.charCodeAt(0) - 0xfee0)
       );
-      // Fallback: suppress IME duplicate that got through despite composition blocking
-      if (Date.now() < suppressOnDataUntil && fixed.length === 1) {
+      // Fallback: suppress IME duplicate that got through despite composition blocking.
+      // Only suppress if it matches the exact char we just sent via Shift+key bypass.
+      if (suppressChar && Date.now() < suppressUntil && fixed === suppressChar) {
+        suppressChar = '';
         return;
       }
       // 始终过滤掉 Ctrl+C (\x03)，当有选中文本或鼠标选择进行中时

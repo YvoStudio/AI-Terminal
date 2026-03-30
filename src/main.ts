@@ -609,6 +609,7 @@ const TIPS_PANEL_HTML = `
             <div class="tips-item"><span class="tips-key">Ctrl+1-9</span> 跳转到指定标签</div>
             <div class="tips-item"><span class="tips-key">Ctrl+F</span> 终端内搜索</div>
             <div class="tips-item"><span class="tips-key">Alt+K</span> 打开技巧面板</div>
+            <div class="tips-item"><span class="tips-key">Alt+S</span> 显示/隐藏窗口（全局）</div>
           </div>
           <div class="tips-section">
             <div class="tips-section-title">标签 & Notepad</div>
