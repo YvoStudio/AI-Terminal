@@ -12,7 +12,7 @@ export class TerminalView {
   terminal: Terminal;
   private fitAddon: FitAddon;
   private searchAddon: SearchAddon;
-  private wrapper: HTMLElement;
+  readonly wrapper: HTMLElement;
   private searchBar: HTMLElement | null = null;
   private resizeObserver: ResizeObserver;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;

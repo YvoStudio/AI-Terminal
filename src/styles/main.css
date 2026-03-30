@@ -79,6 +79,62 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .terminal-wrapper .xterm-viewport::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
 .terminal-wrapper .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
+/* Split mode — grid layouts */
+#terminal-container[class*="split-"] { display: grid; gap: 2px; background: var(--border-color); padding: 0; }
+#terminal-container.split-left-right { grid-template-rows: 1fr; grid-auto-flow: column; grid-auto-columns: 1fr; }
+#terminal-container.split-top-bottom { grid-template-columns: 1fr; grid-auto-flow: row; grid-auto-rows: 1fr; }
+#terminal-container.split-left-two-right { grid-template: 1fr 1fr / 1fr 1fr; }
+#terminal-container.split-left-two-right .split-pane:first-child { grid-row: 1 / 3; }
+#terminal-container.split-grid { grid-template: 1fr 1fr / 1fr 1fr; }
+
+/* Split pane container */
+.split-pane { display: flex; flex-direction: column; overflow: hidden; background: var(--bg-primary); border: 1px solid transparent; }
+.split-pane.active-pane { border-color: var(--accent-blue); }
+.split-pane.drop-target { border-color: var(--accent-blue); background: rgba(86, 156, 214, 0.08); }
+.split-pane .terminal-wrapper.visible { position: relative; top: 0; left: 0; right: 0; bottom: 0; flex: 1; width: 100%; }
+
+/* Pane-local tab bar (for top-bottom split) */
+.pane-tabs { display: flex; height: 26px; background: var(--bg-secondary); border-bottom: 1px solid var(--border-color); flex-shrink: 0; overflow-x: auto; align-items: center; }
+.pane-tabs::-webkit-scrollbar { height: 0; }
+.pane-tab { display: flex; align-items: center; gap: 4px; padding: 0 24px 0 8px; height: 100%; cursor: pointer; font-size: 11px; color: var(--text-secondary); white-space: nowrap; position: relative; border-right: 1px solid var(--border-color); --tab-color: transparent; }
+.pane-tab::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--tab-color); }
+.pane-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
+.pane-tab.active { color: var(--text-primary); background: var(--bg-primary); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent-blue); }
+.pane-tab-indicator { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.pane-tab-indicator.executing { background: var(--accent-green); }
+.pane-tab-indicator.done-unseen { background: var(--accent-red); }
+.pane-tab-title { overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+.pane-tab-close { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; border: none; background: none; color: var(--text-muted); cursor: pointer; font-size: 12px; line-height: 14px; text-align: center; border-radius: 3px; display: none; }
+.pane-tab:hover .pane-tab-close { display: block; }
+.pane-tab-close:hover { color: var(--text-primary); background: var(--bg-hover); }
+.pane-tab-new { width: 22px; height: 22px; border: none; background: none; color: var(--text-secondary); cursor: pointer; font-size: 14px; border-radius: 4px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; margin: 0 2px; }
+.pane-tab-new:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+/* Tab group (split mode) in title bar */
+/* In split mode, tab-list stretches to fill title bar */
+#tab-list.split-tabs { flex: 1; }
+#tab-list.split-tabs ~ .tab-bar-spacer { flex: 0; }
+.tab-group { display: flex; align-items: center; flex: 1; min-width: 0; overflow-x: auto; }
+.tab-group::-webkit-scrollbar { height: 0; }
+.tab-group.active-group { background: var(--bg-primary); }
+.tab-group.drop-target-group { background: rgba(86, 156, 214, 0.15); border-radius: 4px; }
+.tab-group-add { width: 22px; height: var(--titlebar-height); border: none; background: none; color: var(--text-secondary); cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; -webkit-app-region: no-drag; }
+.tab-group-add:hover { color: var(--text-primary); background: var(--bg-hover); }
+.tab-group-sep { width: 2px; height: 18px; background: var(--accent-blue); margin: 0 2px; flex-shrink: 0; border-radius: 1px; opacity: 0.5; -webkit-app-region: no-drag; }
+.tab.pane-active { box-shadow: inset 0 -2px 0 var(--accent-blue); color: var(--text-primary); }
+
+/* Tab drag ghost */
+.tab-drag-ghost { position: fixed; z-index: 10000; pointer-events: none; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--accent-blue); border-radius: 4px; padding: 3px 10px; font-size: 12px; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,0.4); opacity: 0.9; }
+
+/* Drop zone overlay for drag-to-split */
+.split-drop-zone { position: fixed; z-index: 9999; background: rgba(86, 156, 214, 0.18); border: 2px dashed var(--accent-blue); border-radius: 6px; pointer-events: none; transition: opacity 0.12s; }
+
+/* Resize handle between split panes */
+.split-resize-handle { position: absolute; z-index: 10; background: transparent; }
+.split-resize-handle:hover, .split-resize-handle.dragging { background: var(--accent-blue); }
+.split-resize-handle.horizontal { width: 6px; cursor: col-resize; top: 0; bottom: 0; margin-left: -3px; }
+.split-resize-handle.vertical { height: 6px; cursor: row-resize; left: 0; right: 0; margin-top: -3px; }
+
 /* Terminal Search */
 .terminal-search-bar { position: absolute; top: 4px; right: 12px; z-index: 10; display: flex; align-items: center; gap: 2px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 5px; padding: 3px 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
 .terminal-search-bar input { width: 180px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 3px; color: var(--text-primary); font-size: 12px; padding: 3px 8px; outline: none; font-family: inherit; }

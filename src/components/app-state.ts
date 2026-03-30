@@ -8,6 +8,20 @@ export interface NoteBlock {
 
 export type ShellType = 'cmd' | 'powershell' | 'wsl';
 
+export type SplitLayout = 'left-right' | 'top-bottom' | 'left-two-right' | 'grid';
+
+export interface SplitPane {
+  tabIds: string[];       // tabs in this pane
+  activeTabId: string;    // currently visible tab in this pane
+}
+
+export interface SplitState {
+  layout: SplitLayout;
+  panes: SplitPane[];
+  activePaneIndex: number;
+  paneWidths?: number[]; // fractions summing to 1, e.g. [0.5, 0.5]
+}
+
 export interface TabState {
   id: string;
   title: string;
@@ -24,15 +38,17 @@ class AppState {
   activeTabId: string | null = null;
   tabOrder: string[] = [];
   tabs: Map<string, TabState> = new Map();
+  splitState: SplitState | null = null;
+  private tabCounter = 0;
   private listeners: Array<() => void> = [];
 
   subscribe(fn: () => void) { this.listeners.push(fn); }
   private notify() { this.listeners.forEach(fn => { try { fn(); } catch (e) { console.error('[AppState] listener error:', e); } }); }
 
   addTab(id: string): TabState {
-    const index = this.tabOrder.length + 1;
+    this.tabCounter++;
     const tab: TabState = {
-      id, title: `Terminal ${index}`, status: 'active', shell: 'cmd',
+      id, title: `Terminal ${this.tabCounter}`, status: 'active', shell: 'cmd',
       color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '',
     };
     this.tabs.set(id, tab);
@@ -138,6 +154,131 @@ class AppState {
     tab.title = name;
     this.notify();
     this.persistTabs();
+  }
+
+  enterSplit(layout: SplitLayout, tabIds: string[]) {
+    // First pane gets all other tabs + the first specified tab
+    const firstPaneTabs = this.tabOrder.filter(id => id !== tabIds[1]);
+    const secondPaneTabs = [tabIds[1]];
+    const panes: SplitPane[] = [
+      { tabIds: firstPaneTabs, activeTabId: tabIds[0] },
+      { tabIds: secondPaneTabs, activeTabId: tabIds[1] },
+    ];
+    this.splitState = { layout, panes, activePaneIndex: 0 };
+    this.activeTabId = tabIds[0];
+    this.notify();
+  }
+
+  exitSplit() {
+    if (!this.splitState) return;
+    const activePane = this.splitState.panes[this.splitState.activePaneIndex];
+    const keepTabId = activePane?.activeTabId;
+    this.splitState = null;
+    if (keepTabId && this.tabs.has(keepTabId)) {
+      this.activeTabId = keepTabId;
+    }
+    this.notify();
+  }
+
+  setActivePane(index: number) {
+    if (!this.splitState || index < 0 || index >= this.splitState.panes.length) return;
+    this.splitState.activePaneIndex = index;
+    const pane = this.splitState.panes[index];
+    this.activeTabId = pane.activeTabId;
+    const tab = this.tabs.get(this.activeTabId!);
+    if (tab && (tab.status === 'done-unseen' || tab.status === 'waiting')) tab.status = 'active';
+    this.notify();
+  }
+
+  /** Switch which tab is active within a specific pane */
+  switchPaneTab(paneIndex: number, tabId: string) {
+    if (!this.splitState || paneIndex < 0 || paneIndex >= this.splitState.panes.length) return;
+    const pane = this.splitState.panes[paneIndex];
+    if (!pane.tabIds.includes(tabId)) return;
+    pane.activeTabId = tabId;
+    if (paneIndex === this.splitState.activePaneIndex) {
+      this.activeTabId = tabId;
+    }
+    this.notify();
+  }
+
+  /** Move a tab into a pane (from global tab bar click or drag) */
+  assignTabToPane(paneIndex: number, tabId: string) {
+    if (!this.splitState || paneIndex < 0 || paneIndex >= this.splitState.panes.length) return;
+    // Remove from any other pane first (but only if that pane has >1 tab)
+    for (const pane of this.splitState.panes) {
+      const idx = pane.tabIds.indexOf(tabId);
+      if (idx !== -1) {
+        if (pane.tabIds.length <= 1) return; // can't leave a pane empty
+        pane.tabIds.splice(idx, 1);
+        if (pane.activeTabId === tabId) pane.activeTabId = pane.tabIds[0];
+        break;
+      }
+    }
+    const targetPane = this.splitState.panes[paneIndex];
+    if (!targetPane.tabIds.includes(tabId)) {
+      targetPane.tabIds.push(tabId);
+    }
+    targetPane.activeTabId = tabId;
+    this.splitState.activePaneIndex = paneIndex;
+    this.activeTabId = tabId;
+    this.notify();
+  }
+
+  /** Add a new pane (upgrade layout) */
+  addPane(tabId: string) {
+    if (!this.splitState) return;
+    if (this.splitState.panes.length >= 4) return;
+    this.splitState.panes.push({ tabIds: [tabId], activeTabId: tabId });
+    const count = this.splitState.panes.length;
+    if (count === 3) this.splitState.layout = 'left-two-right';
+    else if (count === 4) this.splitState.layout = 'grid';
+    this.splitState.activePaneIndex = count - 1;
+    this.activeTabId = tabId;
+    this.notify();
+  }
+
+  /** Remove a pane entirely when a tab is closed */
+  removeTabFromSplit(tabId: string) {
+    if (!this.splitState) return;
+    for (let i = 0; i < this.splitState.panes.length; i++) {
+      const pane = this.splitState.panes[i];
+      const idx = pane.tabIds.indexOf(tabId);
+      if (idx === -1) continue;
+      pane.tabIds.splice(idx, 1);
+      if (pane.tabIds.length === 0) {
+        // Remove this pane
+        this.splitState.panes.splice(i, 1);
+        if (this.splitState.panes.length < 2) {
+          const keepPaneTab = this.splitState.panes[0]?.activeTabId || this.tabOrder[0];
+          this.splitState = null;
+          if (keepPaneTab) this.activeTabId = keepPaneTab;
+          this.notify();
+          return;
+        }
+        // Downgrade layout
+        const c = this.splitState.panes.length;
+        if (c === 2 && (this.splitState.layout === 'grid' || this.splitState.layout === 'left-two-right')) {
+          this.splitState.layout = 'left-right';
+        } else if (c === 3 && this.splitState.layout === 'grid') {
+          this.splitState.layout = 'left-two-right';
+        }
+        if (this.splitState.activePaneIndex >= c) this.splitState.activePaneIndex = c - 1;
+      } else if (pane.activeTabId === tabId) {
+        pane.activeTabId = pane.tabIds[0];
+      }
+      break;
+    }
+    if (this.splitState) {
+      this.activeTabId = this.splitState.panes[this.splitState.activePaneIndex].activeTabId;
+    }
+    this.notify();
+  }
+
+  /** Find which pane contains a tab */
+  findPaneForTab(tabId: string): number {
+    if (!this.splitState) return -1;
+    return this.splitState.panes.findIndex(p => p.tabIds.includes(tabId));
   }
 
   persistTabs() {

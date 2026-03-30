@@ -1,7 +1,7 @@
 import { api } from './api';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { appState } from './components/app-state';
+import { appState, type SplitLayout } from './components/app-state';
 import { TabBar } from './components/tab-bar';
 import { TerminalView } from './components/terminal-view';
 import { themes } from './components/themes';
@@ -132,7 +132,15 @@ async function createTab(name?: string, noteBlocks?: Array<{ id: string; content
     }
   }).catch(console.error);
 
-  switchToTab(tabId);
+  // In split mode: add to target pane; otherwise normal switchToTab
+  if (appState.splitState && arguments.length > 5) {
+    // called via createTabInPane — paneIndex is handled there
+  } else if (appState.splitState) {
+    appState.assignTabToPane(appState.splitState.activePaneIndex, tabId);
+    applySplitLayout();
+  } else {
+    switchToTab(tabId);
+  }
 
   if (shell && shell !== 'cmd') {
     await switchShell(tabId, shell);
@@ -142,26 +150,575 @@ async function createTab(name?: string, noteBlocks?: Array<{ id: string; content
   return tabId;
 }
 
+async function createTabInPane(paneIndex: number) {
+  if (!appState.splitState) return;
+  const tabId = await api.createTerminal();
+  const tab = appState.addTab(tabId);
+
+  const view = new TerminalView(tabId, container);
+  terminalViews.set(tabId, view);
+
+  api.onTerminalOutput(tabId, () => {
+    if (appState.activeTabId === tabId) {
+      const tab = appState.tabs.get(tabId);
+      if (tab && tab.cwd) {
+        const cwdEl = document.getElementById('status-cwd');
+        if (cwdEl) {
+          let shortCwd = tab.cwd;
+          shortCwd = shortCwd.replace(/^\/Users\/[^/]+/, '~');
+          shortCwd = shortCwd.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/i, '$1:\\~');
+          shortCwd = shortCwd.replace(/^([A-Za-z]):\\$/i, '$1:');
+          cwdEl.textContent = shortCwd || '';
+          cwdEl.title = tab.cwd || '';
+        }
+      }
+    }
+  }).catch(console.error);
+
+  // Add to specific pane
+  const pane = appState.splitState!.panes[paneIndex];
+  pane.tabIds.push(tabId);
+  pane.activeTabId = tabId;
+  applySplitLayout();
+  // setActivePane triggers notify() → TabBar re-renders with the new tab
+  appState.setActivePane(paneIndex);
+  appState.persistTabs();
+}
+
+// ===== Split screen =====
+
+const splitPaneEls: HTMLElement[] = []; // cached pane container elements
+
+function createPaneEl(paneIndex: number): HTMLElement {
+  const pane = document.createElement('div');
+  pane.className = 'split-pane';
+  pane.dataset.paneIndex = String(paneIndex);
+
+  // Click on pane to focus this pane
+  pane.addEventListener('mousedown', () => {
+    if (!appState.splitState) return;
+    const idx = parseInt(pane.dataset.paneIndex || '0');
+    if (idx !== appState.splitState.activePaneIndex) {
+      appState.setActivePane(idx);
+      applySplitLayout();
+      updateCwdDisplay(appState.activeTabId!);
+    }
+  });
+
+  return pane;
+}
+
+function closeSplitPane(paneIndex: number) {
+  if (!appState.splitState) return;
+  const pane = appState.splitState.panes[paneIndex];
+  if (!pane) return;
+
+  // Remove pane, move its tabs back to be unassigned
+  appState.splitState.panes.splice(paneIndex, 1);
+
+  if (appState.splitState.panes.length < 2) {
+    // Only 1 pane left — exit split, keep that pane's active tab
+    const remaining = appState.splitState.panes[0];
+    appState.splitState = null;
+    if (remaining) appState.activeTabId = remaining.activeTabId;
+  } else {
+    // Downgrade layout
+    const c = appState.splitState.panes.length;
+    if (c === 2 && (appState.splitState.layout === 'grid' || appState.splitState.layout === 'left-two-right')) {
+      appState.splitState.layout = 'left-right';
+    } else if (c === 3 && appState.splitState.layout === 'grid') {
+      appState.splitState.layout = 'left-two-right';
+    }
+    if (appState.splitState.activePaneIndex >= c) appState.splitState.activePaneIndex = c - 1;
+    appState.activeTabId = appState.splitState.panes[appState.splitState.activePaneIndex].activeTabId;
+  }
+
+  applySplitLayout();
+  // Show/hide global tab bar
+
+  if (appState.activeTabId) updateCwdDisplay(appState.activeTabId);
+}
+
+const resizeHandles: HTMLElement[] = [];
+
+let _paneContextMenu: HTMLElement | null = null;
+function showPaneTabContextMenu(x: number, y: number, tabId: string, titleEl: HTMLElement) {
+  if (_paneContextMenu) { _paneContextMenu.remove(); _paneContextMenu = null; }
+  const menu = document.createElement('div');
+  menu.className = 'tab-context-menu';
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+
+  const tab = appState.tabs.get(tabId);
+  if (!tab) return;
+
+  // Rename
+  const renameItem = document.createElement('div');
+  renameItem.className = 'tab-context-menu-item';
+  renameItem.textContent = '重命名标签';
+  renameItem.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (_paneContextMenu) { _paneContextMenu.remove(); _paneContextMenu = null; }
+    titleEl.contentEditable = 'true';
+    titleEl.focus();
+    const range = document.createRange();
+    range.selectNodeContents(titleEl);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    const finishEdit = () => {
+      titleEl.contentEditable = 'false';
+      const newName = titleEl.textContent?.trim() || tab.title;
+      appState.renameTab(tabId, newName);
+    };
+    titleEl.addEventListener('blur', finishEdit, { once: true });
+    titleEl.addEventListener('keydown', (ke) => {
+      if (ke.key === 'Enter') { ke.preventDefault(); titleEl.blur(); }
+      else if (ke.key === 'Escape') { titleEl.textContent = tab.title; titleEl.blur(); }
+    });
+  });
+  menu.appendChild(renameItem);
+
+  // Color picker
+  const colorItem = document.createElement('div');
+  colorItem.className = 'tab-context-menu-color';
+  const colors = ['#ff6b6b', '#feca57', '#48dbfb', '#1dd1a1', '#5f27cd', '#ff9ff3', '#54a0ff', '#00d2d3', '#ff9f43', '#ee5253', '#10ac84', '#2e86de', '#c8d6e5', '#222f3e'];
+  const currentColor = tab.color || '';
+  colors.forEach(color => {
+    const dot = document.createElement('span');
+    dot.className = 'tab-context-color-dot' + (color === currentColor ? ' selected' : '');
+    dot.style.backgroundColor = color;
+    dot.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (_paneContextMenu) { _paneContextMenu.remove(); _paneContextMenu = null; }
+      appState.setColor(tabId, color);
+      if (appState.splitState) applySplitLayout();
+    });
+    colorItem.appendChild(dot);
+  });
+  menu.appendChild(colorItem);
+
+  // Exit split
+  if (appState.splitState) {
+    const sep = document.createElement('div');
+    sep.className = 'tab-context-menu-sep';
+    menu.appendChild(sep);
+
+    const exitItem = document.createElement('div');
+    exitItem.className = 'tab-context-menu-item';
+    exitItem.textContent = '退出分屏';
+    exitItem.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (_paneContextMenu) { _paneContextMenu.remove(); _paneContextMenu = null; }
+      exitSplitMode();
+    });
+    menu.appendChild(exitItem);
+  }
+
+  menu.addEventListener('click', (e) => e.stopPropagation());
+  document.body.appendChild(menu);
+  _paneContextMenu = menu;
+  setTimeout(() => {
+    const close = () => { if (_paneContextMenu) { _paneContextMenu.remove(); _paneContextMenu = null; } document.removeEventListener('click', close); };
+    document.addEventListener('click', close);
+  }, 0);
+}
+
+let _paneGhost: HTMLElement | null = null;
+
+function setupPaneTabDrag(el: HTMLElement, tabId: string, tabTitle: string) {
+  el.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('.pane-tab-close')) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+
+    const cleanup = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      if (_paneGhost) { _paneGhost.remove(); _paneGhost = null; }
+      container.querySelectorAll('.split-pane').forEach(p => p.classList.remove('drop-target'));
+      if (dragging) {
+        el.classList.remove('dragging');
+        document.body.classList.remove('tab-dragging');
+      }
+    };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging && (Math.abs(ev.clientX - startX) > 5 || Math.abs(ev.clientY - startY) > 5)) {
+        dragging = true;
+        el.classList.add('dragging');
+        document.body.classList.add('tab-dragging');
+      }
+      if (!dragging) return;
+
+      // Ghost
+      if (!_paneGhost) {
+        _paneGhost = document.createElement('div');
+        _paneGhost.className = 'tab-drag-ghost';
+        document.body.appendChild(_paneGhost);
+      }
+      _paneGhost.textContent = tabTitle;
+      _paneGhost.style.left = (ev.clientX + 12) + 'px';
+      _paneGhost.style.top = (ev.clientY - 10) + 'px';
+
+      // Highlight target pane
+      const srcPane = appState.findPaneForTab(tabId);
+      const containerRect = container.getBoundingClientRect();
+      container.querySelectorAll('.split-pane').forEach(p => {
+        p.classList.remove('drop-target');
+        const idx = parseInt((p as HTMLElement).dataset.paneIndex || '-1');
+        if (idx === srcPane) return;
+        const r = p.getBoundingClientRect();
+        // Also match title bar area above the container as pane 0 (for top-bottom split)
+        const inPane = ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+        const inTitleBarAbovePane = idx === 0 && appState.splitState?.layout === 'top-bottom' &&
+          ev.clientY < containerRect.top && ev.clientX >= r.left && ev.clientX <= r.right;
+        if (inPane || inTitleBarAbovePane) {
+          p.classList.add('drop-target');
+        }
+      });
+    };
+
+    const onUp = (ev: MouseEvent) => {
+      if (!dragging) { cleanup(); return; }
+
+      // Check if dropped on another pane
+      const targetEl = container.querySelector('.split-pane.drop-target') as HTMLElement;
+      if (targetEl) {
+        const targetIdx = parseInt(targetEl.dataset.paneIndex || '-1');
+        if (targetIdx !== -1) {
+          cleanup();
+          moveTabToPane(tabId, targetIdx);
+          return;
+        }
+      }
+      cleanup();
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+function renderPaneLocalTabs(paneEl: HTMLElement, pane: { tabIds: string[]; activeTabId: string }, paneIndex: number, isActivePane: boolean) {
+  const bar = document.createElement('div');
+  bar.className = 'pane-tabs';
+
+  for (const tabId of pane.tabIds) {
+    const tab = appState.tabs.get(tabId);
+    if (!tab) continue;
+
+    const tabEl = document.createElement('div');
+    tabEl.className = 'pane-tab' + (tabId === pane.activeTabId ? ' active' : '');
+    if (tab.color) tabEl.style.setProperty('--tab-color', tab.color);
+
+    const indicator = document.createElement('span');
+    indicator.className = `pane-tab-indicator ${tab.status}`;
+    tabEl.appendChild(indicator);
+
+    const title = document.createElement('span');
+    title.className = 'pane-tab-title';
+    title.textContent = tab.title;
+    tabEl.appendChild(title);
+
+    const close = document.createElement('button');
+    close.className = 'pane-tab-close';
+    close.textContent = '×';
+    close.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
+    tabEl.appendChild(close);
+
+    tabEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      appState.switchPaneTab(paneIndex, tabId);
+      appState.setActivePane(paneIndex);
+      applySplitLayout();
+      updateCwdDisplay(tabId);
+    });
+
+    // Right-click context menu
+    tabEl.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showPaneTabContextMenu(e.clientX, e.clientY, tabId, title);
+    });
+
+    // Drag to merge into other pane
+    setupPaneTabDrag(tabEl, tabId, tab.title);
+
+    bar.appendChild(tabEl);
+  }
+
+  const addBtn = document.createElement('button');
+  addBtn.className = 'pane-tab-new';
+  addBtn.textContent = '+';
+  addBtn.title = '新建标签';
+  addBtn.addEventListener('click', (e) => { e.stopPropagation(); createTabInPane(paneIndex); });
+  bar.appendChild(addBtn);
+
+  paneEl.appendChild(bar);
+}
+
+function applySplitLayout() {
+  const split = appState.splitState;
+
+  // Remove old split class and resize handles
+  container.className = container.className.replace(/\bsplit-\S+/g, '').trim();
+  container.style.gridTemplateColumns = '';
+  container.style.gridTemplateRows = '';
+  for (const h of resizeHandles) h.remove();
+  resizeHandles.length = 0;
+
+  if (!split) {
+    // Exit split: move terminal wrappers back to container, remove pane elements
+    for (const paneEl of splitPaneEls) {
+      // Only rescue terminal-wrapper elements, discard pane-tabs etc.
+      const wrappers = paneEl.querySelectorAll('.terminal-wrapper');
+      wrappers.forEach(w => container.appendChild(w));
+      paneEl.remove();
+    }
+    splitPaneEls.length = 0;
+
+    // Single mode
+    for (const [id, view] of terminalViews) {
+      view.wrapper.classList.remove('active-pane');
+      if (id === appState.activeTabId) { view.show(); view.focus(); } else { view.hide(); }
+    }
+    return;
+  }
+
+  // For horizontal splits, always use left-right with custom widths
+  container.classList.add('split-' + split.layout);
+
+  // Apply custom widths if available
+  if (split.paneWidths && split.paneWidths.length === split.panes.length) {
+    const sizes = split.paneWidths.map(w => `${(w * 100).toFixed(2)}%`).join(' ');
+    if (split.layout === 'top-bottom') {
+      container.style.gridTemplateRows = sizes;
+    } else {
+      container.style.gridTemplateColumns = sizes;
+    }
+  }
+
+  // Hide all terminal wrappers first
+  for (const [, view] of terminalViews) {
+    view.hide();
+    view.wrapper.classList.remove('active-pane');
+  }
+
+  // Create/reuse pane elements
+  while (splitPaneEls.length > split.panes.length) {
+    const el = splitPaneEls.pop()!;
+    el.querySelectorAll('.terminal-wrapper').forEach(w => container.appendChild(w));
+    el.remove();
+  }
+  while (splitPaneEls.length < split.panes.length) {
+    splitPaneEls.push(createPaneEl(splitPaneEls.length));
+  }
+
+  // Update each pane
+  for (let i = 0; i < split.panes.length; i++) {
+    const pane = split.panes[i];
+    const paneEl = splitPaneEls[i];
+    paneEl.dataset.paneIndex = String(i);
+    paneEl.classList.toggle('active-pane', i === split.activePaneIndex);
+
+    // Move terminal wrappers back to container, remove other children (pane-tabs etc.)
+    paneEl.querySelectorAll('.terminal-wrapper').forEach(w => container.appendChild(w));
+    while (paneEl.firstChild) paneEl.removeChild(paneEl.firstChild);
+
+    // For top-bottom: add pane-local tab bar (skip pane 0, its tabs are in the title bar)
+    if (split.layout === 'top-bottom' && i > 0) {
+      renderPaneLocalTabs(paneEl, pane, i, i === split.activePaneIndex);
+    }
+
+    const view = terminalViews.get(pane.activeTabId);
+    if (view) {
+      paneEl.appendChild(view.wrapper);
+      view.show();
+      if (i === split.activePaneIndex) view.focus();
+    }
+
+    container.appendChild(paneEl);
+  }
+
+  // Add resize handles between panes (for horizontal layout)
+  if ((split.layout === 'left-right' || split.layout === 'top-bottom') && split.panes.length >= 2) {
+    const isVertical = split.layout === 'top-bottom';
+    requestAnimationFrame(() => {
+      for (let i = 0; i < splitPaneEls.length - 1; i++) {
+        const handle = document.createElement('div');
+        handle.className = 'split-resize-handle ' + (isVertical ? 'vertical' : 'horizontal');
+        handle.dataset.handleIndex = String(i);
+        container.appendChild(handle);
+        resizeHandles.push(handle);
+
+        const paneRect = splitPaneEls[i].getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        if (isVertical) {
+          handle.style.top = (paneRect.bottom - containerRect.top) + 'px';
+        } else {
+          handle.style.left = (paneRect.right - containerRect.left) + 'px';
+        }
+
+        setupResizeHandle(handle, i);
+      }
+    });
+  }
+}
+
+function setupResizeHandle(handle: HTMLElement, handleIndex: number) {
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const split = appState.splitState;
+    if (!split || !split.paneWidths) return;
+
+    const isVertical = split.layout === 'top-bottom';
+    handle.classList.add('dragging');
+    const containerSize = isVertical ? container.getBoundingClientRect().height : container.getBoundingClientRect().width;
+    const startPos = isVertical ? e.clientY : e.clientX;
+    const startWidths = [...split.paneWidths!];
+
+    const onMove = (ev: MouseEvent) => {
+      const d = (isVertical ? ev.clientY : ev.clientX) - startPos;
+      const dFrac = d / containerSize;
+
+      const newFirst = Math.max(0.1, Math.min(startWidths[handleIndex] + dFrac, startWidths[handleIndex] + startWidths[handleIndex + 1] - 0.1));
+      const newSecond = startWidths[handleIndex] + startWidths[handleIndex + 1] - newFirst;
+
+      split.paneWidths![handleIndex] = newFirst;
+      split.paneWidths![handleIndex + 1] = newSecond;
+
+      const sizes = split.paneWidths!.map(w => `${(w * 100).toFixed(2)}%`).join(' ');
+      if (isVertical) {
+        container.style.gridTemplateRows = sizes;
+      } else {
+        container.style.gridTemplateColumns = sizes;
+      }
+
+      requestAnimationFrame(() => {
+        for (let i = 0; i < resizeHandles.length; i++) {
+          const paneRect = splitPaneEls[i].getBoundingClientRect();
+          const containerRect = container.getBoundingClientRect();
+          if (isVertical) {
+            resizeHandles[i].style.top = (paneRect.bottom - containerRect.top) + 'px';
+          } else {
+            resizeHandles[i].style.left = (paneRect.right - containerRect.left) + 'px';
+          }
+        }
+      });
+    };
+
+    const onUp = () => {
+      handle.classList.remove('dragging');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      // Refit terminals after resize
+      for (const pane of split.panes) {
+        const view = terminalViews.get(pane.activeTabId);
+        if (view) view.fit();
+      }
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+function splitWith(tabId: string, layout: SplitLayout) {
+  if (appState.tabOrder.length < 2) return;
+  let firstTabId = appState.activeTabId;
+  let secondTabId = tabId;
+
+  // If right-clicked the active tab, it goes to the second pane (right/bottom)
+  // Pick another tab for the first pane
+  if (firstTabId === secondTabId) {
+    const idx = appState.tabOrder.indexOf(tabId);
+    const otherIdx = idx === 0 ? 1 : 0;
+    firstTabId = appState.tabOrder[otherIdx];
+  }
+
+  if (!firstTabId || !terminalViews.has(firstTabId) || !terminalViews.has(secondTabId)) return;
+  appState.enterSplit(layout, [firstTabId, secondTabId]);
+  appState.splitState!.paneWidths = [0.5, 0.5];
+  applySplitLayout();
+
+  updateCwdDisplay(appState.activeTabId!);
+}
+
+function addPaneToSplit(tabId: string) {
+  if (!appState.splitState) return;
+  if (appState.splitState.panes.length >= 4) return;
+  if (appState.findPaneForTab(tabId) !== -1) return;
+  appState.addPane(tabId);
+  // Reset to equal widths
+  const count = appState.splitState.panes.length;
+  appState.splitState.paneWidths = Array(count).fill(1 / count);
+  applySplitLayout();
+
+  updateCwdDisplay(appState.activeTabId!);
+}
+
+function exitSplitMode() {
+  appState.exitSplit();
+  applySplitLayout();
+
+  if (appState.activeTabId) updateCwdDisplay(appState.activeTabId);
+}
+
 function closeTab(tabId: string) {
   api.closeTerminal(tabId);
   const view = terminalViews.get(tabId);
   if (view) { view.dispose(); terminalViews.delete(tabId); }
 
+  const wasSplit = !!appState.splitState;
+  // Handle split pane removal
+  if (appState.splitState) {
+    appState.removeTabFromSplit(tabId);
+  }
+
   const nextTabId = appState.removeTab(tabId);
   appState.persistTabs();
-  if (nextTabId) { switchToTab(nextTabId); } else { createTab(); }
+
+
+  // If split was exited due to tab close, clean up pane DOM
+  if (wasSplit && !appState.splitState) {
+    applySplitLayout(); // removes pane elements, restores single mode
+  }
+
+  if (nextTabId) {
+    if (appState.splitState) {
+      // Stay in split mode — just re-render, don't reassign tabs
+      applySplitLayout();
+      updateCwdDisplay(appState.activeTabId || nextTabId);
+    } else {
+      switchToTab(nextTabId);
+    }
+  } else {
+    createTab();
+  }
 }
 
 function switchToTab(tabId: string) {
   closeTipsPanel();
-  for (const [id, view] of terminalViews) {
-    if (id === tabId) { view.show(); view.focus(); } else { view.hide(); }
+
+  if (appState.splitState) {
+    // In split mode: assign tab to active pane
+    appState.assignTabToPane(appState.splitState.activePaneIndex, tabId);
+    applySplitLayout();
+  } else {
+    for (const [id, view] of terminalViews) {
+      if (id === tabId) { view.show(); view.focus(); } else { view.hide(); }
+    }
   }
+
   clearPendingDoneTimer(tabId);
   markDoneAcknowledged(tabId);
   appState.switchTab(tabId);
   syncPendingAttention(false);
-  // 切换标签时更新 cwd 显示
   updateCwdDisplay(tabId);
 }
 
@@ -209,7 +766,108 @@ async function switchShell(tabId: string, shell: 'cmd' | 'powershell' | 'wsl') {
 }
 
 // Initialize components
-const tabBar = new TabBar(() => createTab(), closeTab, switchToTab, switchShell);
+function handleSwitchPaneTab(paneIndex: number, tabId: string) {
+  appState.switchPaneTab(paneIndex, tabId);
+  appState.setActivePane(paneIndex);
+  applySplitLayout();
+  updateCwdDisplay(tabId);
+}
+
+function dragToSplit(tabId: string) {
+  if (appState.splitState) {
+    // Already in split mode: add new pane
+    if (appState.splitState.panes.length >= 4) return;
+
+    // Remove tab from its current pane (if it has more than 1 tab)
+    const existingPane = appState.findPaneForTab(tabId);
+    if (existingPane !== -1) {
+      const pane = appState.splitState.panes[existingPane];
+      if (pane.tabIds.length <= 1) return; // can't empty a pane
+      pane.tabIds.splice(pane.tabIds.indexOf(tabId), 1);
+      if (pane.activeTabId === tabId) pane.activeTabId = pane.tabIds[0];
+    }
+
+    appState.addPane(tabId);
+    // Force horizontal layout for drag-to-split
+    appState.splitState.layout = 'left-right';
+    const count = appState.splitState.panes.length;
+    appState.splitState.paneWidths = Array(count).fill(1 / count);
+  } else {
+    // Enter split mode: need at least 2 tabs
+    if (appState.tabOrder.length < 2) return;
+    const currentTabId = appState.activeTabId;
+    if (!currentTabId) return;
+    if (currentTabId === tabId) {
+      // Dragging the active tab: pick another tab to stay in the first pane
+      const idx = appState.tabOrder.indexOf(tabId);
+      const otherIdx = idx === 0 ? 1 : 0;
+      const otherTabId = appState.tabOrder[otherIdx];
+      appState.enterSplit('left-right', [otherTabId, tabId]);
+    } else {
+      appState.enterSplit('left-right', [currentTabId, tabId]);
+    }
+    appState.splitState!.paneWidths = [0.5, 0.5];
+  }
+  applySplitLayout();
+  if (appState.activeTabId) updateCwdDisplay(appState.activeTabId);
+}
+
+function moveTabToPane(tabId: string, targetPaneIndex: number) {
+  if (!appState.splitState) return;
+
+  const srcPaneIdx = appState.findPaneForTab(tabId);
+  if (srcPaneIdx === -1 || srcPaneIdx === targetPaneIndex) return;
+
+  const srcPane = appState.splitState.panes[srcPaneIdx];
+  const targetPane = appState.splitState.panes[targetPaneIndex];
+
+  // Remove from source pane
+  srcPane.tabIds.splice(srcPane.tabIds.indexOf(tabId), 1);
+  if (srcPane.activeTabId === tabId) {
+    srcPane.activeTabId = srcPane.tabIds[0] || '';
+  }
+
+  // Add to target pane
+  targetPane.tabIds.push(tabId);
+  targetPane.activeTabId = tabId;
+
+  // If source pane is now empty, remove it
+  if (srcPane.tabIds.length === 0) {
+    appState.splitState.panes.splice(srcPaneIdx, 1);
+    const count = appState.splitState.panes.length;
+
+    if (count < 2) {
+      // Exit split
+      const keepTab = appState.splitState.panes[0]?.activeTabId;
+      appState.splitState = null;
+      if (keepTab) appState.activeTabId = keepTab;
+    } else {
+      // Adjust widths and active pane index
+      appState.splitState.paneWidths = Array(count).fill(1 / count);
+      if (appState.splitState.activePaneIndex >= count) {
+        appState.splitState.activePaneIndex = count - 1;
+      }
+    }
+  }
+
+  // Update active pane to target
+  if (appState.splitState) {
+    // Recalculate target index (may have shifted after removal)
+    const newTargetIdx = appState.splitState.panes.indexOf(targetPane);
+    if (newTargetIdx !== -1) appState.splitState.activePaneIndex = newTargetIdx;
+    appState.activeTabId = tabId;
+  }
+
+  applySplitLayout();
+  if (appState.activeTabId) updateCwdDisplay(appState.activeTabId);
+}
+
+const tabBar = new TabBar(
+  () => createTab(), closeTab, switchToTab, switchShell,
+  splitWith, addPaneToSplit, exitSplitMode,
+  createTabInPane, closeSplitPane, handleSwitchPaneTab,
+  dragToSplit, moveTabToPane,
+);
 void tabBar;
 
 // Platform-specific setup
@@ -1432,6 +2090,43 @@ document.addEventListener('keydown', (e) => {
     const idx = parseInt(e.key) - 1;
     if (idx < appState.tabOrder.length) switchToTab(appState.tabOrder[idx]);
   }
+  // Split shortcuts
+  else if (isCtrl && e.key === '\\') {
+    e.preventDefault();
+    if (appState.splitState) {
+      exitSplitMode();
+    } else if (appState.tabOrder.length >= 2 && appState.activeTabId) {
+      const idx = appState.tabOrder.indexOf(appState.activeTabId);
+      const nextIdx = (idx + 1) % appState.tabOrder.length;
+      splitWith(appState.tabOrder[nextIdx], e.shiftKey ? 'top-bottom' : 'left-right');
+    }
+  }
+  else if (e.altKey && appState.splitState) {
+    // Alt+Arrow to move between panes
+    const layout = appState.splitState.layout;
+    const active = appState.splitState.activePaneIndex;
+    const count = appState.splitState.panes.length;
+    let target = -1;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (layout === 'left-right') {
+        if (e.key === 'ArrowLeft') target = 0;
+        else if (e.key === 'ArrowRight') target = 1;
+      } else if (layout === 'top-bottom') {
+        if (e.key === 'ArrowUp') target = 0;
+        else if (e.key === 'ArrowDown') target = 1;
+      } else {
+        // grid or left-two-right: cycle through panes
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') target = (active + 1) % count;
+        else target = (active - 1 + count) % count;
+      }
+      if (target !== -1 && target !== active) {
+        appState.setActivePane(target);
+        applySplitLayout();
+        updateCwdDisplay(appState.activeTabId!);
+      }
+    }
+  }
 });
 
 // Command palette (Cmd+Shift+P)
@@ -1448,6 +2143,23 @@ function toggleCommandPalette() {
     { label: '切换笔记面板', action: () => setNotepadVisible(notepadEl.classList.contains('hidden')) },
     { label: '清空终端', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.clear(); } } },
   ];
+  // Split items
+  if (appState.splitState) {
+    items.push({ label: '退出分屏', detail: '⌘\\', action: () => exitSplitMode() });
+  } else if (appState.tabOrder.length >= 2) {
+    items.push({ label: '左右分屏', detail: '⌘\\', action: () => {
+      if (!appState.activeTabId) return;
+      const idx = appState.tabOrder.indexOf(appState.activeTabId);
+      const nextIdx = (idx + 1) % appState.tabOrder.length;
+      splitWith(appState.tabOrder[nextIdx], 'left-right');
+    }});
+    items.push({ label: '上下分屏', detail: '⌘⇧\\', action: () => {
+      if (!appState.activeTabId) return;
+      const idx = appState.tabOrder.indexOf(appState.activeTabId);
+      const nextIdx = (idx + 1) % appState.tabOrder.length;
+      splitWith(appState.tabOrder[nextIdx], 'top-bottom');
+    }});
+  }
   // Add theme items
   themes.forEach((t, i) => {
     items.push({ label: `主题: ${t.name}`, action: () => applyThemeToAll(i) });
