@@ -93,11 +93,12 @@ function maybeShowSystemNotification(tabId: string): void {
   }
 }
 
-async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string; images?: string[] }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string): Promise<string> {
+async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string; images?: string[] }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string, userRenamed?: boolean): Promise<string> {
   const tabId = await api.createTerminal(cwd);
   const tab = appState.addTab(tabId);
   if (typeof name === 'string') tab.title = name;
   if (aiTool) tab.aiTool = aiTool;
+  if (userRenamed) tab.userRenamed = true;
   if (noteBlocks && noteBlocks.length > 0) {
     tab.noteBlocks = noteBlocks.map(b => ({
       id: b.id,
@@ -315,13 +316,9 @@ function showPaneTabContextMenu(x: number, y: number, tabId: string, titleEl: HT
     menu.appendChild(exitItem);
   }
 
-  menu.addEventListener('click', (e) => e.stopPropagation());
+  menu.addEventListener('mousedown', (e) => e.stopPropagation());
   document.body.appendChild(menu);
   _paneContextMenu = menu;
-  setTimeout(() => {
-    const close = () => { if (_paneContextMenu) { _paneContextMenu.remove(); _paneContextMenu = null; } document.removeEventListener('click', close); };
-    document.addEventListener('click', close);
-  }, 0);
 }
 
 let _paneGhost: HTMLElement | null = null;
@@ -722,12 +719,24 @@ function switchToTab(tabId: string) {
   updateCwdDisplay(tabId);
 }
 
+function isValidCwd(cwd: string): boolean {
+  if (!cwd || cwd.length > 500) return false;
+  if (cwd.includes('"') || cwd.includes('\n') || cwd.includes('\x1b')) return false;
+  // Must look like an absolute path
+  if (!cwd.startsWith('/') && !/^[A-Za-z]:/.test(cwd)) return false;
+  return true;
+}
+
 async function updateCwdDisplay(tabId: string, newCwd?: string) {
   const cwdEl = document.getElementById('status-cwd');
   if (!cwdEl) return;
 
   let cwd: string;
   if (newCwd) {
+    // 同 onCwdChanged 的过滤：含特殊字符或超长的视为脏数据
+    if (!isValidCwd(newCwd)) {
+      return;
+    }
     cwd = newCwd;
   } else {
     try {
@@ -895,12 +904,23 @@ if (!shouldUseNativeTitleBar()) {
 }
 
 // Double-click tab bar to maximize/restore
-document.getElementById('tab-bar')!.addEventListener('dblclick', (e) => {
-  const target = e.target as HTMLElement;
-  if (target.id === 'tab-bar' || !target.closest('.tab, #new-tab-btn, .tab-bar-btn, #window-controls')) {
-    api.toggleMaximize();
-  }
-});
+// Use mousedown-based detection because data-tauri-drag-region may consume dblclick on macOS
+{
+  let lastClickTime = 0;
+  const tabBar = document.getElementById('tab-bar')!;
+  tabBar.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('.tab, #new-tab-btn, .tab-bar-btn, #window-controls')) return;
+    const now = Date.now();
+    if (now - lastClickTime < 400) {
+      api.toggleMaximize();
+      lastClickTime = 0;
+    } else {
+      lastClickTime = now;
+    }
+  });
+}
 
 
 function refitActiveTerminal() {
@@ -1017,6 +1037,7 @@ function renderNoteBlocks(force = false) {
   if (!tab) return;
   if (!force && appState.activeTabId === lastRenderedTabId && tab.noteBlocks.length === lastRenderedBlockCount && notepadEl.contains(document.activeElement)) return;
 
+  const savedScrollTop = notepadBlocksEl.scrollTop;
   lastRenderedTabId = appState.activeTabId;
   lastRenderedBlockCount = tab.noteBlocks.length;
   notepadBlocksEl.innerHTML = '';
@@ -1182,12 +1203,21 @@ function renderNoteBlocks(force = false) {
   addBtn.textContent = '+ 点击添加文本块';
   addBtn.addEventListener('click', () => { if (appState.activeTabId) addNoteBlock(appState.activeTabId); });
   notepadBlocksEl.appendChild(addBtn);
+  notepadBlocksEl.scrollTop = savedScrollTop;
 }
 
 document.getElementById('notepad-add-block')!.addEventListener('click', () => {
   if (appState.activeTabId) addNoteBlock(appState.activeTabId);
 });
-appState.subscribe(() => renderNoteBlocks());
+let notepadScrolling = false;
+let notepadScrollTimer = 0;
+notepadBlocksEl.addEventListener('scroll', () => {
+  notepadScrolling = true;
+  clearTimeout(notepadScrollTimer);
+  notepadScrollTimer = window.setTimeout(() => { notepadScrolling = false; }, 300);
+}, { passive: true });
+
+appState.subscribe(() => { if (!notepadScrolling) renderNoteBlocks(); });
 
 // 全局拖选状态
 let isSelectingText = false;
@@ -1642,16 +1672,42 @@ function toggleTipsPanel() {
   });
 })();
 
-// Close tips panel on outside click
-document.addEventListener('click', (e) => {
-  if (!_tipsOpen || !_tipsEl) return;
-  if (isSelectingText || isMouseDown) return;
-  if (_tipsEl.contains(e.target as Node)) return;
-  _tipsEl.remove();
-  _tipsEl = null;
-  _tipsOpen = false;
-});;
+// Close all popups/panels on outside click (unified handler)
+document.addEventListener('mousedown', (e) => {
+  const target = e.target as Node;
 
+  // Tips panel
+  if (_tipsOpen && _tipsEl && !_tipsEl.contains(target)) {
+    const tipsBtn = document.getElementById('btn-tips');
+    if (!tipsBtn?.contains(target)) closeTipsPanel();
+  }
+
+  // History panel
+  if (_closeHistoryPanel) {
+    const historyPanel = document.querySelector('.tips-panel') as HTMLElement | null;
+    const historyBtn = document.getElementById('btn-history');
+    if (historyPanel && !historyPanel.contains(target) && !historyBtn?.contains(target)) {
+      _closeHistoryPanel();
+    }
+  }
+
+  // Pane context menu
+  if (_paneContextMenu && !_paneContextMenu.contains(target)) {
+    _paneContextMenu.remove();
+    _paneContextMenu = null;
+  }
+
+  // After closing any popup, refocus terminal (delayed to let click complete)
+  requestAnimationFrame(() => {
+    const active = document.activeElement;
+    const isInput = active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA' ||
+                    (active as HTMLElement)?.contentEditable === 'true';
+    if (!isInput && appState.activeTabId) {
+      const view = terminalViews.get(appState.activeTabId);
+      if (view) view.focus();
+    }
+  });
+});
 
 // Shared panel close helpers
 let _closeHistoryPanel: (() => void) | null = null;
@@ -1921,6 +1977,12 @@ function hasUnacknowledgedExecution(tabId: string): boolean {
 }
 
 function shouldShowDoneUnseen(tabId: string): boolean {
+  // 分屏时，检查该 tab 是否在某个面板中可见——可见则不亮红点
+  if (appState.splitState) {
+    for (const pane of appState.splitState.panes) {
+      if (pane.activeTabId === tabId) return false; // tab 正显示在某面板中
+    }
+  }
   return tabId !== appState.activeTabId || !windowHasFocus;
 }
 
@@ -1970,29 +2032,18 @@ api.onTabStatusChanged((tabId, status) => {
     syncPendingAttention(false);
   }
 
-  // Auto-submit first notepad block when tab becomes "waiting" (Claude waiting for input)
-  if (status === 'waiting') {
-    const tab = appState.tabs.get(tabId);
-    if (tab && tab.noteBlocks.length > 0) {
-      const block = tab.noteBlocks[0];
-      if (block.content.trim()) {
-        // Slight delay to ensure prompt is ready
-        setTimeout(() => {
-          api.writeTerminal(tabId, block.content);
-          removeNoteBlock(tabId, block.id);
-        }, 300);
-      }
-    }
-  }
+  // Auto-submit disabled — user sends notepad blocks manually
 });
 api.onTabAutoRenamed((tabId, name) => {
   const tab = appState.tabs.get(tabId);
   if (!tab || tab.title === name) return;
+  // Don't overwrite user-set names
+  if (tab.userRenamed) return;
   // Strip any lingering status prefixes from saved tab names (ASCII and Unicode variants)
   const cleanTitle = tab.title.replace(/^[*.\s●○◆◇■□✳✻•·∙⋅◉◎◌◍◐◑◒◓◴◵◶◷\u2800-\u28FF]+/u, '');
   // Allow rename for: default names, restored names, or AI-detected tabs (OSC title updates)
   if (tab.title.startsWith('Terminal ') || tab.title.startsWith('↻ ') || tab.aiTool || cleanTitle !== tab.title) {
-    appState.renameTab(tabId, name);
+    appState.renameTab(tabId, name, false);
     api.updateHistoryName(tabId, name, tab.cwd, tab.aiTool || undefined);
   }
 });
@@ -2015,7 +2066,7 @@ api.onAiDetected((tabId, cwd, aiTool) => {
 api.onCwdChanged((tabId, cwd) => {
   console.log('>>> CWD event:', tabId, cwd);
   // Ignore invalid cwd (garbage from terminal output)
-  if (!cwd || cwd.length > 500 || cwd.includes('"') || cwd.includes('\n')) return;
+  if (!isValidCwd(cwd)) return;
   appState.setCwd(tabId, cwd);
   // 立即更新底栏
   if (tabId === appState.activeTabId) {
@@ -2040,31 +2091,16 @@ window.addEventListener('focus', () => {
 });
 
 // Workaround: when xterm's textarea loses focus (e.g. clicking tab bar),
-// the first keypress is swallowed. Detect this and re-dispatch the event.
-document.addEventListener('keydown', (e) => {
-  const active = document.activeElement;
-  const isInput = active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA' ||
-                  (active as HTMLElement)?.contentEditable === 'true';
-  // If focus is not in any input and not in xterm's textarea, refocus terminal
-  if (!isInput && appState.activeTabId) {
+// keypress is swallowed. Keep terminal focused via mouseup rather than intercepting keys.
+document.addEventListener('mouseup', (e) => {
+  const target = e.target as HTMLElement;
+  // Don't refocus if clicking on an input, button, or interactive element
+  if (target.closest('input, textarea, select, button, a, [contenteditable="true"], .tab-context-menu, .theme-picker, .tips-panel, .command-palette, .notepad-block, #notepad, .history-item, .palette-item, .terminal-search-bar')) return;
+  if (appState.activeTabId) {
     const view = terminalViews.get(appState.activeTabId);
-    if (view) {
-      const xtermTA = view.terminal.textarea;
-      if (xtermTA && active !== xtermTA) {
-        xtermTA.focus();
-        // Re-dispatch the same key event to the now-focused textarea
-        xtermTA.dispatchEvent(new KeyboardEvent('keydown', {
-          key: e.key, code: e.code, keyCode: e.keyCode,
-          shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey,
-          bubbles: true, cancelable: true,
-        }));
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-    }
+    if (view) view.focus();
   }
-}, true); // capture phase — before xterm sees it
+});
 
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
@@ -2257,9 +2293,12 @@ function applyThemeToAll(index: number) {
     root.style.setProperty('--bg-secondary', lighten(10));
     root.style.setProperty('--bg-tertiary', lighten(18));
     root.style.setProperty('--bg-hover', lighten(30));
-    root.style.setProperty('--text-primary', '#cccccc');
-    root.style.setProperty('--text-secondary', '#999999');
-    root.style.setProperty('--text-muted', '#666666');
+    const fg = t.theme.foreground || '#cccccc';
+    root.style.setProperty('--text-primary', fg);
+    const fR = parseInt(fg.slice(1,3),16), fG = parseInt(fg.slice(3,5),16), fB = parseInt(fg.slice(5,7),16);
+    const dim = (ratio: number) => '#' + [fR,fG,fB].map(c => Math.round(c * ratio).toString(16).padStart(2,'0')).join('');
+    root.style.setProperty('--text-secondary', dim(0.85));
+    root.style.setProperty('--text-muted', dim(0.7));
     root.style.setProperty('--border-color', lighten(25));
     root.style.setProperty('--tab-active-bg', bg);
     root.style.setProperty('--tab-inactive-bg', lighten(12));
@@ -2301,7 +2340,11 @@ function setupThemePicker() {
     document.body.appendChild(pickerEl);
     pickerOpen = true;
   });
-  document.addEventListener('click', () => { if (pickerOpen && pickerEl) { pickerEl.remove(); pickerEl = null; pickerOpen = false; } });
+  document.addEventListener('mousedown', (e) => {
+    if (pickerOpen && pickerEl && !pickerEl.contains(e.target as Node) && !themeEl.contains(e.target as Node)) {
+      pickerEl.remove(); pickerEl = null; pickerOpen = false;
+    }
+  });
 }
 
 async function init() {
@@ -2312,7 +2355,13 @@ async function init() {
       // 验证 shell 值，无效则使用默认值 cmd
       const validShells: Array<'cmd' | 'powershell' | 'wsl'> = ['cmd', 'powershell', 'wsl'];
       const shell = saved.shell && validShells.includes(saved.shell) ? saved.shell : undefined;
-      await createTab(saved.name, saved.noteBlocks, saved.cwd || undefined, shell, saved.aiTool);
+      // Validate saved cwd before restoring
+      const savedCwd = saved.cwd;
+      const cwd = savedCwd && savedCwd.length <= 500 && !savedCwd.includes('"') && !savedCwd.includes('\n')
+        && (savedCwd.startsWith('/') || /^[A-Za-z]:/.test(savedCwd)) ? savedCwd : undefined;
+      // Protect restored tab names from auto-rename (if name is not default "Terminal N")
+      const isCustomName = saved.name && !saved.name.startsWith('Terminal ') && !saved.name.startsWith('↻ ');
+      await createTab(saved.name, saved.noteBlocks, cwd, shell, saved.aiTool, saved.userRenamed || isCustomName);
     }
   } else {
     createTab();

@@ -25,6 +25,7 @@ strip-ansi-escapes = "0.2"
 base64 = "0.22"
 arboard = "3"
 png = "0.17"
+encoding_rs = "0.8"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

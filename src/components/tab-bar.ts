@@ -158,12 +158,17 @@ export class TabBar {
       menu.appendChild(sep);
       shellItems.forEach(item => menu.appendChild(item));
     }
-    menu.addEventListener('click', (e) => e.stopPropagation());
+    menu.addEventListener('mousedown', (e) => e.stopPropagation());
     document.body.appendChild(menu);
     this.contextMenu = menu;
     setTimeout(() => {
-      const close = () => { this.closeContextMenu(); document.removeEventListener('click', close); };
-      document.addEventListener('click', close);
+      const close = (e: MouseEvent) => {
+        if (this.contextMenu && !this.contextMenu.contains(e.target as Node)) {
+          this.closeContextMenu();
+          document.removeEventListener('mousedown', close);
+        }
+      };
+      document.addEventListener('mousedown', close);
     }, 0);
   }
 
@@ -226,6 +231,17 @@ export class TabBar {
   private renderTab(id: string, tabEl: HTMLElement) {
     const tab = appState.tabs.get(id)!;
     if (tab.color) tabEl.style.setProperty('--tab-color', tab.color);
+
+    // Check if we can do an in-place update (avoid animation reset)
+    const existingIndicator = tabEl.querySelector('.tab-indicator') as HTMLElement | null;
+    const existingTitle = tabEl.querySelector('.tab-title') as HTMLElement | null;
+    if (existingIndicator && existingTitle) {
+      // Only update className if changed — preserves CSS animation continuity
+      const newClass = `tab-indicator ${tab.status}`;
+      if (existingIndicator.className !== newClass) existingIndicator.className = newClass;
+      if (existingTitle.textContent !== tab.title) existingTitle.textContent = tab.title;
+      return;
+    }
 
     const indicator = document.createElement('span');
     indicator.className = `tab-indicator ${tab.status}`;
@@ -420,19 +436,38 @@ export class TabBar {
           }
         }
 
-        // Tab reorder
+        // Tab reorder (works in both split and non-split modes)
         const tabs = Array.from(this.tabListEl.querySelectorAll('.tab'));
         for (const t of tabs) {
           if (t === el) continue;
           const rect = t.getBoundingClientRect();
           if (ev.clientX >= rect.left && ev.clientX <= rect.right) {
             const targetId = (t as HTMLElement).dataset.tabId!;
-            const fromIdx = appState.tabOrder.indexOf(id);
-            let toIdx = appState.tabOrder.indexOf(targetId);
             const midX = rect.left + rect.width / 2;
-            if (ev.clientX >= midX) toIdx = fromIdx < toIdx ? toIdx : toIdx + 1;
-            else toIdx = fromIdx > toIdx ? toIdx : toIdx - 1;
-            appState.moveTab(fromIdx, toIdx);
+
+            if (appState.splitState) {
+              // In split mode: reorder within the pane's tabIds array
+              const paneIdx = appState.findPaneForTab(id);
+              const targetPaneIdx = appState.findPaneForTab(targetId);
+              if (paneIdx === -1 || paneIdx !== targetPaneIdx) break; // different panes — skip
+              const pane = appState.splitState.panes[paneIdx];
+              const fromIdx = pane.tabIds.indexOf(id);
+              let toIdx = pane.tabIds.indexOf(targetId);
+              if (ev.clientX >= midX) toIdx = fromIdx < toIdx ? toIdx : toIdx + 1;
+              else toIdx = fromIdx > toIdx ? toIdx : toIdx - 1;
+              toIdx = Math.max(0, Math.min(toIdx, pane.tabIds.length - 1));
+              if (fromIdx !== toIdx) {
+                pane.tabIds.splice(fromIdx, 1);
+                pane.tabIds.splice(toIdx, 0, id);
+                appState.persistTabs();
+              }
+            } else {
+              const fromIdx = appState.tabOrder.indexOf(id);
+              let toIdx = appState.tabOrder.indexOf(targetId);
+              if (ev.clientX >= midX) toIdx = fromIdx < toIdx ? toIdx : toIdx + 1;
+              else toIdx = fromIdx > toIdx ? toIdx : toIdx - 1;
+              appState.moveTab(fromIdx, toIdx);
+            }
             break;
           }
         }
@@ -447,7 +482,6 @@ export class TabBar {
 
   render() {
     if (this.editingTabId) return;
-    this.tabListEl.innerHTML = '';
 
     const newTabBtn = document.getElementById('new-tab-btn');
 
@@ -456,6 +490,15 @@ export class TabBar {
       this.tabListEl.classList.add('split-tabs');
       this.tabListEl.setAttribute('data-tauri-drag-region', '');
       if (newTabBtn) newTabBtn.style.display = 'none';
+
+      // Build desired tab-id → pane-index map for quick lookup
+      // We do a full rebuild of groups (structure may change on split/merge)
+      // But reuse individual tab elements to preserve animation state
+      const existingTabEls = new Map<string, HTMLElement>();
+      this.tabListEl.querySelectorAll<HTMLElement>('.tab[data-tab-id]').forEach(el => {
+        existingTabEls.set(el.dataset.tabId!, el);
+      });
+      this.tabListEl.innerHTML = '';
 
       for (let pi = 0; pi < appState.splitState.panes.length; pi++) {
         const pane = appState.splitState.panes[pi];
@@ -470,15 +513,19 @@ export class TabBar {
           const tab = appState.tabs.get(tabId);
           if (!tab) continue;
 
-          const el = document.createElement('div');
+          // Reuse existing element if possible (preserves animation)
+          let el = existingTabEls.get(tabId);
+          if (!el) {
+            el = document.createElement('div');
+            el.dataset.tabId = tabId;
+            this.renderTab(tabId, el);
+            this.setupDrag(el, tabId);
+          } else {
+            this.renderTab(tabId, el); // updates indicator/title in-place
+          }
+          // Always use onclick (not addEventListener) so pane index stays current
+          el.onclick = () => this.onSwitchPaneTab?.(pi, tabId);
           el.className = 'tab' + (tabId === pane.activeTabId && isActivePane ? ' active' : '') + (tabId === pane.activeTabId ? ' pane-active' : '');
-          el.dataset.tabId = tabId;
-
-          this.renderTab(tabId, el);
-          el.addEventListener('click', () => {
-            this.onSwitchPaneTab?.(pi, tabId);
-          });
-          this.setupDrag(el, tabId);
           group.appendChild(el);
         }
 
@@ -523,18 +570,30 @@ export class TabBar {
         }
       }
 
-      for (const id of tabIds) {
-        const el = document.createElement('div');
-        el.className = `tab${id === appState.activeTabId ? ' active' : ''}`;
-        el.dataset.tabId = id;
+      // Collect existing tab elements for reuse
+      const existingTabEls = new Map<string, HTMLElement>();
+      this.tabListEl.querySelectorAll<HTMLElement>('.tab[data-tab-id]').forEach(el => {
+        existingTabEls.set(el.dataset.tabId!, el);
+      });
+      this.tabListEl.innerHTML = '';
 
-        this.renderTab(id, el);
-        if (isTopBottom) {
-          el.addEventListener('click', () => this.onSwitchPaneTab?.(0, id));
+      for (const id of tabIds) {
+        let el = existingTabEls.get(id);
+        if (!el) {
+          el = document.createElement('div');
+          el.dataset.tabId = id;
+          this.renderTab(id, el);
+          this.setupDrag(el, id);
         } else {
-          el.addEventListener('click', () => this.onSwitchTab(id));
+          this.renderTab(id, el); // updates indicator/title in-place
         }
-        this.setupDrag(el, id);
+        // Always use onclick so handler stays current across mode switches
+        if (isTopBottom) {
+          el.onclick = () => this.onSwitchPaneTab?.(0, id);
+        } else {
+          el.onclick = () => this.onSwitchTab(id);
+        }
+        el.className = `tab${id === appState.activeTabId ? ' active' : ''}`;
         this.tabListEl.appendChild(el);
       }
     }

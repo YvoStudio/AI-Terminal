@@ -32,6 +32,7 @@ export interface TabState {
   sidebarEntries: SidebarEntry[];
   noteBlocks: NoteBlock[];
   cwd: string;
+  userRenamed: boolean; // true if user manually renamed — blocks auto-rename
 }
 
 class AppState {
@@ -49,7 +50,7 @@ class AppState {
     this.tabCounter++;
     const tab: TabState = {
       id, title: `Terminal ${this.tabCounter}`, status: 'active', shell: 'cmd',
-      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '',
+      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false,
     };
     this.tabs.set(id, tab);
     this.tabOrder.push(id);
@@ -115,6 +116,10 @@ class AppState {
   setCwd(id: string, cwd: string) {
     const tab = this.tabs.get(id);
     if (!tab) return;
+    // Reject garbage: must be absolute path, no control chars or quotes, reasonable length
+    if (!cwd || cwd.length > 500) return;
+    if (cwd.includes('"') || cwd.includes('\n') || cwd.includes('\x1b')) return;
+    if (!cwd.startsWith('/') && !/^[A-Za-z]:/.test(cwd)) return;
     tab.cwd = cwd;
     this.notify();
   }
@@ -148,10 +153,11 @@ class AppState {
     this.persistTabs();
   }
 
-  renameTab(id: string, name: string) {
+  renameTab(id: string, name: string, byUser = true) {
     const tab = this.tabs.get(id);
     if (!tab || tab.title === name) return;
     tab.title = name;
+    if (byUser) tab.userRenamed = true;
     this.notify();
     this.persistTabs();
   }
@@ -284,6 +290,10 @@ class AppState {
   persistTabs() {
     const saved: SavedTab[] = this.tabOrder.map(id => {
       const tab = this.tabs.get(id)!;
+      // Validate cwd before saving — reject garbage
+      const cwd = tab.cwd;
+      const validCwd = cwd && cwd.length <= 500 && !cwd.includes('"') && !cwd.includes('\n') && !cwd.includes('\x1b')
+        && (cwd.startsWith('/') || /^[A-Za-z]:/.test(cwd)) ? cwd : undefined;
       return {
         name: tab.title,
         shell: tab.shell,
@@ -292,8 +302,9 @@ class AppState {
           content: b.content,
           images: b.images ? [...b.images] : undefined,
         })),
-        cwd: tab.cwd,
+        cwd: validCwd,
         aiTool: tab.aiTool,
+        userRenamed: tab.userRenamed || undefined,
       };
     });
     api.saveTabs(saved);

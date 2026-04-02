@@ -4,7 +4,7 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -68,7 +68,7 @@ fn make_pty_callback(
     app: AppHandle,
     tab_id: String,
     parser_arc: Arc<Mutex<OutputParser>>,
-    pty_state: Arc<Mutex<PtyManager>>,
+    pty_state: Arc<RwLock<PtyManager>>,
 ) -> impl Fn(String) + Send + 'static {
     move |data: String| {
         let _ = app.emit(&format!("terminal-output-{}", tab_id), data.clone());
@@ -92,7 +92,7 @@ fn make_pty_callback(
                 |tid, cwd| {
                     eprintln!(">>> Backend: CWD changed for tab {} to {}", tid, cwd);
                     // Update PtyManager's cwd so get_terminal_cwd returns the latest value
-                    let mgr = pty_state.lock().unwrap();
+                    let mgr = pty_state.read().unwrap();
                     mgr.update_cwd(&tid, cwd.clone());
                     let _ = app.emit("tab-cwd-changed", serde_json::json!({ "tabId": tid, "cwd": cwd }));
                 },
@@ -104,7 +104,7 @@ fn make_pty_callback(
 #[tauri::command]
 pub fn create_terminal(
     app: AppHandle,
-    pty_state: State<'_, Arc<Mutex<PtyManager>>>,
+    pty_state: State<'_, Arc<RwLock<PtyManager>>>,
     parser_state: State<'_, Arc<Mutex<OutputParser>>>,
     cwd: Option<String>,
 ) -> Result<String, String> {
@@ -122,7 +122,7 @@ pub fn create_terminal(
     let parser_arc = Arc::clone(&*parser_state);
     let pty_arc = Arc::clone(&*pty_state);
     let cb = make_pty_callback(app, tab_id.clone(), parser_arc, pty_arc);
-    let mut mgr = pty_state.lock().map_err(|e| e.to_string())?;
+    let mut mgr = pty_state.write().map_err(|e| e.to_string())?;
     mgr.create(tab_id.clone(), cwd, cb)?;
 
     Ok(tab_id)
@@ -131,7 +131,7 @@ pub fn create_terminal(
 #[tauri::command]
 pub fn switch_shell(
     app: AppHandle,
-    pty_state: State<'_, Arc<Mutex<PtyManager>>>,
+    pty_state: State<'_, Arc<RwLock<PtyManager>>>,
     parser_state: State<'_, Arc<Mutex<OutputParser>>>,
     tab_id: String,
     shell: String,
@@ -145,14 +145,14 @@ pub fn switch_shell(
 
     // Capture cwd before closing
     let cwd = {
-        let mgr = pty_state.lock().map_err(|e| e.to_string())?;
+        let mgr = pty_state.read().map_err(|e| e.to_string())?;
         let cwd_str = mgr.get_cwd(&tab_id);
         if cwd_str.is_empty() { None } else { Some(cwd_str) }
     };
 
     // Close old PTY
     {
-        let mut mgr = pty_state.lock().map_err(|e| e.to_string())?;
+        let mut mgr = pty_state.write().map_err(|e| e.to_string())?;
         mgr.close(&tab_id);
     }
 
@@ -167,7 +167,7 @@ pub fn switch_shell(
     let parser_arc = Arc::clone(&*parser_state);
     let pty_arc = Arc::clone(&*pty_state);
     let cb = make_pty_callback(app, tab_id.clone(), parser_arc, pty_arc);
-    let mut mgr = pty_state.lock().map_err(|e| e.to_string())?;
+    let mut mgr = pty_state.write().map_err(|e| e.to_string())?;
     mgr.create_with_shell(tab_id.clone(), cwd, shell_exe, cb)?;
 
     Ok(())
@@ -175,32 +175,32 @@ pub fn switch_shell(
 
 #[tauri::command]
 pub fn write_terminal(
-    state: State<'_, Arc<Mutex<PtyManager>>>,
+    state: State<'_, Arc<RwLock<PtyManager>>>,
     tab_id: String,
     data: String,
 ) -> Result<(), String> {
-    let mgr = state.lock().map_err(|e| e.to_string())?;
+    let mgr = state.read().map_err(|e| e.to_string())?;
     mgr.write(&tab_id, &data)
 }
 
 #[tauri::command]
 pub fn resize_terminal(
-    state: State<'_, Arc<Mutex<PtyManager>>>,
+    state: State<'_, Arc<RwLock<PtyManager>>>,
     tab_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let mgr = state.lock().map_err(|e| e.to_string())?;
+    let mgr = state.read().map_err(|e| e.to_string())?;
     mgr.resize(&tab_id, cols, rows)
 }
 
 #[tauri::command]
 pub fn close_terminal(
-    pty_state: State<'_, Arc<Mutex<PtyManager>>>,
+    pty_state: State<'_, Arc<RwLock<PtyManager>>>,
     parser_state: State<'_, Arc<Mutex<OutputParser>>>,
     tab_id: String,
 ) -> Result<(), String> {
-    let mut mgr = pty_state.lock().map_err(|e| e.to_string())?;
+    let mut mgr = pty_state.write().map_err(|e| e.to_string())?;
     mgr.close(&tab_id);
     let mut parser = parser_state.lock().map_err(|e| e.to_string())?;
     parser.remove_tab(&tab_id);
@@ -209,10 +209,10 @@ pub fn close_terminal(
 
 #[tauri::command]
 pub fn get_terminal_cwd(
-    state: State<'_, Arc<Mutex<PtyManager>>>,
+    state: State<'_, Arc<RwLock<PtyManager>>>,
     tab_id: String,
 ) -> Result<String, String> {
-    let mgr = state.lock().map_err(|e| e.to_string())?;
+    let mgr = state.read().map_err(|e| e.to_string())?;
     Ok(mgr.get_cwd(&tab_id))
 }
 

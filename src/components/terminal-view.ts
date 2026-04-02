@@ -89,7 +89,7 @@ export class TerminalView {
           e.preventDefault();
           api.writeTerminal(tabId, e.key);
           suppressChar = e.key;
-          suppressUntil = Date.now() + 150;
+          suppressUntil = Date.now() + 300;
         }
       }, true);
       xtermTextarea.addEventListener('keyup', (ev) => {
@@ -201,14 +201,8 @@ export class TerminalView {
       this.mouseSelectionInProgress = false;
     };
     
-    document.addEventListener('mouseup', (e) => {
+    document.addEventListener('mouseup', () => {
       endSelection();
-      
-      // 在mouseup之后的一小段时间内标记特殊状态，防止在此期间触发快捷键
-      const selectionEndedRecently = true;
-      setTimeout(() => {
-        // this.selectionEndedRecently = false; // 如果之前定义了此变量
-      }, 100);
     });
     window.addEventListener('blur', endSelection);
     
@@ -242,8 +236,9 @@ export class TerminalView {
       );
       // Fallback: suppress IME duplicate that got through despite composition blocking.
       // Only suppress if it matches the exact char we just sent via Shift+key bypass.
+      // Don't clear suppressChar — keep suppressing within the time window so rapid
+      // repeat presses (hold Shift+symbol) don't leak duplicates.
       if (suppressChar && Date.now() < suppressUntil && fixed === suppressChar) {
-        suppressChar = '';
         return;
       }
       // 始终过滤掉 Ctrl+C (\x03)，当有选中文本或鼠标选择进行中时
@@ -275,6 +270,7 @@ export class TerminalView {
         api.readClipboardText().then(text => {
           if (text) {
             this.terminal.paste(text);
+            this.terminal.focus();
           }
         }).catch(() => {});
       }

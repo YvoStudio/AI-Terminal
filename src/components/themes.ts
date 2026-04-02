@@ -50,20 +50,6 @@ export const themes: TerminalTheme[] = [
     },
   },
   {
-    name: 'Ocean Blue',
-    uiBg: '#3fb8d4',
-    light: true,
-    theme: {
-      background: '#3fb8d4', foreground: '#1a1a1a', cursor: '#000000',
-      cursorAccent: '#3fb8d4', selectionBackground: 'rgba(0,40,80,0.35)',
-      black: '#000000', red: '#c41a16', green: '#006400', yellow: '#7a5b00',
-      blue: '#003d99', magenta: '#8b008b', cyan: '#005f5f', white: '#e5e5e5',
-      brightBlack: '#444444', brightRed: '#d32f2f', brightGreen: '#2e7d32',
-      brightYellow: '#9a6e00', brightBlue: '#1565c0', brightMagenta: '#9c27b0',
-      brightCyan: '#00796b', brightWhite: '#ffffff',
-    },
-  },
-  {
     name: 'Catppuccin',
     uiBg: '#1e1e2e',
     theme: {
@@ -77,6 +63,19 @@ export const themes: TerminalTheme[] = [
     },
   },
   {
+    name: 'Deep Teal',
+    uiBg: '#065f6a',
+    theme: {
+      background: '#065f6a', foreground: '#ffffff', cursor: '#ffffff',
+      cursorAccent: '#065f6a', selectionBackground: 'rgba(255,255,255,0.25)',
+      black: '#000000', red: '#ff6b6b', green: '#69db7c', yellow: '#ffd43b',
+      blue: '#74c0fc', magenta: '#da77f2', cyan: '#66d9e8', white: '#e0f2f1',
+      brightBlack: '#4a9da8', brightRed: '#ff8787', brightGreen: '#8ce99a',
+      brightYellow: '#ffe066', brightBlue: '#a5d8ff', brightMagenta: '#e599f7',
+      brightCyan: '#99e9f2', brightWhite: '#ffffff',
+    },
+  },
+  {
     name: 'Dracula',
     uiBg: '#282a36',
     theme: {
@@ -87,6 +86,19 @@ export const themes: TerminalTheme[] = [
       brightBlack: '#6272a4', brightRed: '#ff6e6e', brightGreen: '#69ff94',
       brightYellow: '#ffffa5', brightBlue: '#d6acff', brightMagenta: '#ff92df',
       brightCyan: '#a4ffff', brightWhite: '#ffffff',
+    },
+  },
+  {
+    name: 'Monokai Pro',
+    uiBg: '#2d2a2e',
+    theme: {
+      background: '#2d2a2e', foreground: '#fcfcfa', cursor: '#fcfcfa',
+      cursorAccent: '#2d2a2e', selectionBackground: 'rgba(253,151,31,0.25)',
+      black: '#403e41', red: '#ff6188', green: '#a9dc76', yellow: '#ffd866',
+      blue: '#fc9867', magenta: '#ab9df2', cyan: '#78dce8', white: '#fcfcfa',
+      brightBlack: '#727072', brightRed: '#ff6188', brightGreen: '#a9dc76',
+      brightYellow: '#ffd866', brightBlue: '#fc9867', brightMagenta: '#ab9df2',
+      brightCyan: '#78dce8', brightWhite: '#fcfcfa',
     },
   },
 ];

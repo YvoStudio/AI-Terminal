@@ -23,6 +23,7 @@ version = "0.2.1"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "encoding_rs",
  "png 0.17.16",
  "portable-pty",
  "serde",

@@ -91,7 +91,7 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .split-pane { display: flex; flex-direction: column; overflow: hidden; background: var(--bg-primary); border: 1px solid transparent; }
 .split-pane.active-pane { border-color: var(--accent-blue); }
 .split-pane.drop-target { border-color: var(--accent-blue); background: rgba(86, 156, 214, 0.08); }
-.split-pane .terminal-wrapper.visible { position: relative; top: 0; left: 0; right: 0; bottom: 0; flex: 1; width: 100%; }
+.split-pane .terminal-wrapper.visible { position: relative; top: 0; left: 0; right: 0; bottom: 0; flex: 1; width: 100%; padding-left: 4px; box-sizing: border-box; }
 
 /* Pane-local tab bar (for top-bottom split) */
 .pane-tabs { display: flex; height: 26px; background: var(--bg-secondary); border-bottom: 1px solid var(--border-color); flex-shrink: 0; overflow-x: auto; align-items: center; }

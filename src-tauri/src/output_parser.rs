@@ -459,11 +459,9 @@ fn is_ai_waiting_prompt(line: &str) -> bool {
         return false;
     }
 
-    matches!(trimmed, ">" | ">>" | ">>>" | "$" | "❯" | "❯❯" | "›")
-        || trimmed.ends_with("\n>")
-        || trimmed.ends_with("\n>>")
-        || trimmed.ends_with("\n>>>")
-        || trimmed.ends_with("\n$")
+    // Only match Claude Code's specific prompt characters (❯ and variants)
+    // Do NOT include "$", ">", ">>", ">>>" — these are regular shell prompts
+    matches!(trimmed, "❯" | "❯❯" | "›")
         || trimmed.ends_with("\n❯")
         || trimmed.ends_with("\n❯❯")
         || trimmed.ends_with("\n›")

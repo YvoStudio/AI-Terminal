@@ -78,7 +78,14 @@ impl PtyManager {
         }
 
         if let Some(ref dir) = cwd {
-            cmd.cwd(dir);
+            // Only use saved cwd if the directory actually exists
+            if std::path::Path::new(dir).is_dir() {
+                cmd.cwd(dir);
+            } else {
+                if let Some(home) = dirs_next_home() {
+                    cmd.cwd(home);
+                }
+            }
         } else {
             if let Some(home) = dirs_next_home() {
                 cmd.cwd(home);
@@ -94,6 +101,48 @@ impl PtyManager {
         cmd.env("XTERM_VERSION", "XTerm(396)");
         // Prevent Claude Code from refusing to start inside this terminal
         cmd.env_remove("CLAUDECODE");
+
+        // Inject OSC 7 hook via ZDOTDIR for zsh, or PROMPT_COMMAND for bash
+        #[cfg(not(target_os = "windows"))]
+        {
+            let is_zsh = shell_lower.contains("zsh");
+            let is_bash = shell_lower.contains("bash");
+            if is_zsh {
+                // Create a temp ZDOTDIR that sources the user's .zshrc then adds our hook
+                let tmp_dir = std::env::temp_dir().join(format!("ait-zsh-{}", tab_id.replace('-', "")));
+                let _ = std::fs::create_dir_all(&tmp_dir);
+                let user_home = std::env::var("HOME").unwrap_or_default();
+                let zshrc_content = format!(
+                    r#"# AI Terminal: source user config, then install OSC 7 hook
+if [[ -f "{home}/.zshrc" ]]; then
+  ZDOTDIR="{home}" source "{home}/.zshrc"
+fi
+__ait_osc7() {{ printf '\e]7;file://%s%s\a' "$(hostname)" "$(pwd)"; }}
+autoload -Uz add-zsh-hook 2>/dev/null
+if (( $+functions[add-zsh-hook] )); then
+  add-zsh-hook chpwd __ait_osc7
+  add-zsh-hook precmd __ait_osc7
+else
+  chpwd_functions=(__ait_osc7 ${{chpwd_functions[@]}})
+  precmd_functions=(__ait_osc7 ${{precmd_functions[@]}})
+fi
+ZDOTDIR="{home}"
+"#,
+                    home = user_home
+                );
+                let _ = std::fs::write(tmp_dir.join(".zshrc"), &zshrc_content);
+                // Also create .zshenv to source user's .zshenv
+                let zshenv_content = format!(
+                    r#"if [[ -f "{home}/.zshenv" ]]; then source "{home}/.zshenv"; fi
+"#,
+                    home = user_home
+                );
+                let _ = std::fs::write(tmp_dir.join(".zshenv"), &zshenv_content);
+                cmd.env("ZDOTDIR", tmp_dir.to_str().unwrap_or("/tmp"));
+            } else if is_bash {
+                cmd.env("PROMPT_COMMAND", r#"printf '\e]7;file://%s%s\a' "$(hostname)" "$(pwd)";${PROMPT_COMMAND}"#);
+            }
+        }
 
         let child = pair
             .slave
@@ -158,7 +207,10 @@ impl PtyManager {
         };
 
         self.instances
-            .insert(tab_id, Arc::new(Mutex::new(instance)));
+            .insert(tab_id.clone(), Arc::new(Mutex::new(instance)));
+
+        // Note: OSC 7 hook is injected via ZDOTDIR (zsh) or PROMPT_COMMAND (bash)
+        // in the environment setup above — no delayed write needed
 
         Ok(())
     }

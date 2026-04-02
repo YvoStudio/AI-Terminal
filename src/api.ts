@@ -20,6 +20,7 @@ export interface SavedTab {
   shell?: 'cmd' | 'powershell' | 'wsl';
   cwd?: string;
   aiTool?: string;
+  userRenamed?: boolean;
 }
 
 export interface ClaudeSession {
@@ -52,7 +53,9 @@ export const api = {
   },
 
   writeTerminal(tabId: string, data: string): void {
-    invoke('write_terminal', { tabId, data }).catch(() => {});
+    invoke('write_terminal', { tabId, data }).catch(err => {
+      console.warn('[writeTerminal] failed:', err);
+    });
   },
 
   resizeTerminal(tabId: string, cols: number, rows: number): void {

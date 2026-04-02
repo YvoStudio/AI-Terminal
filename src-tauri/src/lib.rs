@@ -5,7 +5,7 @@ mod pty_manager;
 
 use output_parser::OutputParser;
 use pty_manager::PtyManager;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -34,7 +34,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            app.manage(Arc::new(Mutex::new(PtyManager::new())));
+            app.manage(Arc::new(RwLock::new(PtyManager::new())));
             app.manage(Arc::new(Mutex::new(OutputParser::new())));
             app.manage(Arc::new(Mutex::new(WindowState { visible: true })));
 
