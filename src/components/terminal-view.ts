@@ -71,6 +71,11 @@ export class TerminalView {
     // the exact IME duplicate — not unrelated subsequent keystrokes.
     let suppressChar = '';
     let suppressUntil = 0;
+    // Track active IME composition. The Shift+key bypass must NOT fire while
+    // the IME is composing, otherwise we send the char directly while the IME
+    // still holds "dev" (or "dev_") in its preedit buffer — Enter then commits
+    // the buffer on top of our already-sent char, producing e.g. "_dev_".
+    let imeComposing = false;
     const xtermTextarea = this.wrapper.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
     if (xtermTextarea) {
       // Capture-phase keydown on textarea: block IME and send char directly
@@ -81,6 +86,10 @@ export class TerminalView {
           shiftHeld = true;
           return;
         }
+        // Skip bypass entirely while IME is composing — let the IME commit
+        // normally via compositionend. Also guard with e.isComposing and
+        // e.key === 'Process' in case our flag lags the DOM event.
+        if (imeComposing || e.isComposing || e.key === 'Process') return;
         // Only for non-letter chars (symbols/numbers like ?, !, @, etc.)
         // Letters are handled fine by IME's Shift-toggle-to-English mode.
         // Active while Shift is held to support rapid sequences (Shift+1,2,3).
@@ -94,6 +103,14 @@ export class TerminalView {
       }, true);
       xtermTextarea.addEventListener('keyup', (ev) => {
         if ((ev as KeyboardEvent).key === 'Shift') shiftHeld = false;
+      }, true);
+      // Track IME composition lifecycle so the Shift+key bypass can bail out
+      // while the IME owns the keystroke.
+      this.wrapper.addEventListener('compositionstart', () => {
+        imeComposing = true;
+      }, true);
+      this.wrapper.addEventListener('compositionend', () => {
+        imeComposing = false;
       }, true);
       // Block IME composition on the WRAPPER (parent), so capture phase fires
       // BEFORE xterm's own listeners on the textarea.

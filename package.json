@@ -1,6 +1,6 @@
 {
   "name": "ai-terminal",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Cross-platform AI terminal manager",
   "private": true,
   "scripts": {
