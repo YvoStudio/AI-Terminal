@@ -79,11 +79,14 @@ fn make_pty_callback(
         if !notifications.is_empty() || !progress.is_empty() {
             eprintln!(">>> OSC 9/777: {} notifications, {} progress updates", notifications.len(), progress.len());
         }
+        let focused = any_window_focused(&app);
         for (title, body) in notifications {
-            eprintln!(">>> sending notification title='{}' body='{}'", title, body);
-            use tauri_plugin_notification::NotificationExt;
-            if let Err(e) = app.notification().builder().title(&title).body(&body).show() {
-                eprintln!(">>> notification error: {}", e);
+            eprintln!(">>> OSC 9/777 title='{}' body='{}' focused={}", title, body, focused);
+            if !focused {
+                use tauri_plugin_notification::NotificationExt;
+                if let Err(e) = app.notification().builder().title(&title).body(&body).show() {
+                    eprintln!(">>> notification error: {}", e);
+                }
             }
             let _ = app.emit("terminal-notification", serde_json::json!({
                 "tabId": tab_id, "title": title, "body": body
@@ -283,8 +286,16 @@ pub fn save_tabs(app: AppHandle, tabs: Vec<SavedTab>) -> Result<(), String> {
     fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+/// True if any app window is currently focused (user is looking at us).
+/// Ghostty-style rule: suppress notifications while the window is focused,
+/// since a toast on the very window you're staring at is just noise.
+fn any_window_focused(app: &AppHandle) -> bool {
+    app.webview_windows().values().any(|w| w.is_focused().unwrap_or(false))
+}
+
 #[tauri::command]
-pub fn fire_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
+pub fn fire_notification(app: AppHandle, title: String, body: String, force: Option<bool>) -> Result<(), String> {
+    if !force.unwrap_or(false) && any_window_focused(&app) { return Ok(()); }
     use tauri_plugin_notification::NotificationExt;
     app.notification().builder().title(&title).body(&body).show().map_err(|e| e.to_string())
 }

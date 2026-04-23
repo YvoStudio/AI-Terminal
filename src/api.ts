@@ -116,8 +116,8 @@ export const api = {
     });
   },
 
-  async fireNotification(title: string, body: string): Promise<void> {
-    return invoke('fire_notification', { title, body });
+  async fireNotification(title: string, body: string, force = false): Promise<void> {
+    return invoke('fire_notification', { title, body, force });
   },
 
   async saveScrollback(tabId: string, data: string): Promise<void> {
