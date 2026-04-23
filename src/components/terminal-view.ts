@@ -54,6 +54,17 @@ export class TerminalView {
       allowProposedApi: true,
       rightClickSelectsWord: true,
       macOptionClickForcesSelection: true,
+      // OSC 8 hyperlinks: cmd/ctrl-click opens via Tauri shell plugin.
+      // xterm.js invokes `activate` on click events for OSC 8 escaped URIs.
+      linkHandler: {
+        activate: (_event, uri) => {
+          // Resolve bare file paths to file:// URIs so the OS opens them
+          const target = /^[a-z][a-z0-9+.-]*:\/\//i.test(uri) ? uri : `file://${uri}`;
+          api.openExternal(target).catch((e) => console.warn('openExternal failed:', e));
+        },
+        hover: () => {},
+        leave: () => {},
+      },
     });
 
     this.fitAddon = new FitAddon();

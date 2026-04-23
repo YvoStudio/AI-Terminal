@@ -115,6 +115,11 @@ export const api = {
     });
   },
 
+  async openExternal(url: string): Promise<void> {
+    const { open } = await import('@tauri-apps/plugin-shell');
+    return open(url);
+  },
+
   onTerminalProgress(cb: (tabId: string, state: number, progress: number) => void): void {
     listen<{ tabId: string; state: number; progress: number }>('terminal-progress', (e) => {
       cb(e.payload.tabId, e.payload.state, e.payload.progress);

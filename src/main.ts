@@ -2151,6 +2151,17 @@ document.addEventListener('keydown', (e) => {
   else if (e.altKey && e.key === 'k') { e.preventDefault(); toggleTipsPanel(); }
   else if (isCtrl && e.key === 'Tab') { e.preventDefault(); if (e.shiftKey) appState.switchToPrev(); else appState.switchToNext(); if (appState.activeTabId) switchToTab(appState.activeTabId); }
   else if (isCtrl && e.shiftKey && e.key === 'p') { e.preventDefault(); toggleCommandPalette(); }
+  // Cmd/Ctrl+Shift+N: append current terminal selection as a new Notepad block
+  else if (isCtrl && e.shiftKey && (e.key === 'n' || e.key === 'N')) {
+    e.preventDefault();
+    if (!appState.activeTabId) return;
+    const view = terminalViews.get(appState.activeTabId);
+    const sel = view?.terminal.getSelection();
+    if (!sel || !sel.trim()) return;
+    setNotepadVisible(true);
+    addNoteBlock(appState.activeTabId, sel);
+    view?.terminal.clearSelection();
+  }
   else if (isCtrl && e.key >= '1' && e.key <= '9') {
     e.preventDefault();
     const idx = parseInt(e.key) - 1;
