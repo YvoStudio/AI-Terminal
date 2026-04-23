@@ -78,6 +78,18 @@ pub fn run() {
                 }
             })?;
 
+            // Auto-clear Dock badge when the main window regains focus —
+            // the user is looking now, so the "something happened" hint has
+            // served its purpose.
+            if let Some(main) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                main.on_window_event(move |ev| {
+                    if let tauri::WindowEvent::Focused(true) = ev {
+                        notification::clear_badge(&handle);
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
