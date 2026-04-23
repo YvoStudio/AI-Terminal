@@ -90,6 +90,7 @@ pub fn run() {
             commands::get_sidebar_entries,
             commands::save_tabs,
             commands::load_tabs,
+            commands::fire_notification,
             commands::save_scrollback,
             commands::load_scrollback,
             commands::delete_scrollback,

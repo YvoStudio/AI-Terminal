@@ -116,6 +116,10 @@ export const api = {
     });
   },
 
+  async fireNotification(title: string, body: string): Promise<void> {
+    return invoke('fire_notification', { title, body });
+  },
+
   async saveScrollback(tabId: string, data: string): Promise<void> {
     return invoke('save_scrollback', { tabId, data });
   },

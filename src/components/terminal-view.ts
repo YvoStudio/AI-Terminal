@@ -15,6 +15,9 @@ export class TerminalView {
   private searchAddon: SearchAddon;
   private serializeAddon: SerializeAddon;
   private scrollbackSaveTimer: ReturnType<typeof setInterval> | null = null;
+  // Command blocks (Warp-style): OSC 133 C/D boundaries tracked by xterm markers
+  // so line numbers stay correct as scrollback shifts.
+  private blocks: Array<{ start: any; end: any | null; exit: number | null }> = [];
   readonly wrapper: HTMLElement;
   private searchBar: HTMLElement | null = null;
   private resizeObserver: ResizeObserver;
@@ -94,6 +97,33 @@ export class TerminalView {
         } catch {}
       }, 10_000);
     }
+
+    // Command block tracking: on OSC 133 C register a start marker, on D an end marker.
+    try {
+      const parser = (this.terminal as any).parser;
+      if (parser && parser.registerOscHandler) {
+        parser.registerOscHandler(133, (data: string) => {
+          // data is e.g. "C" / "D;0" / "A" / "B"
+          const kind = data.charAt(0);
+          if (kind === 'C') {
+            const start = this.terminal.registerMarker(0);
+            this.blocks.push({ start, end: null, exit: null });
+            if (this.blocks.length > 200) this.blocks.shift();
+          } else if (kind === 'D') {
+            const exitMatch = /D;(-?\d+)/.exec(data);
+            const exit = exitMatch ? parseInt(exitMatch[1], 10) : 0;
+            for (let i = this.blocks.length - 1; i >= 0; i--) {
+              if (!this.blocks[i].end) {
+                this.blocks[i].end = this.terminal.registerMarker(0);
+                this.blocks[i].exit = exit;
+                break;
+              }
+            }
+          }
+          return false; // don't consume — let other handlers see it too
+        });
+      }
+    } catch {}
 
     // Kitty Keyboard Protocol: register CSI u handlers for push/pop/set/query.
     // Apps like Neovim/Helix enable via `CSI > flags u` and expect to receive
@@ -588,5 +618,24 @@ export class TerminalView {
   /** Remove saved scrollback for this tab — call when the user closes the tab. */
   purgeScrollback() {
     api.deleteScrollback(this.tabId).catch(() => {});
+  }
+
+  /** Extract the text of the most recent completed command block (C→D). */
+  getLastBlockText(): string | null {
+    const buf = this.terminal.buffer.active;
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      if (!b.end || !b.start) continue;
+      const startLine = b.start.line;
+      const endLine = b.end.line;
+      if (startLine < 0 || endLine < 0 || endLine < startLine) continue;
+      const lines: string[] = [];
+      for (let y = startLine; y <= endLine; y++) {
+        const ln = buf.getLine(y);
+        if (ln) lines.push(ln.translateToString(true));
+      }
+      return lines.join('\n').trim();
+    }
+    return null;
   }
 }

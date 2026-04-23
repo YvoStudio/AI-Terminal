@@ -111,6 +111,11 @@ async function createTab(name?: string, noteBlocks?: Array<{ id: string; content
   const view = new TerminalView(tabId, container);
   terminalViews.set(tabId, view);
 
+  // Regex triggers: fire on any output, even when tab is not active.
+  api.onTerminalOutput(tabId, (chunk) => runTriggers(tabId, chunk));
+  // Long-output summary when command fails.
+  api.onTerminalOutput(tabId, (chunk) => watchCommandLifecycle(tabId, chunk));
+
   // 监听终端输出，每次有输出时立即更新 cwd
   api.onTerminalOutput(tabId, () => {
     if (appState.activeTabId === tabId) {
@@ -717,6 +722,8 @@ function switchToTab(tabId: string) {
   appState.switchTab(tabId);
   syncPendingAttention(false);
   updateCwdDisplay(tabId);
+  const cwd = appState.tabs.get(tabId)?.cwd;
+  if (cwd) applyCwdProfile(cwd);
 }
 
 function isValidCwd(cwd: string): boolean {
@@ -2063,11 +2070,205 @@ api.onAiDetected((tabId, cwd, aiTool) => {
 });
 
 // 监听 cwd 变化事件
+// ── Long-output summary on failure ─────────────────────────────────────────
+// When a command (OSC 133 C→D) produces many lines AND exits non-zero, fire
+// a system notification summarising first/last lines. A "block overlay" is
+// out of scope for v0.3; this delivers the same core value (user catches a
+// long failure even if they weren't watching the tab).
+type CmdState = { capturing: boolean; lines: string[]; dropped: number };
+const _cmdState = new Map<string, CmdState>();
+const LONG_OUTPUT_THRESHOLD = 50;
+const OUTPUT_BUF_LIMIT = 400; // keep at most this many lines (head + tail kept)
+function watchCommandLifecycle(tabId: string, chunk: string) {
+  // OSC 133: \e]133;A|B|C|D[;exit]\a
+  const MARK_RE = /\x1b\]133;([ABCD])(?:;(-?\d+))?(?:\x07|\x1b\\)/g;
+  let lastIdx = 0;
+  const state = _cmdState.get(tabId) || { capturing: false, lines: [], dropped: 0 };
+  const absorb = (text: string) => {
+    if (!state.capturing || !text) return;
+    const stripped = stripAnsi(text);
+    const parts = stripped.split('\n');
+    for (const p of parts) {
+      if (state.lines.length >= OUTPUT_BUF_LIMIT) {
+        // Drop middle: keep first 100, then drop until only last 100 remain.
+        state.dropped++;
+        if (state.lines.length > 200) state.lines.splice(100, 1);
+      } else {
+        state.lines.push(p);
+      }
+    }
+  };
+  let m: RegExpExecArray | null;
+  while ((m = MARK_RE.exec(chunk)) !== null) {
+    absorb(chunk.slice(lastIdx, m.index));
+    const kind = m[1];
+    if (kind === 'C') { state.capturing = true; state.lines = []; state.dropped = 0; }
+    else if (kind === 'D') {
+      const exit = parseInt(m[2] || '0', 10);
+      const lineCount = state.lines.length + state.dropped;
+      if (state.capturing && exit !== 0 && lineCount >= LONG_OUTPUT_THRESHOLD) {
+        const head = state.lines.slice(0, 5).filter(Boolean);
+        const tail = state.lines.slice(-10).filter(Boolean);
+        const body = [
+          `exit=${exit} · ${lineCount} lines`,
+          ...head,
+          state.dropped > 0 ? `… (${state.dropped} lines omitted) …` : '',
+          ...tail,
+        ].filter(Boolean).join('\n').slice(0, 1500);
+        const title = `❌ ${appState.tabs.get(tabId)?.title || 'Command'}`;
+        api.fireNotification(title, body).catch(() => {});
+      }
+      state.capturing = false; state.lines = []; state.dropped = 0;
+    }
+    lastIdx = m.index + m[0].length;
+  }
+  absorb(chunk.slice(lastIdx));
+  _cmdState.set(tabId, state);
+}
+
+// ── Regex triggers ─────────────────────────────────────────────────────────
+// User-defined rules: when output matches a regex, fire an action. Edit via
+// `window.aiTriggers` (no GUI yet). Backed by localStorage['triggers'].
+type Trigger = { pattern: string; flags?: string; action: 'notify' | 'notepad'; cooldownMs?: number };
+function loadTriggers(): Trigger[] {
+  try { return JSON.parse(localStorage.getItem('triggers') || '[]'); } catch { return []; }
+}
+function saveTriggers(list: Trigger[]) { localStorage.setItem('triggers', JSON.stringify(list)); }
+const _triggerLineBuf = new Map<string, string>();
+const _triggerLastFire = new Map<string, number>();
+// Strip ANSI/OSC/CSI so regex users can match plain text.
+const ANSI_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>DMHME78c]|[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
+function stripAnsi(s: string) { return s.replace(ANSI_RE, ''); }
+function runTriggers(tabId: string, chunk: string) {
+  const triggers = loadTriggers();
+  if (triggers.length === 0) return;
+  // Accumulate per-tab until newline — regex runs per-line to keep semantics sane.
+  const prev = _triggerLineBuf.get(tabId) || '';
+  const buf = prev + stripAnsi(chunk);
+  const parts = buf.split('\n');
+  _triggerLineBuf.set(tabId, parts.pop() || '');
+  for (const line of parts) {
+    if (!line.trim()) continue;
+    for (const t of triggers) {
+      let re: RegExp;
+      try { re = new RegExp(t.pattern, t.flags || ''); } catch { continue; }
+      const m = line.match(re);
+      if (!m) continue;
+      const key = `${tabId}:${t.pattern}`;
+      const now = Date.now();
+      const last = _triggerLastFire.get(key) || 0;
+      const cooldown = t.cooldownMs ?? 5000;
+      if (now - last < cooldown) continue;
+      _triggerLastFire.set(key, now);
+      const captured = (m[1] || m[0]).slice(0, 300);
+      if (t.action === 'notify') {
+        const title = appState.tabs.get(tabId)?.title || 'Trigger';
+        api.fireNotification(title, captured).catch(() => {});
+      } else if (t.action === 'notepad') {
+        if (appState.activeTabId === tabId) setNotepadVisible(true);
+        addNoteBlock(tabId, captured);
+      }
+    }
+  }
+}
+(window as any).aiTriggers = {
+  list: loadTriggers,
+  add: (t: Trigger) => { const l = loadTriggers(); l.push(t); saveTriggers(l); },
+  clear: () => saveTriggers([]),
+  remove: (pattern: string) => saveTriggers(loadTriggers().filter(t => t.pattern !== pattern)),
+};
+
+// ── cwd-based profiles ─────────────────────────────────────────────────────
+// Per-project overrides: when a tab enters a matching cwd, apply the saved
+// theme / font size automatically. Rules live in localStorage as JSON.
+type CwdProfile = { pattern: string; theme?: number; fontSize?: number };
+function loadCwdProfiles(): CwdProfile[] {
+  try { return JSON.parse(localStorage.getItem('cwd-profiles') || '[]'); } catch { return []; }
+}
+function saveCwdProfiles(list: CwdProfile[]) {
+  localStorage.setItem('cwd-profiles', JSON.stringify(list));
+}
+function matchCwdProfile(cwd: string): CwdProfile | undefined {
+  // Longest-prefix wins so /a/b/c beats /a/b.
+  return loadCwdProfiles()
+    .filter(p => cwd.startsWith(p.pattern))
+    .sort((a, b) => b.pattern.length - a.pattern.length)[0];
+}
+let lastAppliedProfilePattern: string | null = null;
+function applyCwdProfile(cwd: string) {
+  const p = matchCwdProfile(cwd);
+  const key = p?.pattern ?? null;
+  if (key === lastAppliedProfilePattern) return; // no-op on same match
+  lastAppliedProfilePattern = key;
+  if (!p) return;
+  if (typeof p.theme === 'number' && p.theme >= 0 && p.theme < themes.length) {
+    // Disable follow-system when a profile overrides
+    localStorage.setItem(AUTO_THEME_KEY, '0');
+    applyThemeToAll(p.theme);
+  }
+  if (typeof p.fontSize === 'number' && p.fontSize >= 8 && p.fontSize <= 32) {
+    localStorage.setItem('terminal-font-size', String(p.fontSize));
+    for (const view of terminalViews.values()) view.setFontSize(p.fontSize);
+  }
+}
+
+// Right-click on status-cwd: manage this cwd's project profile
+(() => {
+  const el = document.getElementById('status-cwd');
+  if (!el) return;
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const cwd = appState.activeTabId ? appState.tabs.get(appState.activeTabId)?.cwd : undefined;
+    if (!cwd) return;
+    // Remove any open picker first
+    document.querySelectorAll('.theme-picker').forEach(n => n.remove());
+    const menu = document.createElement('div');
+    menu.className = 'theme-picker';
+    menu.style.cssText = `position:fixed;left:${(e as MouseEvent).clientX}px;bottom:26px;z-index:10000;min-width:240px;`;
+    const existing = matchCwdProfile(cwd);
+    const header = document.createElement('div');
+    header.className = 'theme-picker-item';
+    header.style.cssText = 'font-size:12px;opacity:0.8;pointer-events:none;';
+    header.textContent = existing ? `项目：${existing.pattern}` : `新项目：${cwd}`;
+    menu.appendChild(header);
+
+    const mkItem = (label: string, fn: () => void) => {
+      const it = document.createElement('div');
+      it.className = 'theme-picker-item';
+      it.textContent = label;
+      it.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); menu.remove(); });
+      menu.appendChild(it);
+    };
+
+    mkItem('保存当前主题为此项目配置', () => {
+      const list = loadCwdProfiles().filter(p => p.pattern !== cwd);
+      const themeIdx = TerminalView.getSavedThemeIndex();
+      const fontSize = parseInt(localStorage.getItem('terminal-font-size') || String(0), 10) || undefined;
+      list.push({ pattern: cwd, theme: themeIdx, fontSize });
+      saveCwdProfiles(list);
+      lastAppliedProfilePattern = null; // force re-apply
+      applyCwdProfile(cwd);
+    });
+    if (existing) {
+      mkItem(`清除此项目配置 (${existing.pattern})`, () => {
+        saveCwdProfiles(loadCwdProfiles().filter(p => p.pattern !== existing.pattern));
+        lastAppliedProfilePattern = null;
+      });
+    }
+    document.body.appendChild(menu);
+    const close = (ev: MouseEvent) => {
+      if (!menu.contains(ev.target as Node)) { menu.remove(); document.removeEventListener('mousedown', close, true); }
+    };
+    setTimeout(() => document.addEventListener('mousedown', close, true), 0);
+  });
+})();
+
 api.onCwdChanged((tabId, cwd) => {
   console.log('>>> CWD event:', tabId, cwd);
   // Ignore invalid cwd (garbage from terminal output)
   if (!isValidCwd(cwd)) return;
   appState.setCwd(tabId, cwd);
+  if (tabId === appState.activeTabId) applyCwdProfile(cwd);
   // 立即更新底栏
   if (tabId === appState.activeTabId) {
     const el = document.getElementById('status-cwd');
@@ -2151,6 +2352,24 @@ document.addEventListener('keydown', (e) => {
   else if (e.altKey && e.key === 'k') { e.preventDefault(); toggleTipsPanel(); }
   else if (isCtrl && e.key === 'Tab') { e.preventDefault(); if (e.shiftKey) appState.switchToPrev(); else appState.switchToNext(); if (appState.activeTabId) switchToTab(appState.activeTabId); }
   else if (isCtrl && e.shiftKey && e.key === 'p') { e.preventDefault(); toggleCommandPalette(); }
+  // Cmd/Ctrl+Shift+ArrowUp: copy last command output to clipboard
+  else if (isCtrl && e.shiftKey && e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!appState.activeTabId) return;
+    const view = terminalViews.get(appState.activeTabId);
+    const text = view?.getLastBlockText();
+    if (text) navigator.clipboard.writeText(text).catch(() => {});
+  }
+  // Cmd/Ctrl+Shift+O: send last command output to Notepad
+  else if (isCtrl && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
+    e.preventDefault();
+    if (!appState.activeTabId) return;
+    const view = terminalViews.get(appState.activeTabId);
+    const text = view?.getLastBlockText();
+    if (!text) return;
+    setNotepadVisible(true);
+    addNoteBlock(appState.activeTabId, text);
+  }
   // Cmd/Ctrl+Shift+N: append current terminal selection as a new Notepad block
   else if (isCtrl && e.shiftKey && (e.key === 'n' || e.key === 'N')) {
     e.preventDefault();

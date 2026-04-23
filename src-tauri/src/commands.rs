@@ -283,6 +283,12 @@ pub fn save_tabs(app: AppHandle, tabs: Vec<SavedTab>) -> Result<(), String> {
     fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn fire_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification().builder().title(&title).body(&body).show().map_err(|e| e.to_string())
+}
+
 fn scrollback_path(app: &AppHandle, tab_id: &str) -> Option<PathBuf> {
     // Sanitize: only allow alphanumerics and dashes in tab_id
     if tab_id.is_empty() || tab_id.len() > 64
