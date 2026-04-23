@@ -288,6 +288,8 @@ class AppState {
   }
 
   persistTabs() {
+    // Quick Terminal window: don't persist — it's ephemeral
+    if (new URLSearchParams(location.search).get('quick') === '1') return;
     const saved: SavedTab[] = this.tabOrder.map(id => {
       const tab = this.tabs.get(id)!;
       // Validate cwd before saving — reject garbage

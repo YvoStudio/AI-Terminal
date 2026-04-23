@@ -58,16 +58,11 @@ impl PtyManager {
 
         let mut cmd = CommandBuilder::new(&shell);
 
-        // For PowerShell: disable PSReadLine features that cause cursor to
-        // render in wrong position inside PTY terminals.
-        // Also set custom prompt to show full cwd for path tracking.
+        // PowerShell: disable PSReadLine prediction (PTY cursor issue) +
+        // install custom prompt that emits OSC 7 (cwd) and OSC 133 A/B/D markers.
         if is_powershell {
-            cmd.args([
-                "-NoLogo",
-                "-NoExit",
-                "-Command",
-                "& { try { Set-PSReadLineOption -PredictionSource None } catch {}; try { Set-PSReadLineOption -ExtraPromptLineCount 0 } catch {}; function Prompt { '$(Get-Location)> ' } }",
-            ]);
+            let ps_init = r#"& { try { Set-PSReadLineOption -PredictionSource None } catch {}; try { Set-PSReadLineOption -ExtraPromptLineCount 0 } catch {}; function global:Prompt { $ec = if ($?) { 0 } else { 1 }; $esc = [char]27; $bel = [char]7; [Console]::Write("$esc]133;D;$ec$bel"); [Console]::Write("$esc]7;file://$env:COMPUTERNAME$((Get-Location).Path -replace '\\','/')$bel"); [Console]::Write("$esc]133;A$bel"); $p = "$((Get-Location).Path)> "; [Console]::Write("$esc]133;B$bel"); return $p } }"#;
+            cmd.args(["-NoLogo", "-NoExit", "-Command", ps_init]);
         }
 
         // For cmd.exe: set custom prompt to show full cwd (e.g., "C:\path>")
@@ -102,36 +97,48 @@ impl PtyManager {
         // Prevent Claude Code from refusing to start inside this terminal
         cmd.env_remove("CLAUDECODE");
 
-        // Inject OSC 7 hook via ZDOTDIR for zsh, or PROMPT_COMMAND for bash
+        // Inject OSC 7 (cwd) + OSC 133 (shell integration) hooks.
+        // OSC 133: A=prompt start, B=prompt end, C=preexec, D=command done (+exit).
         #[cfg(not(target_os = "windows"))]
         {
             let is_zsh = shell_lower.contains("zsh");
             let is_bash = shell_lower.contains("bash");
             if is_zsh {
-                // Create a temp ZDOTDIR that sources the user's .zshrc then adds our hook
                 let tmp_dir = std::env::temp_dir().join(format!("ait-zsh-{}", tab_id.replace('-', "")));
                 let _ = std::fs::create_dir_all(&tmp_dir);
                 let user_home = std::env::var("HOME").unwrap_or_default();
                 let zshrc_content = format!(
-                    r#"# AI Terminal: source user config, then install OSC 7 hook
+                    r#"# AI Terminal: source user config, then install integration hooks
 if [[ -f "{home}/.zshrc" ]]; then
   ZDOTDIR="{home}" source "{home}/.zshrc"
 fi
 __ait_osc7() {{ printf '\e]7;file://%s%s\a' "$(hostname)" "$(pwd)"; }}
+__ait_precmd() {{
+  local ec=$?
+  printf '\e]133;D;%s\a' "$ec"
+  __ait_osc7
+  printf '\e]133;A\a'
+}}
+__ait_preexec() {{ printf '\e]133;C\a'; }}
+# Mark prompt end by appending OSC 133 B to PS1 (only once)
+if [[ "$PS1" != *$'\e]133;B'* ]]; then
+  PS1="%{{$(printf '\e]133;B\a')%}}$PS1"
+fi
 autoload -Uz add-zsh-hook 2>/dev/null
 if (( $+functions[add-zsh-hook] )); then
   add-zsh-hook chpwd __ait_osc7
-  add-zsh-hook precmd __ait_osc7
+  add-zsh-hook precmd __ait_precmd
+  add-zsh-hook preexec __ait_preexec
 else
   chpwd_functions=(__ait_osc7 ${{chpwd_functions[@]}})
-  precmd_functions=(__ait_osc7 ${{precmd_functions[@]}})
+  precmd_functions=(__ait_precmd ${{precmd_functions[@]}})
+  preexec_functions=(__ait_preexec ${{preexec_functions[@]}})
 fi
 ZDOTDIR="{home}"
 "#,
                     home = user_home
                 );
                 let _ = std::fs::write(tmp_dir.join(".zshrc"), &zshrc_content);
-                // Also create .zshenv to source user's .zshenv
                 let zshenv_content = format!(
                     r#"if [[ -f "{home}/.zshenv" ]]; then source "{home}/.zshenv"; fi
 "#,
@@ -140,9 +147,14 @@ ZDOTDIR="{home}"
                 let _ = std::fs::write(tmp_dir.join(".zshenv"), &zshenv_content);
                 cmd.env("ZDOTDIR", tmp_dir.to_str().unwrap_or("/tmp"));
             } else if is_bash {
-                cmd.env("PROMPT_COMMAND", r#"printf '\e]7;file://%s%s\a' "$(hostname)" "$(pwd)";${PROMPT_COMMAND}"#);
+                // bash: PROMPT_COMMAND runs before prompt (captures $?), DEBUG trap runs before command.
+                let bash_pc = r#"__ait_ec=$?; printf '\e]133;D;%s\a' "$__ait_ec"; printf '\e]7;file://%s%s\a' "$(hostname)" "$(pwd)"; printf '\e]133;A\a'"#;
+                cmd.env("PROMPT_COMMAND", format!("{};{}", bash_pc, "${PROMPT_COMMAND:-:}"));
+                // Prepend OSC 133 B to PS1 via BASH_ENV-like approach: set through env is messy,
+                // so rely on consumers treating prompt-end as implicit before user input.
             }
         }
+
 
         let child = pair
             .slave

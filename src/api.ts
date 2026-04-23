@@ -109,6 +109,18 @@ export const api = {
     });
   },
 
+  onTerminalNotification(cb: (tabId: string, title: string, body: string) => void): void {
+    listen<{ tabId: string; title: string; body: string }>('terminal-notification', (e) => {
+      cb(e.payload.tabId, e.payload.title, e.payload.body);
+    });
+  },
+
+  onTerminalProgress(cb: (tabId: string, state: number, progress: number) => void): void {
+    listen<{ tabId: string; state: number; progress: number }>('terminal-progress', (e) => {
+      cb(e.payload.tabId, e.payload.state, e.payload.progress);
+    });
+  },
+
   async getTerminalCwd(tabId: string): Promise<string> {
     return invoke<string>('get_terminal_cwd', { tabId });
   },

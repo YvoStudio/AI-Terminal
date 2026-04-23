@@ -24,6 +24,23 @@
         "trafficLightPosition": { "x": 12, "y": 13 },
         "transparent": false,
         "dragDropEnabled": true
+      },
+      {
+        "label": "quick",
+        "title": "Quick Terminal",
+        "url": "index.html?quick=1",
+        "width": 900,
+        "height": 380,
+        "minWidth": 500,
+        "minHeight": 200,
+        "decorations": false,
+        "transparent": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "center": true,
+        "resizable": true,
+        "focus": false
       }
     ],
     "security": {

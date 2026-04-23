@@ -33,6 +33,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             app.manage(Arc::new(RwLock::new(PtyManager::new())));
             app.manage(Arc::new(Mutex::new(OutputParser::new())));
@@ -53,6 +54,26 @@ pub fn run() {
                         let _ = win.set_focus();
                     } else {
                         let _ = win.hide();
+                    }
+                }
+            })?;
+
+            // Quick Terminal: Cmd+` on macOS, Ctrl+` elsewhere. Toggle visibility + focus.
+            #[cfg(target_os = "macos")]
+            let quick_mod = Modifiers::SUPER;
+            #[cfg(not(target_os = "macos"))]
+            let quick_mod = Modifiers::CONTROL;
+            let quick_shortcut = Shortcut::new(Some(quick_mod), Code::Backquote);
+            app.global_shortcut().on_shortcut(quick_shortcut, |app, _s, event| {
+                if event.state() != ShortcutState::Pressed { return; }
+                if let Some(win) = app.get_webview_window("quick") {
+                    let is_visible = win.is_visible().unwrap_or(false);
+                    let is_focused = win.is_focused().unwrap_or(false);
+                    if is_visible && is_focused {
+                        let _ = win.hide();
+                    } else {
+                        let _ = win.show();
+                        let _ = win.set_focus();
                     }
                 }
             })?;

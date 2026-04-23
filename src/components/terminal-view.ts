@@ -21,6 +21,9 @@ export class TerminalView {
 
   private mouseSelectionInProgress = false;
   private userScrolledUp = false;
+  // Kitty Keyboard Protocol (CSI u) state: flags stack. 0 = disabled.
+  private kittyStack: number[] = [0];
+  private get kittyFlags() { return this.kittyStack[this.kittyStack.length - 1] || 0; }
 
   constructor(
     private tabId: string,
@@ -58,6 +61,43 @@ export class TerminalView {
     this.terminal.loadAddon(this.fitAddon);
     this.terminal.loadAddon(this.searchAddon);
     this.terminal.open(this.wrapper);
+
+    // Kitty Keyboard Protocol: register CSI u handlers for push/pop/set/query.
+    // Apps like Neovim/Helix enable via `CSI > flags u` and expect to receive
+    // keys encoded as `CSI unicode;modifiers u` for combos xterm can't express.
+    try {
+      const parser = (this.terminal as any).parser;
+      if (parser && parser.registerCsiHandler) {
+        // CSI > flags u — push flags
+        parser.registerCsiHandler({ final: 'u', prefix: '>' }, (params: any) => {
+          const f = (params.params?.[0] ?? params[0] ?? 1) | 0;
+          this.kittyStack.push(f);
+          return true;
+        });
+        // CSI = flags ; mode u — set flags (mode 1=set, 2=OR, 3=AND-NOT)
+        parser.registerCsiHandler({ final: 'u', prefix: '=' }, (params: any) => {
+          const arr = params.params ?? params;
+          const f = (arr[0] ?? 0) | 0;
+          const mode = (arr[1] ?? 1) | 0;
+          const cur = this.kittyFlags;
+          const next = mode === 2 ? cur | f : mode === 3 ? cur & ~f : f;
+          this.kittyStack[this.kittyStack.length - 1] = next;
+          return true;
+        });
+        // CSI < [n] u — pop n flags (default 1)
+        parser.registerCsiHandler({ final: 'u', prefix: '<' }, (params: any) => {
+          const arr = params.params ?? params;
+          let n = (arr[0] ?? 1) | 0; if (n < 1) n = 1;
+          while (n-- > 0 && this.kittyStack.length > 1) this.kittyStack.pop();
+          return true;
+        });
+        // CSI ? u — query; reply with `CSI ? flags u`
+        parser.registerCsiHandler({ final: 'u', prefix: '?' }, () => {
+          api.writeTerminal(this.tabId, `\x1b[?${this.kittyFlags}u`);
+          return true;
+        });
+      }
+    } catch { /* parser API optional — degrade silently */ }
 
     // macOS Chinese IME Shift+key fix:
     // Chinese IME uses Shift to toggle Chinese/English. When Shift is pressed quickly
@@ -128,6 +168,30 @@ export class TerminalView {
 
     // Intercept key events inside xterm before it processes them
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      // Kitty Keyboard Protocol (CSI u): when enabled by the running app and
+      // the key combo involves Ctrl/Alt in ways xterm can't encode, send
+      // `CSI codepoint;mods u` directly and block xterm's default handling.
+      if (this.kittyFlags && e.type === 'keydown' && !e.isComposing
+          && !imeComposing && e.key !== 'Process') {
+        const isMod = e.ctrlKey || e.altKey || e.metaKey;
+        const specials: Record<string, number> = {
+          Enter: 13, Tab: 9, Backspace: 127, Escape: 27,
+        };
+        let cp: number | null = null;
+        if (specials[e.key] !== undefined) cp = specials[e.key];
+        else if (e.key.length === 1 && isMod) cp = e.key.toLowerCase().codePointAt(0) ?? null;
+        if (cp !== null && (isMod || e.key === 'Enter')) {
+          const mods = 1 + (e.shiftKey ? 1 : 0) + (e.altKey ? 2 : 0)
+                        + (e.ctrlKey ? 4 : 0) + (e.metaKey ? 8 : 0);
+          // Only emit CSI u form when there are real modifiers beyond base 1
+          // (avoid intercepting bare Enter, which TUIs still expect as \r).
+          if (mods > 1 || (e.key === 'Enter' && (e.ctrlKey || e.shiftKey))) {
+            api.writeTerminal(this.tabId, `\x1b[${cp};${mods}u`);
+            e.preventDefault();
+            return false;
+          }
+        }
+      }
       // Shift+non-letter: already handled by capture-phase listener above
       if (e.shiftKey && shiftHeld && !e.ctrlKey && !e.metaKey && !e.altKey
           && e.key.length === 1 && !/^[a-zA-Z]$/.test(e.key)) {

@@ -72,6 +72,26 @@ fn make_pty_callback(
 ) -> impl Fn(String) + Send + 'static {
     move |data: String| {
         let _ = app.emit(&format!("terminal-output-{}", tab_id), data.clone());
+        // OSC 9 / 777 (notifications) + OSC 9;4 (progress): emit events for frontend to surface.
+        let (notifications, progress) = crate::output_parser::extract_notifications_and_progress(&data);
+        if !notifications.is_empty() || !progress.is_empty() {
+            eprintln!(">>> OSC 9/777: {} notifications, {} progress updates", notifications.len(), progress.len());
+        }
+        for (title, body) in notifications {
+            eprintln!(">>> sending notification title='{}' body='{}'", title, body);
+            use tauri_plugin_notification::NotificationExt;
+            if let Err(e) = app.notification().builder().title(&title).body(&body).show() {
+                eprintln!(">>> notification error: {}", e);
+            }
+            let _ = app.emit("terminal-notification", serde_json::json!({
+                "tabId": tab_id, "title": title, "body": body
+            }));
+        }
+        for (state, pct) in progress {
+            let _ = app.emit("terminal-progress", serde_json::json!({
+                "tabId": tab_id, "state": state, "progress": pct
+            }));
+        }
         if let Ok(mut parser) = parser_arc.lock() {
             let app_ref = &app;
             parser.process(

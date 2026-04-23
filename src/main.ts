@@ -2082,6 +2082,36 @@ api.onCwdChanged((tabId, cwd) => {
   }
 });
 
+// OSC 9 / 777 notifications → system notification via Tauri plugin-notification
+// (browser Notification API is unreliable in Tauri WebView)
+let notifPermissionChecked = false;
+api.onTerminalNotification(async (_tabId, title, body) => {
+  try {
+    const mod = await import('@tauri-apps/plugin-notification');
+    if (!notifPermissionChecked) {
+      notifPermissionChecked = true;
+      const granted = await mod.isPermissionGranted();
+      if (!granted) {
+        const perm = await mod.requestPermission();
+        if (perm !== 'granted') return;
+      }
+    } else if (!(await mod.isPermissionGranted())) return;
+    mod.sendNotification({ title, body: body || '' });
+  } catch (e) { console.warn('Notification failed:', e); }
+});
+
+// OSC 9;4 progress → window taskbar/Dock progress bar
+api.onTerminalProgress(async (tabId, state, progress) => {
+  if (tabId !== appState.activeTabId) return;
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    const win = getCurrentWindow();
+    // state: 0 none, 1 normal, 2 error, 3 indeterminate, 4 warning
+    const statusMap: Record<number, any> = { 0: 'none', 1: 'normal', 2: 'error', 3: 'indeterminate', 4: 'warning' };
+    await (win as any).setProgressBar({ status: statusMap[state] ?? 'none', progress: Math.max(0, Math.min(100, progress)) });
+  } catch (e) { console.warn('Progress update failed:', e); }
+});
+
 // Re-focus terminal when window regains focus (fixes first Shift+key being swallowed)
 window.addEventListener('focus', () => {
   if (appState.activeTabId) {
@@ -2260,8 +2290,29 @@ function toggleCommandPalette() {
 }
 
 // Theme picker
-function applyThemeToAll(index: number) {
-  localStorage.setItem('terminal-theme-index', String(index));
+const AUTO_THEME_KEY = 'auto-theme-enabled';
+const AUTO_THEME_LIGHT_KEY = 'auto-theme-light-index';
+const AUTO_THEME_DARK_KEY = 'auto-theme-dark-index';
+function isAutoTheme() { return localStorage.getItem(AUTO_THEME_KEY) === '1'; }
+function defaultLightIdx() {
+  const saved = localStorage.getItem(AUTO_THEME_LIGHT_KEY);
+  if (saved) return Math.max(0, Math.min(themes.length - 1, Number(saved)));
+  const i = themes.findIndex(t => t.light); return i >= 0 ? i : 1;
+}
+function defaultDarkIdx() {
+  const saved = localStorage.getItem(AUTO_THEME_DARK_KEY);
+  if (saved) return Math.max(0, Math.min(themes.length - 1, Number(saved)));
+  const i = themes.findIndex(t => !t.light); return i >= 0 ? i : 0;
+}
+function systemPrefersDark() {
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+function applyAutoTheme() {
+  const idx = systemPrefersDark() ? defaultDarkIdx() : defaultLightIdx();
+  applyThemeToAll(idx, /*fromAuto*/ true);
+}
+function applyThemeToAll(index: number, fromAuto = false) {
+  if (!fromAuto) localStorage.setItem('terminal-theme-index', String(index));
   const t = themes[index];
   for (const view of terminalViews.values()) view.applyTheme(index);
   const root = document.documentElement;
@@ -2315,30 +2366,88 @@ function applyThemeToAll(index: number) {
 
 function setupThemePicker() {
   const themeEl = document.getElementById('status-theme')!;
-  const currentIndex = TerminalView.getSavedThemeIndex();
-  applyThemeToAll(currentIndex);
+  if (isAutoTheme()) applyAutoTheme();
+  else applyThemeToAll(TerminalView.getSavedThemeIndex());
+
+  if (window.matchMedia) {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => { if (isAutoTheme()) applyAutoTheme(); };
+    mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
+  }
 
   let pickerOpen = false; let pickerEl: HTMLElement | null = null;
-  themeEl.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (pickerOpen && pickerEl) { pickerEl.remove(); pickerEl = null; pickerOpen = false; return; }
+  const rebuild = () => {
+    if (!pickerEl) return;
+    pickerEl.innerHTML = '';
+    const auto = isAutoTheme();
+    const header = document.createElement('div');
+    header.className = 'theme-picker-item';
+    header.style.cssText = 'justify-content:space-between;font-size:12px;opacity:0.9;';
+    header.innerHTML = `<span>跟随系统</span><span style="font-weight:600;color:${auto ? 'var(--accent-green)' : 'var(--text-muted)'}">${auto ? '开' : '关'}</span>`;
+    header.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      localStorage.setItem(AUTO_THEME_KEY, auto ? '0' : '1');
+      if (!auto) applyAutoTheme();
+      rebuild();
+    });
+    pickerEl.appendChild(header);
+    if (isAutoTheme()) {
+      const lightIdx = defaultLightIdx();
+      const darkIdx = defaultDarkIdx();
+      const mkSelector = (label: string, currentIdx: number, key: string) => {
+        const row = document.createElement('div');
+        row.className = 'theme-picker-item';
+        row.style.cssText = 'justify-content:space-between;font-size:12px;';
+        const select = document.createElement('select');
+        select.style.cssText = 'background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:2px 4px;font-size:12px;';
+        themes.forEach((t, i) => {
+          const opt = document.createElement('option');
+          opt.value = String(i); opt.textContent = t.name;
+          if (i === currentIdx) opt.selected = true;
+          select.appendChild(opt);
+        });
+        select.addEventListener('click', ev => ev.stopPropagation());
+        select.addEventListener('change', () => {
+          localStorage.setItem(key, select.value);
+          applyAutoTheme();
+        });
+        row.innerHTML = `<span>${label}</span>`;
+        row.appendChild(select);
+        pickerEl!.appendChild(row);
+      };
+      mkSelector('亮色', lightIdx, AUTO_THEME_LIGHT_KEY);
+      mkSelector('暗色', darkIdx, AUTO_THEME_DARK_KEY);
+      const sep = document.createElement('div');
+      sep.style.cssText = 'border-top:1px solid var(--border-color);margin:4px 0;';
+      pickerEl.appendChild(sep);
+    }
     const currentIdx = TerminalView.getSavedThemeIndex();
-    pickerEl = document.createElement('div');
-    pickerEl.className = 'theme-picker';
     themes.forEach((t, i) => {
       const item = document.createElement('div');
-      item.className = `theme-picker-item${i === currentIdx ? ' active' : ''}`;
+      item.className = `theme-picker-item${(!isAutoTheme() && i === currentIdx) ? ' active' : ''}`;
       const dot = document.createElement('span');
       dot.className = 'theme-color-dot';
       dot.style.background = t.theme.background as string;
       const label = document.createElement('span');
       label.textContent = t.name;
       item.appendChild(dot); item.appendChild(label);
-      item.addEventListener('click', (ev) => { ev.stopPropagation(); applyThemeToAll(i); pickerEl?.remove(); pickerEl = null; pickerOpen = false; });
+      item.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        localStorage.setItem(AUTO_THEME_KEY, '0');
+        applyThemeToAll(i);
+        pickerEl?.remove(); pickerEl = null; pickerOpen = false;
+      });
       pickerEl!.appendChild(item);
     });
+  };
+  themeEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (pickerOpen && pickerEl) { pickerEl.remove(); pickerEl = null; pickerOpen = false; return; }
+    pickerEl = document.createElement('div');
+    pickerEl.className = 'theme-picker';
     document.body.appendChild(pickerEl);
     pickerOpen = true;
+    rebuild();
   });
   document.addEventListener('mousedown', (e) => {
     if (pickerOpen && pickerEl && !pickerEl.contains(e.target as Node) && !themeEl.contains(e.target as Node)) {
@@ -2347,8 +2456,30 @@ function setupThemePicker() {
   });
 }
 
+const IS_QUICK = new URLSearchParams(location.search).get('quick') === '1';
+if (IS_QUICK) {
+  document.documentElement.classList.add('quick-mode');
+  const style = document.createElement('style');
+  style.textContent = `
+    .quick-mode #btn-toggle-notepad,
+    .quick-mode #notepad,
+    .quick-mode #notepad-resize-handle,
+    .quick-mode #window-controls,
+    .quick-mode #traffic-light-spacer,
+    .quick-mode #btn-history { display: none !important; }
+    .quick-mode #tab-bar { -webkit-app-region: drag; app-region: drag; padding-left: 8px; }
+    .quick-mode #tab-bar button, .quick-mode #tab-bar #tab-list { -webkit-app-region: no-drag; app-region: no-drag; }
+  `;
+  document.head.appendChild(style);
+}
+
 async function init() {
   setupThemePicker();
+  if (IS_QUICK) {
+    // Quick Terminal: ephemeral single tab, no persistence, no history scanning
+    await createTab('Quick', undefined, undefined, undefined, undefined, true);
+    return;
+  }
   const savedTabs = await api.loadTabs();
   if (savedTabs.length > 0) {
     for (const saved of savedTabs) {

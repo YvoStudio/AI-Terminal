@@ -115,6 +115,29 @@ impl OutputParser {
             }
         }
 
+        // Parse OSC 133 (shell integration): C = command started, D = command done, A = prompt shown
+        for marker in extract_osc133(raw) {
+            match marker {
+                Osc133::CommandStart => {
+                    state.was_executing = true;
+                    on_status(tab_id.to_string(), TabStatus::Executing);
+                }
+                Osc133::CommandDone(_exit) => {
+                    if state.was_executing {
+                        state.was_executing = false;
+                        on_status(tab_id.to_string(), TabStatus::DoneUnseen);
+                    }
+                }
+                Osc133::PromptStart => {
+                    // If not mid-execution, we're at a fresh prompt → Waiting only makes sense for AI tabs
+                    if state.ai_tool.is_some() && !state.was_executing {
+                        on_status(tab_id.to_string(), TabStatus::Waiting);
+                    }
+                }
+                Osc133::PromptEnd => {}
+            }
+        }
+
         // Parse OSC 0/2 (terminal title) — Claude Code sets this to session name
         // Format: \x1b]0;title\x07  or  \x1b]2;title\x07
         if let Some((title, has_status_prefix)) = extract_osc_title(raw) {
@@ -373,6 +396,101 @@ fn is_status_prefix_char(ch: char) -> bool {
             | '◶' | '◷'
             | '⠁' | '⠂' | '⠄' | '⠆' | '⠇' | '⠋' | '⠙' | '⠸' | '⠼' | '⠿'
     ) || ('\u{2800}'..='\u{28FF}').contains(&ch)
+}
+
+/// OSC 9 (iTerm2 notification): `\e]9;<message>\a` — simple one-line notification.
+/// OSC 9;4 (ConEmu progress): `\e]9;4;<state>;<pct>\a` — state 0=clear 1=normal 2=error 3=indet 4=warn.
+/// OSC 777 notify (kitty/urxvt): `\e]777;notify;<title>;<body>\a`.
+/// Returns (notifications, progress updates).
+pub fn extract_notifications_and_progress(raw: &str)
+    -> (Vec<(String, String)>, Vec<(u8, u8)>)
+{
+    let mut notifications = Vec::new();
+    let mut progress = Vec::new();
+    // OSC 9 and OSC 9;4 share prefix `\e]9;`
+    let mut rest = raw;
+    let marker9 = "\x1b]9;";
+    while let Some(idx) = rest.find(marker9) {
+        let after = &rest[idx + marker9.len()..];
+        let end = match after.find('\x07').or_else(|| after.find("\x1b\\")) {
+            Some(e) => e,
+            None => break,
+        };
+        let payload = &after[..end];
+        // OSC 9;4;<state>;<pct>
+        if let Some(rest4) = payload.strip_prefix("4;") {
+            let mut parts = rest4.split(';');
+            let state: u8 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let pct: u8 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            progress.push((state, pct));
+        } else if !payload.is_empty() && payload.len() < 500 {
+            notifications.push(("AI Terminal".to_string(), payload.to_string()));
+        }
+        let advance = idx + marker9.len() + end + 1;
+        if advance >= rest.len() { break; }
+        rest = &rest[advance..];
+    }
+    // OSC 777;notify;title;body
+    let marker777 = "\x1b]777;notify;";
+    let mut rest = raw;
+    while let Some(idx) = rest.find(marker777) {
+        let after = &rest[idx + marker777.len()..];
+        let end = match after.find('\x07').or_else(|| after.find("\x1b\\")) {
+            Some(e) => e,
+            None => break,
+        };
+        let payload = &after[..end];
+        let mut parts = payload.splitn(2, ';');
+        let title = parts.next().unwrap_or("AI Terminal").to_string();
+        let body = parts.next().unwrap_or("").to_string();
+        if !title.is_empty() && title.len() < 200 && body.len() < 500 {
+            notifications.push((title, body));
+        }
+        let advance = idx + marker777.len() + end + 1;
+        if advance >= rest.len() { break; }
+        rest = &rest[advance..];
+    }
+    (notifications, progress)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Osc133 {
+    PromptStart,
+    PromptEnd,
+    CommandStart,
+    CommandDone(i32),
+}
+
+/// Find all OSC 133 markers in raw output.
+/// Format: \x1b]133;<kind>[;args]<ST>  where ST = BEL (\x07) or \x1b\\
+fn extract_osc133(raw: &str) -> Vec<Osc133> {
+    let mut out = Vec::new();
+    let marker = "\x1b]133;";
+    let mut rest = raw;
+    while let Some(idx) = rest.find(marker) {
+        let after = &rest[idx + marker.len()..];
+        let end = match after.find('\x07').or_else(|| after.find("\x1b\\")) {
+            Some(e) => e,
+            None => break,
+        };
+        let payload = &after[..end];
+        let mut parts = payload.split(';');
+        let kind = parts.next().unwrap_or("");
+        match kind {
+            "A" => out.push(Osc133::PromptStart),
+            "B" => out.push(Osc133::PromptEnd),
+            "C" => out.push(Osc133::CommandStart),
+            "D" => {
+                let exit = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+                out.push(Osc133::CommandDone(exit));
+            }
+            _ => {}
+        }
+        let advance = idx + marker.len() + end + 1;
+        if advance >= rest.len() { break; }
+        rest = &rest[advance..];
+    }
+    out
 }
 
 /// Extract cwd from OSC 7 escape sequence
