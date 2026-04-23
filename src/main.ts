@@ -722,8 +722,6 @@ function switchToTab(tabId: string) {
   appState.switchTab(tabId);
   syncPendingAttention(false);
   updateCwdDisplay(tabId);
-  const cwd = appState.tabs.get(tabId)?.cwd;
-  if (cwd) applyCwdProfile(cwd);
 }
 
 function isValidCwd(cwd: string): boolean {
@@ -2178,97 +2176,11 @@ function runTriggers(tabId: string, chunk: string) {
   remove: (pattern: string) => saveTriggers(loadTriggers().filter(t => t.pattern !== pattern)),
 };
 
-// ── cwd-based profiles ─────────────────────────────────────────────────────
-// Per-project overrides: when a tab enters a matching cwd, apply the saved
-// theme / font size automatically. Rules live in localStorage as JSON.
-type CwdProfile = { pattern: string; theme?: number; fontSize?: number };
-function loadCwdProfiles(): CwdProfile[] {
-  try { return JSON.parse(localStorage.getItem('cwd-profiles') || '[]'); } catch { return []; }
-}
-function saveCwdProfiles(list: CwdProfile[]) {
-  localStorage.setItem('cwd-profiles', JSON.stringify(list));
-}
-function matchCwdProfile(cwd: string): CwdProfile | undefined {
-  // Longest-prefix wins so /a/b/c beats /a/b.
-  return loadCwdProfiles()
-    .filter(p => cwd.startsWith(p.pattern))
-    .sort((a, b) => b.pattern.length - a.pattern.length)[0];
-}
-let lastAppliedProfilePattern: string | null = null;
-function applyCwdProfile(cwd: string) {
-  const p = matchCwdProfile(cwd);
-  const key = p?.pattern ?? null;
-  if (key === lastAppliedProfilePattern) return; // no-op on same match
-  lastAppliedProfilePattern = key;
-  if (!p) return;
-  if (typeof p.theme === 'number' && p.theme >= 0 && p.theme < themes.length) {
-    // Disable follow-system when a profile overrides
-    localStorage.setItem(AUTO_THEME_KEY, '0');
-    applyThemeToAll(p.theme);
-  }
-  if (typeof p.fontSize === 'number' && p.fontSize >= 8 && p.fontSize <= 32) {
-    localStorage.setItem('terminal-font-size', String(p.fontSize));
-    for (const view of terminalViews.values()) view.setFontSize(p.fontSize);
-  }
-}
-
-// Right-click on status-cwd: manage this cwd's project profile
-(() => {
-  const el = document.getElementById('status-cwd');
-  if (!el) return;
-  el.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    const cwd = appState.activeTabId ? appState.tabs.get(appState.activeTabId)?.cwd : undefined;
-    if (!cwd) return;
-    // Remove any open picker first
-    document.querySelectorAll('.theme-picker').forEach(n => n.remove());
-    const menu = document.createElement('div');
-    menu.className = 'theme-picker';
-    menu.style.cssText = `position:fixed;left:${(e as MouseEvent).clientX}px;bottom:26px;z-index:10000;min-width:240px;`;
-    const existing = matchCwdProfile(cwd);
-    const header = document.createElement('div');
-    header.className = 'theme-picker-item';
-    header.style.cssText = 'font-size:12px;opacity:0.8;pointer-events:none;';
-    header.textContent = existing ? `项目：${existing.pattern}` : `新项目：${cwd}`;
-    menu.appendChild(header);
-
-    const mkItem = (label: string, fn: () => void) => {
-      const it = document.createElement('div');
-      it.className = 'theme-picker-item';
-      it.textContent = label;
-      it.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); menu.remove(); });
-      menu.appendChild(it);
-    };
-
-    mkItem('保存当前主题为此项目配置', () => {
-      const list = loadCwdProfiles().filter(p => p.pattern !== cwd);
-      const themeIdx = TerminalView.getSavedThemeIndex();
-      const fontSize = parseInt(localStorage.getItem('terminal-font-size') || String(0), 10) || undefined;
-      list.push({ pattern: cwd, theme: themeIdx, fontSize });
-      saveCwdProfiles(list);
-      lastAppliedProfilePattern = null; // force re-apply
-      applyCwdProfile(cwd);
-    });
-    if (existing) {
-      mkItem(`清除此项目配置 (${existing.pattern})`, () => {
-        saveCwdProfiles(loadCwdProfiles().filter(p => p.pattern !== existing.pattern));
-        lastAppliedProfilePattern = null;
-      });
-    }
-    document.body.appendChild(menu);
-    const close = (ev: MouseEvent) => {
-      if (!menu.contains(ev.target as Node)) { menu.remove(); document.removeEventListener('mousedown', close, true); }
-    };
-    setTimeout(() => document.addEventListener('mousedown', close, true), 0);
-  });
-})();
-
 api.onCwdChanged((tabId, cwd) => {
   console.log('>>> CWD event:', tabId, cwd);
   // Ignore invalid cwd (garbage from terminal output)
   if (!isValidCwd(cwd)) return;
   appState.setCwd(tabId, cwd);
-  if (tabId === appState.activeTabId) applyCwdProfile(cwd);
   // 立即更新底栏
   if (tabId === appState.activeTabId) {
     const el = document.getElementById('status-cwd');
