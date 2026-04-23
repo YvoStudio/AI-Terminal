@@ -2,6 +2,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { CanvasAddon } from '@xterm/addon-canvas';
 import { SearchAddon } from '@xterm/addon-search';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { api } from '../api';
 import { appState } from './app-state';
@@ -12,6 +13,8 @@ export class TerminalView {
   terminal: Terminal;
   private fitAddon: FitAddon;
   private searchAddon: SearchAddon;
+  private serializeAddon: SerializeAddon;
+  private scrollbackSaveTimer: ReturnType<typeof setInterval> | null = null;
   readonly wrapper: HTMLElement;
   private searchBar: HTMLElement | null = null;
   private resizeObserver: ResizeObserver;
@@ -69,9 +72,28 @@ export class TerminalView {
 
     this.fitAddon = new FitAddon();
     this.searchAddon = new SearchAddon();
+    this.serializeAddon = new SerializeAddon();
     this.terminal.loadAddon(this.fitAddon);
     this.terminal.loadAddon(this.searchAddon);
+    this.terminal.loadAddon(this.serializeAddon);
     this.terminal.open(this.wrapper);
+
+    // Restore scrollback from previous session (skip in Quick Terminal mode — ephemeral)
+    const isQuick = new URLSearchParams(location.search).get('quick') === '1';
+    if (!isQuick) {
+      api.loadScrollback(tabId).then((sb) => {
+        if (sb && sb.length > 0) {
+          this.terminal.write(sb + '\r\n\x1b[2m── session restored ──\x1b[0m\r\n');
+        }
+      }).catch(() => {});
+      // Save scrollback every 10s (debounced) to bound disk writes
+      this.scrollbackSaveTimer = setInterval(() => {
+        try {
+          const data = this.serializeAddon.serialize({ scrollback: 2000 });
+          if (data) api.saveScrollback(tabId, data).catch(() => {});
+        } catch {}
+      }, 10_000);
+    }
 
     // Kitty Keyboard Protocol: register CSI u handlers for push/pop/set/query.
     // Apps like Neovim/Helix enable via `CSI > flags u` and expect to receive
@@ -553,7 +575,18 @@ export class TerminalView {
     this.resizeObserver.disconnect();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     if (this.scrollCheckTimer) clearInterval(this.scrollCheckTimer);
+    if (this.scrollbackSaveTimer) clearInterval(this.scrollbackSaveTimer);
+    // Best-effort final save so the next launch restores the freshest state.
+    try {
+      const data = this.serializeAddon.serialize({ scrollback: 2000 });
+      if (data) api.saveScrollback(this.tabId, data).catch(() => {});
+    } catch {}
     this.terminal.dispose();
     this.wrapper.remove();
+  }
+
+  /** Remove saved scrollback for this tab — call when the user closes the tab. */
+  purgeScrollback() {
+    api.deleteScrollback(this.tabId).catch(() => {});
   }
 }

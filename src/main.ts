@@ -93,8 +93,8 @@ function maybeShowSystemNotification(tabId: string): void {
   }
 }
 
-async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string; images?: string[] }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string, userRenamed?: boolean): Promise<string> {
-  const tabId = await api.createTerminal(cwd);
+async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string; images?: string[] }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string, userRenamed?: boolean, preferredId?: string): Promise<string> {
+  const tabId = await api.createTerminal(cwd, preferredId);
   const tab = appState.addTab(tabId);
   if (typeof name === 'string') tab.title = name;
   if (aiTool) tab.aiTool = aiTool;
@@ -669,7 +669,7 @@ function exitSplitMode() {
 function closeTab(tabId: string) {
   api.closeTerminal(tabId);
   const view = terminalViews.get(tabId);
-  if (view) { view.dispose(); terminalViews.delete(tabId); }
+  if (view) { view.purgeScrollback(); view.dispose(); terminalViews.delete(tabId); }
 
   const wasSplit = !!appState.splitState;
   // Handle split pane removal
@@ -2503,7 +2503,7 @@ async function init() {
         && (savedCwd.startsWith('/') || /^[A-Za-z]:/.test(savedCwd)) ? savedCwd : undefined;
       // Protect restored tab names from auto-rename (if name is not default "Terminal N")
       const isCustomName = saved.name && !saved.name.startsWith('Terminal ') && !saved.name.startsWith('↻ ');
-      await createTab(saved.name, saved.noteBlocks, cwd, shell, saved.aiTool, saved.userRenamed || isCustomName);
+      await createTab(saved.name, saved.noteBlocks, cwd, shell, saved.aiTool, saved.userRenamed || isCustomName, saved.id);
     }
   } else {
     createTab();

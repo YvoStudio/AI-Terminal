@@ -15,6 +15,7 @@ export interface SidebarEntry {
 }
 
 export interface SavedTab {
+  id?: string;
   name: string;
   noteBlocks?: Array<{ id: string; content: string; images?: string[] }>;
   shell?: 'cmd' | 'powershell' | 'wsl';
@@ -48,8 +49,8 @@ async function addTabListener(tabId: string, fn: UnlistenFn) {
 }
 
 export const api = {
-  async createTerminal(cwd?: string): Promise<string> {
-    return invoke<string>('create_terminal', { cwd: cwd ?? null });
+  async createTerminal(cwd?: string, preferredId?: string): Promise<string> {
+    return invoke<string>('create_terminal', { cwd: cwd ?? null, preferredId: preferredId ?? null });
   },
 
   writeTerminal(tabId: string, data: string): void {
@@ -113,6 +114,18 @@ export const api = {
     listen<{ tabId: string; title: string; body: string }>('terminal-notification', (e) => {
       cb(e.payload.tabId, e.payload.title, e.payload.body);
     });
+  },
+
+  async saveScrollback(tabId: string, data: string): Promise<void> {
+    return invoke('save_scrollback', { tabId, data });
+  },
+
+  async loadScrollback(tabId: string): Promise<string> {
+    return invoke<string>('load_scrollback', { tabId });
+  },
+
+  async deleteScrollback(tabId: string): Promise<void> {
+    return invoke('delete_scrollback', { tabId });
   },
 
   async openExternal(url: string): Promise<void> {

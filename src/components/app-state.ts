@@ -297,6 +297,7 @@ class AppState {
       const validCwd = cwd && cwd.length <= 500 && !cwd.includes('"') && !cwd.includes('\n') && !cwd.includes('\x1b')
         && (cwd.startsWith('/') || /^[A-Za-z]:/.test(cwd)) ? cwd : undefined;
       return {
+        id,
         name: tab.title,
         shell: tab.shell,
         noteBlocks: tab.noteBlocks.map(b => ({

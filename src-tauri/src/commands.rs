@@ -18,6 +18,8 @@ pub struct SavedNoteBlock {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedTab {
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     #[serde(default, rename = "noteBlocks", alias = "note_blocks")]
     pub note_blocks: Vec<SavedNoteBlock>,
@@ -127,8 +129,14 @@ pub fn create_terminal(
     pty_state: State<'_, Arc<RwLock<PtyManager>>>,
     parser_state: State<'_, Arc<Mutex<OutputParser>>>,
     cwd: Option<String>,
+    preferred_id: Option<String>,
 ) -> Result<String, String> {
-    let tab_id = Uuid::new_v4().to_string();
+    // Reuse the previous-session id when restoring a saved tab so that
+    // scrollback files keyed on tab id can be matched back up.
+    let tab_id = preferred_id
+        .filter(|s| !s.is_empty() && s.len() <= 64
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let initial_cwd = cwd.clone().unwrap_or_else(|| {
         std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()
@@ -273,6 +281,40 @@ pub fn save_tabs(app: AppHandle, tabs: Vec<SavedTab>) -> Result<(), String> {
     }
     let json = serde_json::to_string(&tabs).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+fn scrollback_path(app: &AppHandle, tab_id: &str) -> Option<PathBuf> {
+    // Sanitize: only allow alphanumerics and dashes in tab_id
+    if tab_id.is_empty() || tab_id.len() > 64
+        || !tab_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    Some(app_data_dir(app).join("scrollback").join(format!("{}.txt", tab_id)))
+}
+
+#[tauri::command]
+pub fn save_scrollback(app: AppHandle, tab_id: String, data: String) -> Result<(), String> {
+    let path = scrollback_path(&app, &tab_id).ok_or("invalid tab_id")?;
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent).ok(); }
+    // Cap at 2 MB to bound disk growth
+    let max = 2 * 1024 * 1024;
+    let trimmed = if data.len() > max { &data[data.len() - max..] } else { &data[..] };
+    fs::write(&path, trimmed).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn load_scrollback(app: AppHandle, tab_id: String) -> Result<String, String> {
+    let path = match scrollback_path(&app, &tab_id) { Some(p) => p, None => return Ok(String::new()) };
+    if !path.exists() { return Ok(String::new()); }
+    fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_scrollback(app: AppHandle, tab_id: String) -> Result<(), String> {
+    if let Some(path) = scrollback_path(&app, &tab_id) {
+        let _ = fs::remove_file(&path);
+    }
+    Ok(())
 }
 
 #[tauri::command]
