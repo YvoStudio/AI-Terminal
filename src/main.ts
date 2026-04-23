@@ -2006,6 +2006,10 @@ window.addEventListener('focus', () => {
 
 window.addEventListener('blur', () => {
   windowHasFocus = false;
+  // Re-sync badge: if tasks were already done-unseen while we were focused,
+  // the Rust-side focus gate suppressed the badge. Emit once now that we've
+  // left so the Dock gets the hint.
+  syncPendingAttention(false);
 });
 
 api.onTabStatusChanged((tabId, status) => {
