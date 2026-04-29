@@ -2229,6 +2229,17 @@ api.onTerminalProgress(async (tabId, state, progress) => {
   } catch (e) { console.warn('Progress update failed:', e); }
 });
 
+// Cmd+W / red X: close active tab instead of quitting; only really close
+// the window when no tabs remain.
+listen('window-close-requested', async () => {
+  if (appState.tabs.length > 1 && appState.activeTabId) {
+    closeTab(appState.activeTabId);
+  } else {
+    const { invoke } = await import('@tauri-apps/api/core');
+    invoke('force_close_window').catch(() => {});
+  }
+});
+
 // Re-focus terminal when window regains focus (fixes first Shift+key being swallowed)
 window.addEventListener('focus', () => {
   if (appState.activeTabId) {

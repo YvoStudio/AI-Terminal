@@ -6,7 +6,7 @@ mod pty_manager;
 use output_parser::OutputParser;
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex, RwLock};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 // Window visibility state for Alt+S toggle
@@ -83,9 +83,20 @@ pub fn run() {
             // served its purpose.
             if let Some(main) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
+                let win = main.clone();
                 main.on_window_event(move |ev| {
-                    if let tauri::WindowEvent::Focused(true) = ev {
-                        notification::clear_badge(&handle);
+                    match ev {
+                        tauri::WindowEvent::Focused(true) => {
+                            notification::clear_badge(&handle);
+                        }
+                        tauri::WindowEvent::CloseRequested { api, .. } => {
+                            // Intercept Cmd+W / red X: let the frontend close the
+                            // active tab first; it will call `force_close_window`
+                            // when no tabs remain.
+                            api.prevent_close();
+                            let _ = win.emit("window-close-requested", ());
+                        }
+                        _ => {}
                     }
                 });
             }
@@ -124,6 +135,7 @@ pub fn run() {
             commands::delete_claude_session,
             commands::delete_history_entry,
             commands::clear_history,
+            commands::force_close_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Terminal");

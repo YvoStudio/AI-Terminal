@@ -830,3 +830,11 @@ pub fn convert_image_path(file_path: String) -> Result<String, String> {
 
     Ok(dest_path.to_string_lossy().to_string())
 }
+
+#[tauri::command]
+pub fn force_close_window(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        win.destroy().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}

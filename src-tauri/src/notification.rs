@@ -8,6 +8,7 @@ use tauri::{AppHandle, Manager};
 /// clear any stale badge. The in-app tab-bar dot remains the sole signal.
 pub fn sync_pending_tasks(app: &AppHandle, pending_count: u32, request_attention: bool) {
     let focused = app.webview_windows().values().any(|w| w.is_focused().unwrap_or(false));
+    eprintln!(">>> sync_pending_tasks pending={} attn={} focused={}", pending_count, request_attention, focused);
     if let Some(win) = app.get_webview_window("main") {
         if request_attention && !focused {
             let _ = win.request_user_attention(Some(tauri::UserAttentionType::Informational));
