@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-14'
+            args: '--target aarch64-apple-darwin'
+            label: 'macos-arm64'
+          - platform: 'macos-14'
+            args: '--target x86_64-apple-darwin'
+            label: 'macos-x64'
+          - platform: 'ubuntu-22.04'
+            args: ''
+            label: 'linux'
+          - platform: 'windows-latest'
+            args: ''
+            label: 'windows'
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-14' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+          key: ${{ matrix.label }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build with tauri-action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'AI-Terminal ${{ github.ref_name }}'
+          releaseBody: |
+            See the assets to download this version and install.
+
+            **macOS**: 选择对应芯片架构(Apple Silicon → arm64, Intel → x64),拖入应用程序文件夹。首次打开如被 Gatekeeper 拦截,到「系统设置 → 隐私与安全性」点"仍要打开"。
+
+            **Windows**: 双击 `.msi` 或 `.exe` 安装。Win10 首次运行需要 WebView2 运行时(Win11 内置)。
+
+            **Linux**: `.deb`(Debian/Ubuntu)或 `.AppImage`(通用)。
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

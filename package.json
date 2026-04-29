@@ -2,7 +2,13 @@
   "name": "ai-terminal",
   "version": "0.2.2",
   "description": "Cross-platform AI terminal manager",
-  "private": true,
+  "license": "GPL-3.0-or-later",
+  "author": "yvo-zym",
+  "homepage": "https://github.com/yvo-zym/AI-Terminal",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yvo-zym/AI-Terminal.git"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
