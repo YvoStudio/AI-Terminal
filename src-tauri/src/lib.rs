@@ -132,10 +132,7 @@ pub fn run() {
 
             // Status-bar (menu-bar) tray icon. Click to toggle window visibility.
             // Icon is marked as a template so macOS auto-tints for light/dark modes.
-            let tray_icon = Image::from_path(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("icons/tray-icon.png"),
-            )?;
+            let tray_icon = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
             let _tray = TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon)
                 .icon_as_template(false)
