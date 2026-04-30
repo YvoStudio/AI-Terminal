@@ -2892,10 +2892,18 @@ function showQuickContextMenu(x: number, y: number, cmd: QuickCommand) {
   document.querySelectorAll('.quick-context-menu').forEach((m) => m.remove());
   const menu = document.createElement('div');
   menu.className = 'quick-context-menu';
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
+  menu.style.left = '0px';
+  menu.style.top = '0px';
+  menu.style.visibility = 'hidden';
   menu.innerHTML = `<div data-action="edit">编辑</div><div data-action="delete">删除</div>`;
   document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const margin = 4;
+  const maxLeft = window.innerWidth - rect.width - margin;
+  const maxTop = window.innerHeight - rect.height - margin;
+  menu.style.left = `${Math.max(margin, Math.min(x, maxLeft))}px`;
+  menu.style.top = `${Math.max(margin, Math.min(y, maxTop))}px`;
+  menu.style.visibility = '';
   const close = () => { menu.remove(); document.removeEventListener('click', close); };
   setTimeout(() => document.addEventListener('click', close), 0);
   menu.addEventListener('click', async (e) => {
