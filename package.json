@@ -12,9 +12,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "tauri": "tauri",
     "tauri:check": "cd src-tauri && cargo check",
-    "tauri:build": "cd src-tauri && cargo build",
-    "tauri:dev": "npx @tauri-apps/cli dev"
+    "tauri:dev": "tauri dev"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
