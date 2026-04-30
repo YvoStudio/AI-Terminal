@@ -59,6 +59,13 @@ export const api = {
     });
   },
 
+  /** Tell the backend the user actually typed into this tab — only call from
+   *  xterm's onData (real keystrokes), NOT from programmatic write_terminal
+   *  callers (paste injection, Kitty protocol replies, etc.) */
+  markTerminalInput(tabId: string): void {
+    invoke('mark_terminal_input', { tabId }).catch(() => {});
+  },
+
   resizeTerminal(tabId: string, cols: number, rows: number): void {
     invoke('resize_terminal', { tabId, cols, rows }).catch(() => {});
   },

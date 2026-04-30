@@ -234,6 +234,21 @@ pub fn write_terminal(
     mgr.write(&tab_id, &data)
 }
 
+/// Called by the frontend when the user actually types into xterm (the onData
+/// stream). Distinguishes real keystrokes from programmatic write_terminal
+/// callers (Kitty protocol responses, paste injection, history launch, etc.)
+/// so the idle-stream watcher only re-arms after a real user input.
+#[tauri::command]
+pub fn mark_terminal_input(
+    parser_state: State<'_, Arc<Mutex<OutputParser>>>,
+    tab_id: String,
+) -> Result<(), String> {
+    if let Ok(mut parser) = parser_state.lock() {
+        parser.mark_input(&tab_id);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn resize_terminal(
     state: State<'_, Arc<RwLock<PtyManager>>>,

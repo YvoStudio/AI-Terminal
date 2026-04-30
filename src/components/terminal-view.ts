@@ -437,6 +437,13 @@ export class TerminalView {
         console.log('Blocked Ctrl+C during selection');
         return;
       }
+      // Don't count terminal-emitted focus events (\e[I / \e[O, mode 1004) as
+      // user input — xterm fires onData for them on tab switch, which would
+      // otherwise reopen the executing-rearm gate and re-light the red dot.
+      const isAutoSequence = fixed === '\x1b[I' || fixed === '\x1b[O';
+      if (!isAutoSequence) {
+        api.markTerminalInput(tabId);
+      }
       api.writeTerminal(tabId, fixed);
     });
 

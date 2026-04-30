@@ -30,6 +30,8 @@ struct TabState {
     ai_tool: Option<String>,
     cwd: String,
     last_output_ms: u64,
+    last_input_ms: u64,
+    last_done_unseen_ms: u64,
 }
 
 impl TabState {
@@ -45,6 +47,8 @@ impl TabState {
             ai_tool: None,
             cwd: String::new(),
             last_output_ms: 0,
+            last_input_ms: 0,
+            last_done_unseen_ms: 0,
         }
     }
 
@@ -126,10 +130,20 @@ impl OutputParser {
         }
 
         // For AI tabs, any output chunk means streaming is in progress. The idle-stream
-        // watcher (lib.rs) will flip to DoneUnseen 1.5s after the last chunk.
+        // watcher (lib.rs) will flip to DoneUnseen after the last chunk.
+        // BUT: after we fire DoneUnseen once, refuse to re-arm executing until the user
+        // actually inputs something. Otherwise idle UI redraws (cursor blink, time
+        // counters) keep retriggering the red dot every couple of seconds.
         if state.ai_tool.is_some() && !state.was_executing {
-            state.was_executing = true;
-            on_status(tab_id.to_string(), TabStatus::Executing);
+            let allow = state.last_input_ms >= state.last_done_unseen_ms;
+            eprintln!(
+                "[exec-gate] tab={} last_input={} last_done={} allow={}",
+                tab_id, state.last_input_ms, state.last_done_unseen_ms, allow
+            );
+            if allow {
+                state.was_executing = true;
+                on_status(tab_id.to_string(), TabStatus::Executing);
+            }
         }
 
         // Parse OSC 7 (cwd notification) before stripping ANSI
@@ -146,12 +160,17 @@ impl OutputParser {
         for marker in extract_osc133(raw) {
             match marker {
                 Osc133::CommandStart => {
-                    state.was_executing = true;
-                    on_status(tab_id.to_string(), TabStatus::Executing);
+                    // Same input-gate as the chunk path: don't let idle redraws that
+                    // happen to include OSC 133 C re-arm executing after a done-unseen.
+                    if state.last_input_ms >= state.last_done_unseen_ms {
+                        state.was_executing = true;
+                        on_status(tab_id.to_string(), TabStatus::Executing);
+                    }
                 }
                 Osc133::CommandDone(_exit) => {
                     if state.was_executing {
                         state.was_executing = false;
+                        state.last_done_unseen_ms = now;
                         on_status(tab_id.to_string(), TabStatus::DoneUnseen);
                     }
                 }
@@ -173,7 +192,11 @@ impl OutputParser {
                 // Only the rename matters here. Claude Code emits the title repeatedly
                 // during redraws WITHOUT any status prefix, so we cannot use this to
                 // infer streaming state — the idle-stream watcher (lib.rs) handles that.
-                if has_status_prefix {
+                if has_status_prefix && state.last_input_ms >= state.last_done_unseen_ms {
+                    // Gate re-arming on user input: Claude Code keeps repainting the
+                    // title with a spinner prefix even when truly idle. Without this
+                    // gate, the idle-stream watcher re-fires DoneUnseen seconds after
+                    // the user already saw the tab.
                     state.was_executing = true;
                     on_status(tab_id.to_string(), TabStatus::Executing);
                 }
@@ -207,6 +230,7 @@ impl OutputParser {
             // the idle-stream watcher (lib.rs) instead — Claude emits BEL for
             // confirmation prompts mid-stream which would falsely flip status.
             state.was_executing = false;
+            state.last_done_unseen_ms = now;
             on_status(tab_id.to_string(), TabStatus::DoneUnseen);
         }
 
@@ -231,6 +255,7 @@ impl OutputParser {
             if state.ai_tool.is_some() && is_ai_waiting_prompt(trimmed) {
                 let next_status = if state.was_executing {
                     state.was_executing = false;
+                    state.last_done_unseen_ms = now;
                     TabStatus::DoneUnseen
                 } else {
                     TabStatus::Waiting
@@ -336,6 +361,7 @@ impl OutputParser {
         if state.ai_tool.is_some() && is_ai_waiting_prompt(state.buffer.trim()) {
             let next_status = if state.was_executing {
                 state.was_executing = false;
+                state.last_done_unseen_ms = now;
                 TabStatus::DoneUnseen
             } else {
                 TabStatus::Waiting
@@ -365,10 +391,20 @@ impl OutputParser {
                 && now.saturating_sub(state.last_output_ms) >= idle_threshold_ms
             {
                 state.was_executing = false;
+                state.last_done_unseen_ms = now;
                 done.push(tab_id.clone());
             }
         }
         done
+    }
+
+    /// Record that the user wrote to this tab's PTY. Used to gate re-arming of
+    /// the executing-status (and thus future idle done-unseen events) — without
+    /// this, idle UI redraws keep flipping the red dot back on.
+    pub fn mark_input(&mut self, tab_id: &str) {
+        let state = self.states.entry(tab_id.to_string()).or_insert_with(TabState::new);
+        state.last_input_ms = now_ms();
+        eprintln!("[mark_input] tab={} now={}", tab_id, state.last_input_ms);
     }
 }
 
