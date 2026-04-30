@@ -1009,21 +1009,6 @@ function sendNoteBlock(tabId: string, blockId: string) {
 }
 
 function showImagePreview(src: string) {
-  items.splice(
-    0,
-    items.length,
-    { label: '新建标签', detail: 'Ctrl+T', action: () => createTab() },
-    { label: '关闭标签', detail: 'Ctrl+W', action: () => { if (appState.activeTabId) closeTab(appState.activeTabId); } },
-    { label: '终端搜索', detail: 'Ctrl+F', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.toggleSearch(); } } },
-    { label: '切换笔记面板', action: () => setNotepadVisible(notepadEl.classList.contains('hidden')) },
-    { label: '清空终端', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.clear(); } } },
-    ...themes.map((t, i) => ({ label: `主题: ${t.name}`, action: () => applyThemeToAll(i) })),
-    ...appState.tabOrder.map((id) => {
-      const tab = appState.tabs.get(id)!;
-      return { label: `切换到 ${tab.title}`, action: () => switchToTab(id) };
-    }),
-  );
-
   const overlay = document.createElement('div');
   overlay.className = 'image-preview-overlay';
   const img = document.createElement('img');
@@ -1032,6 +1017,7 @@ function showImagePreview(src: string) {
   overlay.addEventListener('click', () => overlay.remove());
   document.body.appendChild(overlay);
 }
+(window as any).showImagePreview = showImagePreview;
 
 let lastRenderedTabId: string | null = null;
 let lastRenderedBlockCount = -1;
@@ -2801,3 +2787,124 @@ document.addEventListener('drop', (e) => {
   dragCounter = 0;
   document.body.style.opacity = '';
 });
+
+// Quick commands: user-defined snippet chips in the bottom bar.
+// Click chip → inject content into active terminal (no auto Enter).
+// Right-click → edit/delete. + button → create.
+type QuickCommand = { id: string; label: string; content: string };
+let quickCommands: QuickCommand[] = [];
+
+(async () => {
+  const container = document.getElementById('quick-commands');
+  const addBtn = document.getElementById('btn-quick-add');
+  if (!container || !addBtn) return;
+
+  try {
+    const raw = await api.loadQuickCommands();
+    quickCommands = JSON.parse(raw || '[]');
+  } catch (e) {
+    console.warn('[QuickCommands] load failed:', e);
+    quickCommands = [];
+  }
+  renderQuickCommands();
+
+  addBtn.addEventListener('click', () => openQuickModal());
+})();
+
+function renderQuickCommands() {
+  const container = document.getElementById('quick-commands');
+  if (!container) return;
+  container.innerHTML = '';
+  for (const cmd of quickCommands) {
+    const chip = document.createElement('span');
+    chip.className = 'quick-chip';
+    chip.textContent = cmd.label;
+    chip.title = cmd.content;
+    chip.addEventListener('click', () => {
+      if (!appState.activeTabId) return;
+      api.writeTerminal(appState.activeTabId, cmd.content);
+    });
+    chip.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showQuickContextMenu(e.clientX, e.clientY, cmd);
+    });
+    container.appendChild(chip);
+  }
+}
+
+async function persistQuickCommands() {
+  try { await api.saveQuickCommands(JSON.stringify(quickCommands)); }
+  catch (e) { console.warn('[QuickCommands] save failed:', e); }
+}
+
+function openQuickModal(existing?: QuickCommand) {
+  const overlay = document.createElement('div');
+  overlay.className = 'quick-modal-overlay';
+  const modal = document.createElement('div');
+  modal.className = 'quick-modal';
+  modal.innerHTML = `
+    <h3>${existing ? '编辑快捷输入' : '新增快捷输入'}</h3>
+    <label>名称</label>
+    <input type="text" id="qc-label" placeholder="例如: claude --skip-perms" maxlength="40" />
+    <label>内容(点击 chip 时注入终端)</label>
+    <textarea id="qc-content" rows="3" placeholder="claude --dangerously-skip-permissions"></textarea>
+    <div class="quick-modal-actions">
+      <button id="qc-cancel">取消</button>
+      <button id="qc-save" class="primary">保存</button>
+    </div>
+  `;
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  const labelEl = modal.querySelector<HTMLInputElement>('#qc-label')!;
+  const contentEl = modal.querySelector<HTMLTextAreaElement>('#qc-content')!;
+  if (existing) {
+    labelEl.value = existing.label;
+    contentEl.value = existing.content;
+  }
+  setTimeout(() => labelEl.focus(), 0);
+
+  const close = () => overlay.remove();
+  modal.querySelector('#qc-cancel')!.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+  modal.querySelector('#qc-save')!.addEventListener('click', async () => {
+    const label = labelEl.value.trim();
+    const content = contentEl.value;
+    if (!label || !content) return;
+    if (existing) {
+      existing.label = label;
+      existing.content = content;
+    } else {
+      quickCommands.push({
+        id: Math.random().toString(36).slice(2, 10),
+        label,
+        content,
+      });
+    }
+    await persistQuickCommands();
+    renderQuickCommands();
+    close();
+  });
+}
+
+function showQuickContextMenu(x: number, y: number, cmd: QuickCommand) {
+  document.querySelectorAll('.quick-context-menu').forEach((m) => m.remove());
+  const menu = document.createElement('div');
+  menu.className = 'quick-context-menu';
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  menu.innerHTML = `<div data-action="edit">编辑</div><div data-action="delete">删除</div>`;
+  document.body.appendChild(menu);
+  const close = () => { menu.remove(); document.removeEventListener('click', close); };
+  setTimeout(() => document.addEventListener('click', close), 0);
+  menu.addEventListener('click', async (e) => {
+    const action = (e.target as HTMLElement).dataset.action;
+    if (action === 'edit') openQuickModal(cmd);
+    else if (action === 'delete') {
+      quickCommands = quickCommands.filter((c) => c.id !== cmd.id);
+      await persistQuickCommands();
+      renderQuickCommands();
+    }
+  });
+}

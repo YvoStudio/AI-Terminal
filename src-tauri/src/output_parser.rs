@@ -29,6 +29,7 @@ struct TabState {
     auto_renamed: bool,
     ai_tool: Option<String>,
     cwd: String,
+    last_output_ms: u64,
 }
 
 impl TabState {
@@ -43,6 +44,7 @@ impl TabState {
             auto_renamed: false,
             ai_tool: None,
             cwd: String::new(),
+            last_output_ms: 0,
         }
     }
 
@@ -104,6 +106,31 @@ impl OutputParser {
             .entry(tab_id.to_string())
             .or_insert_with(TabState::new);
         let now = now_ms();
+        state.last_output_ms = now;
+
+        // Output-side AI detection (first, so subsequent logic can use ai_tool).
+        // Catches Claude / Aider sessions started outside our input tracking
+        // (resume, scripts, history-launched tabs). Trigger on UI markers.
+        if state.ai_tool.is_none() {
+            // ⏺ (U+23FA) and ✻ (U+273B) are Claude Code's distinctive UI glyphs,
+            // unlikely to appear in plain shell output. Box-drawing corners + image
+            // refs are additional signals.
+            if raw.contains('⏺') || raw.contains('✻')
+                || raw.contains("╭─") || raw.contains("╰─")
+                || raw.contains("[Image #") || raw.contains("? for shortcuts")
+            {
+                eprintln!("AI detected via output markers in tab {}", tab_id);
+                state.ai_tool = Some("claude".to_string());
+                on_ai_detected(tab_id.to_string(), state.cwd.clone(), "claude".to_string());
+            }
+        }
+
+        // For AI tabs, any output chunk means streaming is in progress. The idle-stream
+        // watcher (lib.rs) will flip to DoneUnseen 1.5s after the last chunk.
+        if state.ai_tool.is_some() && !state.was_executing {
+            state.was_executing = true;
+            on_status(tab_id.to_string(), TabStatus::Executing);
+        }
 
         // Parse OSC 7 (cwd notification) before stripping ANSI
         // Format: \x1b]7;file://hostname/path\x07  or  \x1b]7;file://hostname/path\x1b\\
@@ -143,13 +170,13 @@ impl OutputParser {
         if let Some((title, has_status_prefix)) = extract_osc_title(raw) {
             eprintln!("OSC title detected: '{}'", title);
             if state.ai_tool.is_some() && !title.is_empty() {
-                let next_status = if has_status_prefix {
+                // Only the rename matters here. Claude Code emits the title repeatedly
+                // during redraws WITHOUT any status prefix, so we cannot use this to
+                // infer streaming state — the idle-stream watcher (lib.rs) handles that.
+                if has_status_prefix {
                     state.was_executing = true;
-                    TabStatus::Executing
-                } else {
-                    TabStatus::Waiting
-                };
-                on_status(tab_id.to_string(), next_status);
+                    on_status(tab_id.to_string(), TabStatus::Executing);
+                }
                 on_rename(tab_id.to_string(), title);
             }
         }
@@ -175,7 +202,10 @@ impl OutputParser {
             }
             found
         };
-        if has_standalone_bell {
+        if has_standalone_bell && state.was_executing && state.ai_tool.is_none() {
+            // Plain shells: BEL after executing means command finished. AI tabs use
+            // the idle-stream watcher (lib.rs) instead — Claude emits BEL for
+            // confirmation prompts mid-stream which would falsely flip status.
             state.was_executing = false;
             on_status(tab_id.to_string(), TabStatus::DoneUnseen);
         }
@@ -321,6 +351,24 @@ impl OutputParser {
             .or_insert_with(TabState::new);
         state.mute_until = now_ms() + ms;
         state.buffer.clear();
+    }
+
+    /// Scan all tabs and return tab_ids whose AI session has been idle long enough
+    /// to consider the streaming finished. Caller is responsible for emitting status events.
+    pub fn collect_idle_done(&mut self, idle_threshold_ms: u64) -> Vec<String> {
+        let now = now_ms();
+        let mut done = Vec::new();
+        for (tab_id, state) in self.states.iter_mut() {
+            if state.was_executing
+                && state.ai_tool.is_some()
+                && state.last_output_ms > 0
+                && now.saturating_sub(state.last_output_ms) >= idle_threshold_ms
+            {
+                state.was_executing = false;
+                done.push(tab_id.clone());
+            }
+        }
+        done
     }
 }
 

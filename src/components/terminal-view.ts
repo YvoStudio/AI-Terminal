@@ -4,6 +4,7 @@ import { CanvasAddon } from '@xterm/addon-canvas';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { api } from '../api';
 import { appState } from './app-state';
 import { themes } from './themes';
@@ -284,19 +285,31 @@ export class TerminalView {
       if ((e.ctrlKey || e.metaKey) && key === 'v') {
         if (e.type === 'keydown') {
           (async () => {
+            const tab = appState.tabs.get(tabId);
+            // Detect AI/TUI: parser-set aiTool, or alt-buffer (vim/htop/etc. also TUI).
+            // Output-side parser detection (commands.rs) covers Claude sessions started
+            // outside input tracking (resume, history-launched tabs).
+            const bufType = this.terminal.buffer.active.type;
+            const isAI = !!tab?.aiTool || bufType === 'alternate';
             try {
-              // Try image first
               const imgPath = await api.readClipboardImage();
               if (imgPath) {
-                api.writeTerminal(tabId, imgPath + ' ');
+                if (isAI) {
+                  // TUI apps (Claude Code, Aider) read the OS clipboard themselves on bracketed
+                  // paste and convert image clipboard contents to [Image #N]. Send an empty
+                  // bracketed paste sequence as the trigger; track the path locally so
+                  // [Image #N] tokens can be clicked for preview.
+                  appState.addPastedImage(tabId, imgPath);
+                  api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
+                } else {
+                  // Plain shell: write absolute path (useful for `cat`, `cp`, etc.)
+                  api.writeTerminal(tabId, imgPath + ' ');
+                }
                 return;
               }
             } catch (err) {
-              // Image read failed - may not be an image or format not supported
-              // Fall back to text paste
               console.log('[Paste] Image read failed:', err);
             }
-            // Fall back to text
             try {
               const text = await api.readClipboardText();
               if (text) this.terminal.paste(text);
@@ -370,6 +383,40 @@ export class TerminalView {
     this.terminal.unicode.activeVersion = '11';
 
     try { this.terminal.loadAddon(new CanvasAddon()); } catch {}
+
+    // [Image #N] link provider — make Claude Code's image refs clickable to preview the original paste.
+    this.terminal.registerLinkProvider({
+      provideLinks: (lineNumber, callback) => {
+        const buf = this.terminal.buffer.active;
+        const line = buf.getLine(lineNumber - 1);
+        if (!line) { callback(undefined); return; }
+        const text = line.translateToString(true);
+        const re = /\[Image #(\d+)\]/g;
+        const links: any[] = [];
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text)) !== null) {
+          const n = parseInt(m[1], 10);
+          const startCol = m.index + 1;
+          const endCol = m.index + m[0].length;
+          links.push({
+            range: {
+              start: { x: startCol, y: lineNumber },
+              end: { x: endCol, y: lineNumber },
+            },
+            text: m[0],
+            activate: () => {
+              const tab = appState.tabs.get(tabId);
+              const paths = tab?.pastedImages || [];
+              const path = paths[n - 1] || paths[paths.length - 1];
+              if (!path) return;
+              const preview = (window as any).showImagePreview;
+              if (typeof preview === 'function') preview(convertFileSrc(path));
+            },
+          });
+        }
+        callback(links.length ? links : undefined);
+      },
+    });
 
     // Input → Rust backend
     this.terminal.onData((data) => {
@@ -523,8 +570,7 @@ export class TerminalView {
       const savedViewportY = buf.viewportY;
 
       this.fitAddon.fit();
-      const safeCols = Math.max(1, this.terminal.cols - 1);
-      api.resizeTerminal(this.tabId, safeCols, this.terminal.rows);
+      api.resizeTerminal(this.tabId, this.terminal.cols, this.terminal.rows);
 
       // If user hasn't scrolled up, always stay at bottom
       if (!this.userScrolledUp) {

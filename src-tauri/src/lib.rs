@@ -6,7 +6,11 @@ mod pty_manager;
 use output_parser::OutputParser;
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex, RwLock};
-use tauri::{Emitter, Manager};
+use tauri::{
+    image::Image,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager,
+};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 // Window visibility state for Alt+S toggle
@@ -36,8 +40,32 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             app.manage(Arc::new(RwLock::new(PtyManager::new())));
-            app.manage(Arc::new(Mutex::new(OutputParser::new())));
+            let parser = Arc::new(Mutex::new(OutputParser::new()));
+            app.manage(parser.clone());
             app.manage(Arc::new(Mutex::new(WindowState { visible: true })));
+
+            // Idle-stream watcher: detect when AI tabs stop receiving output and emit
+            // done-unseen so the tab gets a red dot. Claude Code doesn't reliably emit
+            // BEL or OSC title at end-of-turn, so polling for silence is our best signal.
+            let idle_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let done = {
+                        let Ok(mut p) = parser.lock() else { continue };
+                        // Threshold must exceed the frontend's `isLikelyStillExecuting`
+                        // window (1800ms) so the debounce in main.ts releases instead of
+                        // looping back to executing.
+                        p.collect_idle_done(2000)
+                    };
+                    for tid in done {
+                        let _ = idle_handle.emit("tab-status-changed", serde_json::json!({
+                            "tabId": tid,
+                            "status": "done-unseen"
+                        }));
+                    }
+                }
+            });
 
             let alt_s = Shortcut::new(Some(Modifiers::ALT), Code::KeyS);
             app.global_shortcut().on_shortcut(alt_s, |app, _shortcut, event| {
@@ -90,16 +118,48 @@ pub fn run() {
                             notification::clear_badge(&handle);
                         }
                         tauri::WindowEvent::CloseRequested { api, .. } => {
-                            // Intercept Cmd+W / red X: let the frontend close the
-                            // active tab first; it will call `force_close_window`
-                            // when no tabs remain.
+                            // Red X / Cmd+Q: hide to status bar instead of quitting.
+                            // App keeps running; click the tray icon to bring it back.
+                            // (Cmd+W still closes the active tab via the frontend's own
+                            // keyboard handler, not via this window event.)
                             api.prevent_close();
-                            let _ = win.emit("window-close-requested", ());
+                            let _ = win.hide();
                         }
                         _ => {}
                     }
                 });
             }
+
+            // Status-bar (menu-bar) tray icon. Click to toggle window visibility.
+            // Icon is marked as a template so macOS auto-tints for light/dark modes.
+            let tray_icon = Image::from_path(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("icons/tray-icon.png"),
+            )?;
+            let _tray = TrayIconBuilder::with_id("main-tray")
+                .icon(tray_icon)
+                .icon_as_template(false)
+                .tooltip("AI Terminal")
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(win) = tray.app_handle().get_webview_window("main") {
+                            let visible = win.is_visible().unwrap_or(false);
+                            let focused = win.is_focused().unwrap_or(false);
+                            if visible && focused {
+                                let _ = win.hide();
+                            } else {
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
 
             Ok(())
         })
@@ -136,6 +196,8 @@ pub fn run() {
             commands::delete_history_entry,
             commands::clear_history,
             commands::force_close_window,
+            commands::load_quick_commands,
+            commands::save_quick_commands,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Terminal");

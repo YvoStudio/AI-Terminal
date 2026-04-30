@@ -64,6 +64,26 @@ fn history_file(app: &AppHandle) -> PathBuf {
     app_data_dir(app).join("tab-history.json")
 }
 
+fn quick_commands_file(app: &AppHandle) -> PathBuf {
+    app_data_dir(app).join("quick-commands.json")
+}
+
+#[tauri::command]
+pub fn load_quick_commands(app: AppHandle) -> Result<String, String> {
+    let path = quick_commands_file(&app);
+    if !path.exists() {
+        return Ok("[]".to_string());
+    }
+    fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_quick_commands(app: AppHandle, json: String) -> Result<(), String> {
+    let dir = app_data_dir(&app);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(quick_commands_file(&app), json).map_err(|e| e.to_string())
+}
+
 // ── Terminal commands ──────────────────────────────────────────────────────
 
 fn make_pty_callback(

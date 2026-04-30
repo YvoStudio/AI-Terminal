@@ -33,6 +33,7 @@ export interface TabState {
   noteBlocks: NoteBlock[];
   cwd: string;
   userRenamed: boolean; // true if user manually renamed — blocks auto-rename
+  pastedImages: string[]; // ordered list of clipboard-image paste paths (for [Image #N] preview)
 }
 
 class AppState {
@@ -50,7 +51,7 @@ class AppState {
     this.tabCounter++;
     const tab: TabState = {
       id, title: `Terminal ${this.tabCounter}`, status: 'active', shell: 'cmd',
-      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false,
+      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false, pastedImages: [],
     };
     this.tabs.set(id, tab);
     this.tabOrder.push(id);
@@ -122,6 +123,19 @@ class AppState {
     if (!cwd.startsWith('/') && !/^[A-Za-z]:/.test(cwd)) return;
     tab.cwd = cwd;
     this.notify();
+  }
+
+  addPastedImage(id: string, path: string) {
+    const tab = this.tabs.get(id);
+    if (!tab) return;
+    if (!tab.pastedImages) tab.pastedImages = [];
+    tab.pastedImages.push(path);
+    if (tab.pastedImages.length > 50) tab.pastedImages.shift();
+  }
+
+  resetPastedImages(id: string) {
+    const tab = this.tabs.get(id);
+    if (tab) tab.pastedImages = [];
   }
 
   addSidebarEntry(id: string, entry: SidebarEntry) {

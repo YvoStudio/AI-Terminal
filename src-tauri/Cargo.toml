@@ -1,6 +1,6 @@
 [package]
 name = "ai-terminal"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Cross-platform AI terminal manager"
 authors = ["yvo-zym"]
@@ -16,7 +16,7 @@ name = "ai-terminal"
 path = "src/main.rs"
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"

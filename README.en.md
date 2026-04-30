@@ -78,11 +78,6 @@ sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
   - Bridged to the frontend through Tauri commands
 - **Plugins** — `tauri-plugin-global-shortcut`, `tauri-plugin-notification`, `tauri-plugin-shell`, `tauri-plugin-dialog`
 
-## Documentation
-
-- [`AGENTS.md`](./AGENTS.md) — guide for AI agents working on this codebase, architecture notes, code style
-- [`docs/`](./docs/) — design docs and development notes
-
 ## Contributing
 
 Issues and pull requests are welcome. **By submitting a pull request you agree to assign the copyright and re-licensing rights (including the right to relicense under non-GPL terms) of your contribution to the project author, free of charge.** This keeps the project under a single copyright holder so the author can relicense the code if needed (e.g. for App Store distribution).

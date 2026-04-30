@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nickel-org/tauri/v2/crates/tauri-utils/schema.json",
   "productName": "AI Terminal",
-  "version": "0.2.2",
-  "identifier": "com.ai-terminal.app",
+  "version": "0.3.0",
+  "identifier": "io.github.yvo-zym.ai-terminal",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1450",

@@ -78,11 +78,6 @@ sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
   - 通过 Tauri command 桥接前端
 - **平台特性** — `tauri-plugin-global-shortcut`(快捷键)、`tauri-plugin-notification`(通知)、`tauri-plugin-shell`、`tauri-plugin-dialog`
 
-## 文档
-
-- [`AGENTS.md`](./AGENTS.md) — AI 代理开发指南、架构说明、代码风格
-- [`docs/`](./docs/) — 设计文档、开发笔记
-
 ## 贡献
 
 欢迎提 Issue 和 PR。**提交 Pull Request 即视为你同意:将所贡献代码的版权及再许可权(包括以非 GPL 协议再发布的权利)无偿授予项目作者**。这样作者可以保持单一版权人身份,在未来需要时(如 App Store 上架等场景)对代码进行重新授权。

@@ -204,6 +204,14 @@ export const api = {
     return invoke<string>('convert_image_path', { filePath });
   },
 
+  async loadQuickCommands(): Promise<string> {
+    return invoke<string>('load_quick_commands');
+  },
+
+  async saveQuickCommands(json: string): Promise<void> {
+    return invoke('save_quick_commands', { json });
+  },
+
   async listClaudeSessions(projectCwd?: string): Promise<ClaudeSession[]> {
     return invoke<ClaudeSession[]>('list_claude_sessions', { projectCwd: projectCwd ?? null });
   },
