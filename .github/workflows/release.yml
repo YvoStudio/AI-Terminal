@@ -66,13 +66,19 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'AI-Terminal ${{ github.ref_name }}'
           releaseBody: |
             See the assets to download this version and install.
 
-            **macOS**: 选择对应芯片架构(Apple Silicon → arm64, Intel → x64),拖入应用程序文件夹。首次打开如被 Gatekeeper 拦截,到「系统设置 → 隐私与安全性」点"仍要打开"。
+            **macOS**: 选择对应芯片架构(Apple Silicon → arm64, Intel → x64),拖入应用程序文件夹即可。已 Apple 签名+公证。
 
             **Windows**: 双击 `.msi` 或 `.exe` 安装。Win10 首次运行需要 WebView2 运行时(Win11 内置)。
 
