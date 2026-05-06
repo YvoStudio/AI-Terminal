@@ -8,6 +8,7 @@ use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex, RwLock};
 use tauri::{
     image::Image,
+    menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
@@ -133,10 +134,19 @@ pub fn run() {
             // Status-bar (menu-bar) tray icon. Click to toggle window visibility.
             // Icon is marked as a template so macOS auto-tints for light/dark modes.
             let tray_icon = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
+            let quit_item = MenuItemBuilder::with_id("tray-quit", "退出 AI Terminal").build(app)?;
+            let tray_menu = MenuBuilder::new(app).item(&quit_item).build()?;
             let _tray = TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon)
                 .icon_as_template(false)
                 .tooltip("AI Terminal")
+                .menu(&tray_menu)
+                .menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    if event.id() == "tray-quit" {
+                        app.exit(0);
+                    }
+                })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
