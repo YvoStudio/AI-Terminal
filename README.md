@@ -33,7 +33,7 @@
 
 ## 安装
 
-到 [Releases](https://github.com/yvo-zym/AI-Terminal/releases) 下载对应平台的安装包。
+到 [Releases](https://github.com/YvoStudio/AI-Terminal/releases) 下载对应平台的安装包。
 
 ### macOS
 
@@ -55,7 +55,7 @@
 需要 [Rust](https://rustup.rs/) 1.77+ 和 Node.js 18+:
 
 ```bash
-git clone git@github.com:yvo-zym/AI-Terminal.git
+git clone git@github.com:YvoStudio/AI-Terminal.git
 cd AI-Terminal
 npm install
 npm run tauri:dev          # 开发模式

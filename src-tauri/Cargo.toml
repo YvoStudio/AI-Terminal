@@ -3,9 +3,9 @@ name = "ai-terminal"
 version = "0.3.2"
 edition = "2021"
 description = "Cross-platform AI terminal manager"
-authors = ["yvo-zym"]
+authors = ["YvoStudio"]
 license = "GPL-3.0-or-later"
-repository = "https://github.com/yvo-zym/AI-Terminal"
+repository = "https://github.com/YvoStudio/AI-Terminal"
 
 [lib]
 name = "ai_terminal_lib"

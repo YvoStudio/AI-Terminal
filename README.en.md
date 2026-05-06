@@ -33,7 +33,7 @@ Cross-platform tabbed terminal, deeply tuned for AI CLI tools (Claude Code in pa
 
 ## Install
 
-Download the package for your platform from [Releases](https://github.com/yvo-zym/AI-Terminal/releases).
+Download the package for your platform from [Releases](https://github.com/YvoStudio/AI-Terminal/releases).
 
 ### macOS
 
@@ -55,7 +55,7 @@ Runtime deps: `webkit2gtk-4.1`, `libappindicator3` (for tray icon).
 Requires [Rust](https://rustup.rs/) 1.77+ and Node.js 18+:
 
 ```bash
-git clone git@github.com:yvo-zym/AI-Terminal.git
+git clone git@github.com:YvoStudio/AI-Terminal.git
 cd AI-Terminal
 npm install
 npm run tauri:dev          # development
