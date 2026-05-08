@@ -1008,13 +1008,74 @@ function sendNoteBlock(tabId: string, blockId: string) {
   removeNoteBlock(tabId, blockId);
 }
 
-function showImagePreview(src: string) {
+function showImagePreview(srcOrList: string | string[], startIndex = 0) {
+  const list = Array.isArray(srcOrList) ? srcOrList : [srcOrList];
+  if (list.length === 0) return;
+  let idx = Math.max(0, Math.min(startIndex, list.length - 1));
+
   const overlay = document.createElement('div');
   overlay.className = 'image-preview-overlay';
   const img = document.createElement('img');
-  img.src = src;
+  img.src = list[idx];
+  img.addEventListener('click', (e) => e.stopPropagation());
   overlay.appendChild(img);
-  overlay.addEventListener('click', () => overlay.remove());
+
+  const counter = document.createElement('div');
+  counter.className = 'image-preview-counter';
+  const updateCounter = () => { counter.textContent = `${idx + 1} / ${list.length}`; };
+  updateCounter();
+  if (list.length > 1) overlay.appendChild(counter);
+
+  const closeBtn = document.createElement('div');
+  closeBtn.className = 'image-preview-btn close';
+  closeBtn.textContent = '×';
+  closeBtn.title = '关闭 (Esc)';
+  closeBtn.addEventListener('click', (e) => { e.stopPropagation(); close(); });
+  overlay.appendChild(closeBtn);
+
+  const go = (delta: number) => {
+    idx = (idx + delta + list.length) % list.length;
+    img.src = list[idx];
+    updateCounter();
+  };
+
+  if (list.length > 1) {
+    const prevBtn = document.createElement('div');
+    prevBtn.className = 'image-preview-btn prev';
+    prevBtn.textContent = '‹';
+    prevBtn.title = '上一张 (←)';
+    prevBtn.addEventListener('click', (e) => { e.stopPropagation(); go(-1); });
+    overlay.appendChild(prevBtn);
+
+    const nextBtn = document.createElement('div');
+    nextBtn.className = 'image-preview-btn next';
+    nextBtn.textContent = '›';
+    nextBtn.title = '下一张 (→)';
+    nextBtn.addEventListener('click', (e) => { e.stopPropagation(); go(1); });
+    overlay.appendChild(nextBtn);
+  }
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    } else if (e.key === 'ArrowLeft' && list.length > 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      go(-1);
+    } else if (e.key === 'ArrowRight' && list.length > 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      go(1);
+    }
+  };
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey, true);
+  };
+  overlay.addEventListener('click', close);
+  document.addEventListener('keydown', onKey, true);
   document.body.appendChild(overlay);
 }
 (window as any).showImagePreview = showImagePreview;
@@ -1127,7 +1188,9 @@ function renderNoteBlocks(force = false) {
     if (block.images && block.images.length > 0) {
       const imgContainer = document.createElement('div');
       imgContainer.className = 'note-block-images';
-      for (const imgPath of block.images) {
+      for (let i = 0; i < block.images.length; i++) {
+        const imgPath = block.images[i];
+        const imgIndex = i;
         const imgWrap = document.createElement('div');
         imgWrap.className = 'note-block-img-wrap';
         const img = document.createElement('img');
@@ -1136,7 +1199,8 @@ function renderNoteBlocks(force = false) {
         img.style.cursor = 'pointer';
         img.addEventListener('click', (e) => {
           e.stopPropagation();
-          showImagePreview(convertFileSrc(imgPath));
+          const all = (block.images || []).map(p => convertFileSrc(p));
+          showImagePreview(all, imgIndex);
         });
         const rmBtn = document.createElement('button');
         rmBtn.className = 'note-block-img-remove';

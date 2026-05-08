@@ -175,6 +175,12 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .note-block-img-wrap:hover .note-block-img-remove { opacity: 1; }
 .image-preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center; z-index: 10000; cursor: pointer; }
 .image-preview-overlay img { max-width: 90vw; max-height: 90vh; border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.5); }
+.image-preview-btn { position: fixed; background: rgba(0,0,0,0.5); color: #fff; border: 1px solid rgba(255,255,255,0.2); border-radius: 50%; width: 44px; height: 44px; font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; user-select: none; transition: background 0.15s; }
+.image-preview-btn:hover { background: rgba(255,255,255,0.15); }
+.image-preview-btn.prev { left: 24px; top: 50%; transform: translateY(-50%); }
+.image-preview-btn.next { right: 24px; top: 50%; transform: translateY(-50%); }
+.image-preview-btn.close { right: 24px; top: 24px; }
+.image-preview-counter { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); color: #fff; background: rgba(0,0,0,0.5); padding: 4px 12px; border-radius: 12px; font-size: 12px; user-select: none; }
 .notepad-empty { color: var(--text-muted); font-size: 12px; text-align: center; padding: 20px; cursor: pointer; border-radius: 6px; }
 .notepad-empty:hover { background: var(--bg-hover); color: var(--text-secondary); }
 #notepad-resize-handle { width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0; }

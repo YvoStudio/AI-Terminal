@@ -407,10 +407,11 @@ export class TerminalView {
             activate: () => {
               const tab = appState.tabs.get(tabId);
               const paths = tab?.pastedImages || [];
-              const path = paths[n - 1] || paths[paths.length - 1];
-              if (!path) return;
+              if (paths.length === 0) return;
+              const startIdx = Math.max(0, Math.min(n - 1, paths.length - 1));
+              const all = paths.map(p => convertFileSrc(p));
               const preview = (window as any).showImagePreview;
-              if (typeof preview === 'function') preview(convertFileSrc(path));
+              if (typeof preview === 'function') preview(all, startIdx);
             },
           });
         }
