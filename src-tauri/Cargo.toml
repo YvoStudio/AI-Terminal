@@ -1,6 +1,6 @@
 [package]
 name = "ai-terminal"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 description = "Cross-platform AI terminal manager"
 authors = ["YvoStudio"]
@@ -30,6 +30,8 @@ base64 = "0.22"
 arboard = "3"
 png = "0.17"
 encoding_rs = "0.8"
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

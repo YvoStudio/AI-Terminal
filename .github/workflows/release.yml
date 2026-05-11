@@ -72,6 +72,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'AI-Terminal ${{ github.ref_name }}'
@@ -83,6 +85,22 @@ jobs:
             **Windows**: 双击 `.msi` 或 `.exe` 安装。Win10 首次运行需要 WebView2 运行时(Win11 内置)。
 
             **Linux**: `.deb`(Debian/Ubuntu)或 `.AppImage`(通用)。
+
+            > 老版本(已安装)将在启动时自动收到本次更新提示。
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  publish-updater-manifest:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: node .github/scripts/generate-latest-json.mjs

@@ -2415,6 +2415,9 @@ function toggleCommandPalette() {
     { label: '终端搜索', detail: '⌘F', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.toggleSearch(); } } },
     { label: '切换笔记面板', action: () => setNotepadVisible(notepadEl.classList.contains('hidden')) },
     { label: '清空终端', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.clear(); } } },
+    { label: '检查更新', action: () => {
+      import('./components/updater').then(({ checkForUpdates }) => checkForUpdates(false));
+    } },
   ];
   // Split items
   if (appState.splitState) {
@@ -2704,6 +2707,13 @@ async function init() {
   } else {
     createTab();
   }
+
+  // 静默检查更新（主窗口启动 5 秒后，避免拖慢启动）
+  setTimeout(() => {
+    import('./components/updater').then(({ checkForUpdates }) => {
+      checkForUpdates(true).catch(() => {});
+    });
+  }, 5000);
 }
 
 init();
