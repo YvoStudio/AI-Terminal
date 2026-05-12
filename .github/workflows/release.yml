@@ -75,17 +75,48 @@ jobs:
           else
             RANGE="${PREV_TAG}..HEAD"
           fi
+
+          ZH_FILE=$(mktemp)
+          EN_FILE=$(mktemp)
+          HAS_EN=0
+
+          # 每个 commit 一段,分隔符 \x1F (single record sep);subject 在前,body 在后用 \x1E 分
+          IFS=$'\n'
+          for record in $(git log "$RANGE" --no-merges --pretty=format:'%H%x1E%s%x1E%b%x1F' | tr '\x1F' '\n'); do
+            [ -z "$record" ] && continue
+            subj=$(printf '%s' "$record" | awk -F$'\x1E' '{print $2}')
+            body=$(printf '%s' "$record" | awk -F$'\x1E' '{print $3}')
+            case "$subj" in
+              Merge*|"chore: bump"*|"chore: release"*) continue ;;
+            esac
+            printf -- '- %s\n' "$subj" >> "$ZH_FILE"
+            en=$(printf '%s' "$body" | grep -m1 '^EN: ' | sed 's/^EN: //')
+            if [ -n "$en" ]; then
+              HAS_EN=1
+              printf -- '- %s\n' "$en" >> "$EN_FILE"
+            else
+              # 没标 EN: 的条目英文段直接复用中文 subject,避免不对齐
+              printf -- '- %s\n' "$subj" >> "$EN_FILE"
+            fi
+          done
+
+          [ -s "$ZH_FILE" ] || echo "- 维护性更新" > "$ZH_FILE"
+
           {
             echo "body<<__CHANGELOG_EOF__"
             echo "## 本次更新"
             echo ""
-            git log "$RANGE" --pretty=format:'- %s' --no-merges \
-              | grep -v -E '^- (Merge|chore: bump|chore: release)' \
-              || echo "- 维护性更新"
-            echo ""
+            cat "$ZH_FILE"
+            if [ "$HAS_EN" = "1" ]; then
+              echo ""
+              echo "## What's Changed"
+              echo ""
+              cat "$EN_FILE"
+            fi
             echo ""
             echo "---"
             echo "首次安装请见 [README](https://github.com/YvoStudio/AI-Terminal#readme)。自 v0.3.3 起内置自动更新。"
+            echo "First-time install: see [README](https://github.com/YvoStudio/AI-Terminal#readme). Built-in auto-update since v0.3.3."
             echo "__CHANGELOG_EOF__"
           } >> "$GITHUB_OUTPUT"
 
