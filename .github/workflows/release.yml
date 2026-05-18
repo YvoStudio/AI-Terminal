@@ -78,7 +78,9 @@ jobs:
 
           ZH_FILE=$(mktemp)
           EN_FILE=$(mktemp)
-          HAS_EN=0
+          # 严格模式:只要有一个 commit 缺 EN: 行,就整段省略 ## What's Changed,
+          # 避免中文混进英文段。新提交一律带 EN: 行(见 commit 模板)。
+          ALL_HAVE_EN=1
 
           # 按 SHA 逐条遍历:rev-list 每行一个 hash,不会被 commit body 的换行干扰
           for sha in $(git rev-list --no-merges "$RANGE"); do
@@ -91,11 +93,9 @@ jobs:
             # grep 找不到 EN: 行会退出 1,在 -o pipefail 下会冒泡触发 set -e;用 || true 兜底
             en=$(printf '%s\n' "$body" | grep -m1 '^EN: ' | sed 's/^EN: //' || true)
             if [ -n "$en" ]; then
-              HAS_EN=1
               printf -- '- %s\n' "$en" >> "$EN_FILE"
             else
-              # 没标 EN: 的条目英文段直接复用中文 subject,避免不对齐
-              printf -- '- %s\n' "$subj" >> "$EN_FILE"
+              ALL_HAVE_EN=0
             fi
           done
 
@@ -106,7 +106,7 @@ jobs:
             echo "## 本次更新"
             echo ""
             cat "$ZH_FILE"
-            if [ "$HAS_EN" = "1" ]; then
+            if [ "$ALL_HAVE_EN" = "1" ] && [ -s "$EN_FILE" ]; then
               echo ""
               echo "## What's Changed"
               echo ""
