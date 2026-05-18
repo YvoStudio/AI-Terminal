@@ -406,12 +406,14 @@ export class TerminalView {
             text: m[0],
             activate: () => {
               const tab = appState.tabs.get(tabId);
-              const paths = tab?.pastedImages || [];
-              if (paths.length === 0) return;
-              const startIdx = Math.max(0, Math.min(n - 1, paths.length - 1));
-              const all = paths.map(p => convertFileSrc(p));
+              if (!tab) return;
+              const sessionStart = tab.pastedSessionStart || 0;
+              const sessionPaths = (tab.pastedImages || []).slice(sessionStart);
+              if (sessionPaths.length === 0) return;
+              if (n - 1 >= sessionPaths.length) return; // 引用了本地未跟踪的图(resumed 会话)
+              const all = sessionPaths.map(p => convertFileSrc(p));
               const preview = (window as any).showImagePreview;
-              if (typeof preview === 'function') preview(all, startIdx);
+              if (typeof preview === 'function') preview(all, n - 1);
             },
           });
         }
@@ -451,6 +453,17 @@ export class TerminalView {
     // Listen for output from Rust backend
     api.onTerminalOutput(tabId, (data) => {
       this.terminal.write(data);
+      // 实时解析 claude 输出中的 [Image #N] 计数,回推会话起点。
+      // 修复:同一 tab 内 /clear 或重启 claude 后,内部 N 归零,但我们 pastedImages 是
+      // tab 维度累积的,会导致 [Image #1] 错点到第一张历史图。
+      const re = /\[Image #(\d+)\]/g;
+      let maxN = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(data)) !== null) {
+        const n = parseInt(m[1], 10);
+        if (n > maxN) maxN = n;
+      }
+      if (maxN > 0) appState.alignPastedSessionFromMaxN(tabId, maxN);
     });
 
     // Block browser paste events — all paste is handled by Cmd+V keydown or right-click via Tauri backend

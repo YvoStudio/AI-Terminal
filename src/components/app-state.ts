@@ -34,6 +34,10 @@ export interface TabState {
   cwd: string;
   userRenamed: boolean; // true if user manually renamed — blocks auto-rename
   pastedImages: string[]; // ordered list of clipboard-image paste paths (for [Image #N] preview)
+  // 当前 claude 会话在 pastedImages 中的起点偏移。claude 内部 [Image #N] 计数会在
+  // /clear、resume、重启时归零,但我们的 pastedImages 是 tab 生命周期累积的;
+  // 通过解析输出中的 [Image #N] 反推 sessionStart = length - N,保证点击对齐。
+  pastedSessionStart: number;
 }
 
 class AppState {
@@ -51,7 +55,7 @@ class AppState {
     this.tabCounter++;
     const tab: TabState = {
       id, title: `Terminal ${this.tabCounter}`, status: 'active', shell: 'cmd',
-      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false, pastedImages: [],
+      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false, pastedImages: [], pastedSessionStart: 0,
     };
     this.tabs.set(id, tab);
     this.tabOrder.push(id);
@@ -129,13 +133,31 @@ class AppState {
     const tab = this.tabs.get(id);
     if (!tab) return;
     if (!tab.pastedImages) tab.pastedImages = [];
+    if (tab.pastedSessionStart == null) tab.pastedSessionStart = 0;
     tab.pastedImages.push(path);
-    if (tab.pastedImages.length > 50) tab.pastedImages.shift();
+    if (tab.pastedImages.length > 50) {
+      tab.pastedImages.shift();
+      if (tab.pastedSessionStart > 0) tab.pastedSessionStart--;
+    }
   }
 
   resetPastedImages(id: string) {
     const tab = this.tabs.get(id);
-    if (tab) tab.pastedImages = [];
+    if (tab) {
+      tab.pastedImages = [];
+      tab.pastedSessionStart = 0;
+    }
+  }
+
+  /** 观察到输出里 claude 当前会话的最大 [Image #N],回推 sessionStart。只前进不后退。 */
+  alignPastedSessionFromMaxN(id: string, maxN: number) {
+    const tab = this.tabs.get(id);
+    if (!tab || maxN <= 0) return;
+    if (tab.pastedSessionStart == null) tab.pastedSessionStart = 0;
+    const len = tab.pastedImages?.length || 0;
+    if (len < maxN) return; // 观察到的 N 比本地累积多(可能是 resumed 会话引用历史),不调整
+    const newStart = len - maxN;
+    if (newStart > tab.pastedSessionStart) tab.pastedSessionStart = newStart;
   }
 
   addSidebarEntry(id: string, entry: SidebarEntry) {
