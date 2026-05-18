@@ -69,7 +69,7 @@ jobs:
         shell: bash
         run: |
           git fetch --tags --force --quiet
-          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${GITHUB_REF_NAME}$" | head -1)
+          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${GITHUB_REF_NAME}$" | head -1 || true)
           if [ -z "$PREV_TAG" ]; then
             RANGE="HEAD"
           else
@@ -80,17 +80,16 @@ jobs:
           EN_FILE=$(mktemp)
           HAS_EN=0
 
-          # 每个 commit 一段,分隔符 \x1F (single record sep);subject 在前,body 在后用 \x1E 分
-          IFS=$'\n'
-          for record in $(git log "$RANGE" --no-merges --pretty=format:'%H%x1E%s%x1E%b%x1F' | tr '\x1F' '\n'); do
-            [ -z "$record" ] && continue
-            subj=$(printf '%s' "$record" | awk -F$'\x1E' '{print $2}')
-            body=$(printf '%s' "$record" | awk -F$'\x1E' '{print $3}')
+          # 按 SHA 逐条遍历:rev-list 每行一个 hash,不会被 commit body 的换行干扰
+          for sha in $(git rev-list --no-merges "$RANGE"); do
+            subj=$(git log -1 --format='%s' "$sha")
+            body=$(git log -1 --format='%b' "$sha")
             case "$subj" in
               Merge*|"chore: bump"*|"chore: release"*) continue ;;
             esac
             printf -- '- %s\n' "$subj" >> "$ZH_FILE"
-            en=$(printf '%s' "$body" | grep -m1 '^EN: ' | sed 's/^EN: //')
+            # grep 找不到 EN: 行会退出 1,在 -o pipefail 下会冒泡触发 set -e;用 || true 兜底
+            en=$(printf '%s\n' "$body" | grep -m1 '^EN: ' | sed 's/^EN: //' || true)
             if [ -n "$en" ]; then
               HAS_EN=1
               printf -- '- %s\n' "$en" >> "$EN_FILE"
