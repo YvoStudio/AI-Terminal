@@ -43,6 +43,8 @@
 
 下载 `.msi` 或 `.exe` 双击安装。Windows 11 自带 WebView2;Win10 首次启动会自动安装运行时。
 
+> 安装包尚未做 Authenticode 签名,SmartScreen 会弹「Windows 已保护你的电脑」。点 **更多信息** → **仍要运行** 即可继续安装。代码签名方案在跟进中。
+
 ### Linux
 
 - **Debian / Ubuntu**: `sudo dpkg -i AI-Terminal_*.deb`
