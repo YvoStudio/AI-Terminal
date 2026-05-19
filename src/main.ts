@@ -1465,6 +1465,16 @@ const TIPS_PANEL_HTML = `
           </select>
         </div>
       </div>
+      <div class="tips-about">
+        <div class="tips-about-left">
+          <strong>AI Terminal</strong>
+          <span class="tips-about-version" id="about-version">v…</span>
+        </div>
+        <div class="tips-about-right">
+          <button id="check-updates-btn" class="tips-about-btn" type="button">检查更新</button>
+          <a href="https://github.com/YvoStudio/AI-Terminal" target="_blank" rel="noreferrer" class="tips-about-link">GitHub</a>
+        </div>
+      </div>
     `;
 
 function isCopyableTipCommand(text: string): boolean {
@@ -1673,6 +1683,29 @@ function toggleTipsPanel() {
     fontFamilySelect.addEventListener('change', () => {
       localStorage.setItem('terminal-font-family', fontFamilySelect.value);
       terminalViews.forEach(view => view.setFontFamily(fontFamilySelect.value));
+    });
+  }
+
+  // 关于:填版本号 + 检查更新按钮
+  const versionEl = _tipsEl.querySelector('#about-version') as HTMLElement | null;
+  if (versionEl) {
+    import('@tauri-apps/api/app').then(({ getVersion }) => {
+      getVersion().then(v => { versionEl.textContent = `v${v}`; }).catch(() => {});
+    }).catch(() => {});
+  }
+  const checkBtn = _tipsEl.querySelector('#check-updates-btn') as HTMLButtonElement | null;
+  if (checkBtn) {
+    checkBtn.addEventListener('click', async () => {
+      checkBtn.disabled = true;
+      const origLabel = checkBtn.textContent;
+      checkBtn.textContent = '检查中…';
+      try {
+        const { checkForUpdates } = await import('./components/updater');
+        await checkForUpdates(false); // 非静默:无更新时也提示用户
+      } finally {
+        checkBtn.disabled = false;
+        checkBtn.textContent = origLabel || '检查更新';
+      }
     });
   }
 
