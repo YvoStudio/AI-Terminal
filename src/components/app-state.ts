@@ -36,8 +36,12 @@ export interface TabState {
   pastedImages: string[]; // ordered list of clipboard-image paste paths (for [Image #N] preview)
   // 当前 claude 会话在 pastedImages 中的起点偏移。claude 内部 [Image #N] 计数会在
   // /clear、resume、重启时归零,但我们的 pastedImages 是 tab 生命周期累积的;
-  // 通过解析输出中的 [Image #N] 反推 sessionStart = length - N,保证点击对齐。
+  // 通过解析输出中的 [Image #N] 检测重置(N=1 且历史 max > 1)来推进 sessionStart。
   pastedSessionStart: number;
+  // claude 当前会话内见过的最大 [Image #N]。当我们看到 N=1 但 max > 1 时,认定
+  // claude 重置了会话(由 /clear、resume、重启 claude 引起),把 sessionStart 推到
+  // pastedImages.length - 1。
+  pastedMaxObservedN: number;
 }
 
 class AppState {
@@ -55,7 +59,7 @@ class AppState {
     this.tabCounter++;
     const tab: TabState = {
       id, title: `Terminal ${this.tabCounter}`, status: 'active', shell: 'cmd',
-      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false, pastedImages: [], pastedSessionStart: 0,
+      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false, pastedImages: [], pastedSessionStart: 0, pastedMaxObservedN: 0,
     };
     this.tabs.set(id, tab);
     this.tabOrder.push(id);
@@ -146,18 +150,32 @@ class AppState {
     if (tab) {
       tab.pastedImages = [];
       tab.pastedSessionStart = 0;
+      tab.pastedMaxObservedN = 0;
     }
   }
 
-  /** 观察到输出里 claude 当前会话的最大 [Image #N],回推 sessionStart。只前进不后退。 */
-  alignPastedSessionFromMaxN(id: string, maxN: number) {
+  /**
+   * 观察输出中的 [Image #N],推断 claude 会话边界:
+   * - 正常情况(maxN 单调递增):只更新 pastedMaxObservedN,不动 sessionStart
+   * - 检测到重置(N=1 且历史 max > 1):说明 /clear / resume / 重启了 claude,
+   *   把 sessionStart 推到 length - 1(最新一张图变成新会话的 #1)
+   */
+  alignPastedFromOutput(id: string, maxN: number) {
     const tab = this.tabs.get(id);
     if (!tab || maxN <= 0) return;
     if (tab.pastedSessionStart == null) tab.pastedSessionStart = 0;
+    if (tab.pastedMaxObservedN == null) tab.pastedMaxObservedN = 0;
     const len = tab.pastedImages?.length || 0;
-    if (len < maxN) return; // 观察到的 N 比本地累积多(可能是 resumed 会话引用历史),不调整
-    const newStart = len - maxN;
-    if (newStart > tab.pastedSessionStart) tab.pastedSessionStart = newStart;
+
+    if (maxN === 1 && tab.pastedMaxObservedN > 1 && len > 0) {
+      // claude 重置了:最近一次 paste 现在是新会话的 [Image #1]
+      tab.pastedSessionStart = len - 1;
+      tab.pastedMaxObservedN = 1;
+    } else if (maxN > tab.pastedMaxObservedN) {
+      // claude 会话内 N 单调增长,只追计数
+      tab.pastedMaxObservedN = maxN;
+    }
+    // else:maxN <= 历史 max 但 > 1,可能是 scrollback 重绘,忽略
   }
 
   addSidebarEntry(id: string, entry: SidebarEntry) {

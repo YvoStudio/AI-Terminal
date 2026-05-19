@@ -390,14 +390,27 @@ export class TerminalView {
         const buf = this.terminal.buffer.active;
         const line = buf.getLine(lineNumber - 1);
         if (!line) { callback(undefined); return; }
-        const text = line.translateToString(true);
+        // 遍历 cell 同时构建 string 和 char→cell 映射:
+        // CJK 占 2 个 cell 但 1 个 char(宽字符的第二格 chars 为空),不建立映射会让
+        // link range 的 x 偏左。
+        let text = '';
+        const charToCol: number[] = []; // 字符下标 → 0-indexed cell 列
+        for (let c = 0; c < line.length; c++) {
+          const cell = line.getCell(c);
+          if (!cell) continue;
+          const chars = cell.getChars();
+          if (chars.length === 0) continue; // wide-char 的尾格
+          for (let k = 0; k < chars.length; k++) charToCol.push(c);
+          text += chars;
+        }
         const re = /\[Image #(\d+)\]/g;
         const links: any[] = [];
         let m: RegExpExecArray | null;
         while ((m = re.exec(text)) !== null) {
           const n = parseInt(m[1], 10);
-          const startCol = m.index + 1;
-          const endCol = m.index + m[0].length;
+          const startCol = (charToCol[m.index] ?? 0) + 1; // xterm 1-indexed
+          const lastCharIdx = m.index + m[0].length - 1;
+          const endCol = (charToCol[lastCharIdx] ?? line.length - 1) + 1;
           links.push({
             range: {
               start: { x: startCol, y: lineNumber },
@@ -407,13 +420,20 @@ export class TerminalView {
             activate: () => {
               const tab = appState.tabs.get(tabId);
               if (!tab) return;
+              const allPaths = tab.pastedImages || [];
+              if (allPaths.length === 0) return;
               const sessionStart = tab.pastedSessionStart || 0;
-              const sessionPaths = (tab.pastedImages || []).slice(sessionStart);
-              if (sessionPaths.length === 0) return;
-              if (n - 1 >= sessionPaths.length) return; // 引用了本地未跟踪的图(resumed 会话)
-              const all = sessionPaths.map(p => convertFileSrc(p));
+              const sessionPaths = allPaths.slice(sessionStart);
               const preview = (window as any).showImagePreview;
-              if (typeof preview === 'function') preview(all, n - 1);
+              if (typeof preview !== 'function') return;
+              if (n - 1 < sessionPaths.length) {
+                // 当前 claude 会话内的引用,优先级最高
+                preview(sessionPaths.map(p => convertFileSrc(p)), n - 1);
+              } else if (n - 1 < allPaths.length) {
+                // 历史 token(scrollback 里 /clear 前的引用):兜底用完整数组按 N 直找
+                preview(allPaths.map(p => convertFileSrc(p)), n - 1);
+              }
+              // 否则:超出本地累积上限(可能是 resumed 会话或 shift 过的旧引用),静默
             },
           });
         }
@@ -463,7 +483,7 @@ export class TerminalView {
         const n = parseInt(m[1], 10);
         if (n > maxN) maxN = n;
       }
-      if (maxN > 0) appState.alignPastedSessionFromMaxN(tabId, maxN);
+      if (maxN > 0) appState.alignPastedFromOutput(tabId, maxN);
     });
 
     // Block browser paste events — all paste is handled by Cmd+V keydown or right-click via Tauri backend
