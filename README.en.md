@@ -43,6 +43,9 @@ Download `.dmg` and drag to Applications. If Gatekeeper blocks the first launch,
 
 Download `.msi` or `.exe` and run it. Windows 11 ships with WebView2; on Windows 10 it will be installed on first launch.
 
+> The installer is currently unsigned; SmartScreen will show "Windows protected your PC". Click **More info** → **Run anyway** to proceed.
+> Windows code signing is provided by the [SignPath Foundation](https://signpath.org) (free OSS certificate); the warning will disappear once CI integration ships.
+
 ### Linux
 
 - **Debian / Ubuntu**: `sudo dpkg -i AI-Terminal_*.deb`
@@ -83,6 +86,10 @@ sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
 Issues and pull requests are welcome. **By submitting a pull request you agree to assign the copyright and re-licensing rights (including the right to relicense under non-GPL terms) of your contribution to the project author, free of charge.** This keeps the project under a single copyright holder so the author can relicense the code if needed (e.g. for App Store distribution).
 
 If you do not agree to this clause, please do not open a pull request; open an issue for discussion instead.
+
+## Acknowledgments
+
+- Windows code signing: free OSS certificate provided by the [SignPath Foundation](https://signpath.org); signing service by [SignPath.io](https://signpath.io).
 
 ## License
 

@@ -43,7 +43,8 @@
 
 下载 `.msi` 或 `.exe` 双击安装。Windows 11 自带 WebView2;Win10 首次启动会自动安装运行时。
 
-> 安装包尚未做 Authenticode 签名,SmartScreen 会弹「Windows 已保护你的电脑」。点 **更多信息** → **仍要运行** 即可继续安装。代码签名方案在跟进中。
+> 安装包目前未做 Authenticode 签名,SmartScreen 会弹「Windows 已保护你的电脑」。点 **更多信息** → **仍要运行** 即可继续安装。
+> Windows 代码签名由 [SignPath Foundation](https://signpath.org) 提供(开源项目免费证书),CI 集成后此弹窗将不再出现。
 
 ### Linux
 
@@ -85,6 +86,10 @@ sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
 欢迎提 Issue 和 PR。**提交 Pull Request 即视为你同意:将所贡献代码的版权及再许可权(包括以非 GPL 协议再发布的权利)无偿授予项目作者**。这样作者可以保持单一版权人身份,在未来需要时(如 App Store 上架等场景)对代码进行重新授权。
 
 如不接受此条款,请不要提交 PR;可改为开 Issue 讨论。
+
+## 致谢
+
+- Windows 代码签名:[SignPath Foundation](https://signpath.org) 免费提供 OSS 证书,签名服务由 [SignPath.io](https://signpath.io) 承担。
 
 ## License
 
