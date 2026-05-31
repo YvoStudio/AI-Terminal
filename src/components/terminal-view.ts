@@ -285,34 +285,58 @@ export class TerminalView {
         if (e.type === 'keydown') navigator.clipboard.writeText(this.terminal.getSelection());
         return false;
       }
-      // Cmd+V / Ctrl+V: paste via Tauri backend (text + image, no browser clipboard API)
+      // Cmd+V / Ctrl+V: paste (try browser clipboard API for images first, then arboard fallback)
       if ((e.ctrlKey || e.metaKey) && key === 'v') {
         if (e.type === 'keydown') {
           (async () => {
             const tab = appState.tabs.get(tabId);
-            // Detect AI/TUI: parser-set aiTool, or alt-buffer (vim/htop/etc. also TUI).
-            // Output-side parser detection (commands.rs) covers Claude sessions started
-            // outside input tracking (resume, history-launched tabs).
             const bufType = this.terminal.buffer.active.type;
             const isAI = !!tab?.aiTool || bufType === 'alternate';
+
+            // Try browser Clipboard API first (more reliable on Windows/WebView2)
+            try {
+              const items = await navigator.clipboard.read();
+              for (const item of items) {
+                for (const type of item.types) {
+                  if (type.startsWith('image/')) {
+                    const blob = await item.getType(type);
+                    const dataUrl = await new Promise<string>((resolve, reject) => {
+                      const reader = new FileReader();
+                      reader.onload = () => resolve(reader.result as string);
+                      reader.onerror = reject;
+                      reader.readAsDataURL(blob);
+                    });
+                    const filePath = await api.saveClipboardImage(dataUrl);
+                    if (filePath) {
+                      if (isAI) {
+                        appState.addPastedImage(tabId, filePath);
+                        api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
+                      } else {
+                        api.writeTerminal(tabId, filePath + ' ');
+                      }
+                      return;
+                    }
+                  }
+                }
+              }
+            } catch (err) {
+              console.log('[Paste] Browser clipboard API failed, falling back to arboard:', err);
+            }
+
+            // Fallback: arboard via Tauri backend
             try {
               const imgPath = await api.readClipboardImage();
               if (imgPath) {
                 if (isAI) {
-                  // TUI apps (Claude Code, Aider) read the OS clipboard themselves on bracketed
-                  // paste and convert image clipboard contents to [Image #N]. Send an empty
-                  // bracketed paste sequence as the trigger; track the path locally so
-                  // [Image #N] tokens can be clicked for preview.
                   appState.addPastedImage(tabId, imgPath);
                   api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
                 } else {
-                  // Plain shell: write absolute path (useful for `cat`, `cp`, etc.)
                   api.writeTerminal(tabId, imgPath + ' ');
                 }
                 return;
               }
             } catch (err) {
-              console.log('[Paste] Image read failed:', err);
+              console.log('[Paste] Arboard image read failed:', err);
             }
             try {
               const text = await api.readClipboardText();

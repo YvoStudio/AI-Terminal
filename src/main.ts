@@ -2935,6 +2935,15 @@ init().catch((e) => {
   createTab().catch(console.error);
 });
 
+// Safety net: if no tab was created after 2s (e.g. loadTabs returns empty
+// but init already attempted createTab which raced or silently failed), force one.
+setTimeout(() => {
+  if (appState.tabOrder.length === 0) {
+    console.warn('[Init] No tab found after timeout, forcing creation.');
+    createTab().catch(console.error);
+  }
+}, 2000);
+
 // Global drag-drop support with Tauri - using tauri://drag-drop event for full file paths
 let dragCounter = 0;
 
