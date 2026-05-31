@@ -285,64 +285,21 @@ export class TerminalView {
         if (e.type === 'keydown') navigator.clipboard.writeText(this.terminal.getSelection());
         return false;
       }
-      // Cmd+V / Ctrl+V: paste (try browser clipboard API for images first, then arboard fallback)
+      // Cmd+V / Ctrl+V: for AI/TUI mode, prevent default xterm paste and send bracketed paste.
+      // Image paste (both AI and non-AI) is handled at the capture-phase paste handler below.
       if ((e.ctrlKey || e.metaKey) && key === 'v') {
         if (e.type === 'keydown') {
-          (async () => {
-            const tab = appState.tabs.get(tabId);
-            const bufType = this.terminal.buffer.active.type;
-            const isAI = !!tab?.aiTool || bufType === 'alternate';
-
-            // Try browser Clipboard API first (more reliable on Windows/WebView2)
-            try {
-              const items = await navigator.clipboard.read();
-              for (const item of items) {
-                for (const type of item.types) {
-                  if (type.startsWith('image/')) {
-                    const blob = await item.getType(type);
-                    const dataUrl = await new Promise<string>((resolve, reject) => {
-                      const reader = new FileReader();
-                      reader.onload = () => resolve(reader.result as string);
-                      reader.onerror = reject;
-                      reader.readAsDataURL(blob);
-                    });
-                    const filePath = await api.saveClipboardImage(dataUrl);
-                    if (filePath) {
-                      if (isAI) {
-                        appState.addPastedImage(tabId, filePath);
-                        api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
-                      } else {
-                        api.writeTerminal(tabId, filePath + ' ');
-                      }
-                      return;
-                    }
-                  }
-                }
-              }
-            } catch (err) {
-              console.log('[Paste] Browser clipboard API failed, falling back to arboard:', err);
-            }
-
-            // Fallback: arboard via Tauri backend
-            try {
-              const imgPath = await api.readClipboardImage();
-              if (imgPath) {
-                if (isAI) {
-                  appState.addPastedImage(tabId, imgPath);
-                  api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
-                } else {
-                  api.writeTerminal(tabId, imgPath + ' ');
-                }
-                return;
-              }
-            } catch (err) {
-              console.log('[Paste] Arboard image read failed:', err);
-            }
-            try {
-              const text = await api.readClipboardText();
-              if (text) this.terminal.paste(text);
-            } catch {}
-          })();
+          const tab = appState.tabs.get(tabId);
+          const bufType = this.terminal.buffer.active.type;
+          const isAI = !!tab?.aiTool || bufType === 'alternate';
+          if (isAI) {
+            // For AI tools, the capture-phase paste handler will intercept and
+            // send bracketed paste. Returning false keeps xterm out of the way.
+            return false;
+          }
+          // Non-AI: let the paste event reach xterm naturally (capture handler
+          // will intercept images, but let text through).
+          return true;
         }
         return false;
       }
@@ -529,10 +486,58 @@ export class TerminalView {
       if (maxN > 0) appState.alignPastedFromOutput(tabId, maxN);
     });
 
-    // Block browser paste events — all paste is handled by Cmd+V keydown or right-click via Tauri backend
+    // Handle paste: intercept images, send bracketed paste for AI tools,
+    // otherwise let xterm handle text paste naturally.
     this.wrapper.addEventListener('paste', (e: ClipboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      const tab = appState.tabs.get(tabId);
+      const bufType = this.terminal.buffer.active.type;
+      const isAI = !!(tab?.aiTool) || bufType === 'alternate';
+
+      // Check for images in clipboard
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          e.stopPropagation();
+          const blob = item.getAsFile();
+          if (blob) {
+            const reader = new FileReader();
+            reader.onload = async () => {
+              try {
+                const filePath = await api.saveClipboardImage(reader.result as string);
+                if (filePath) {
+                  appState.addPastedImage(tabId, filePath);
+                  const t = appState.tabs.get(tabId);
+                  const ai = !!(t?.aiTool) || bufType === 'alternate';
+                  if (ai) {
+                    api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
+                  } else {
+                    api.writeTerminal(tabId, filePath + ' ');
+                  }
+                }
+              } catch (err) {
+                console.error('[Paste] Failed to save pasted image:', err);
+              }
+            };
+            reader.readAsDataURL(blob);
+          }
+          return;
+        }
+      }
+
+      // AI/TUI tools: intercept text paste → bracketed paste so the tool reads
+      // the clipboard itself (for [Image #N] handling).
+      if (isAI) {
+        e.preventDefault();
+        e.stopPropagation();
+        const text = e.clipboardData?.getData('text/plain');
+        if (text) {
+          api.writeTerminal(tabId, '\x1b[200~' + text + '\x1b[201~');
+        }
+      }
+      // Non-AI, no image: let default paste reach xterm
     }, true); // capture phase
 
     // Right-click: copy if there's a selection, otherwise paste
