@@ -2899,22 +2899,27 @@ async function init() {
     await createTab('Quick', undefined, undefined, undefined, undefined, true);
     return;
   }
-  const savedTabs = await api.loadTabs();
-  if (savedTabs.length > 0) {
-    for (const saved of savedTabs) {
-      // 验证 shell 值，无效则使用默认值 cmd
-      const validShells: Array<'cmd' | 'powershell' | 'wsl'> = ['cmd', 'powershell', 'wsl'];
-      const shell = saved.shell && validShells.includes(saved.shell) ? saved.shell : undefined;
-      // Validate saved cwd before restoring
-      const savedCwd = saved.cwd;
-      const cwd = savedCwd && savedCwd.length <= 500 && !savedCwd.includes('"') && !savedCwd.includes('\n')
-        && (savedCwd.startsWith('/') || /^[A-Za-z]:/.test(savedCwd)) ? savedCwd : undefined;
-      // Protect restored tab names from auto-rename (if name is not default "Terminal N")
-      const isCustomName = saved.name && !saved.name.startsWith('Terminal ') && !saved.name.startsWith('↻ ');
+  let restoredCount = 0;
+  const savedTabs = await api.loadTabs().catch((): SavedTab[] => []);
+  for (const saved of savedTabs) {
+    // 验证 shell 值，无效则使用默认值 cmd
+    const validShells: Array<'cmd' | 'powershell' | 'wsl'> = ['cmd', 'powershell', 'wsl'];
+    const shell = saved.shell && validShells.includes(saved.shell) ? saved.shell : undefined;
+    // Validate saved cwd before restoring
+    const savedCwd = saved.cwd;
+    const cwd = savedCwd && savedCwd.length <= 500 && !savedCwd.includes('"') && !savedCwd.includes('\n')
+      && (savedCwd.startsWith('/') || /^[A-Za-z]:/.test(savedCwd)) ? savedCwd : undefined;
+    // Protect restored tab names from auto-rename (if name is not default "Terminal N")
+    const isCustomName = saved.name && !saved.name.startsWith('Terminal ') && !saved.name.startsWith('↻ ');
+    try {
       await createTab(saved.name, saved.noteBlocks, cwd, shell, saved.aiTool, saved.userRenamed || isCustomName, saved.id);
+      restoredCount++;
+    } catch (e) {
+      console.warn('Failed to restore tab, skipping:', e);
     }
-  } else {
-    createTab();
+  }
+  if (restoredCount === 0) {
+    await createTab();
   }
 
   // 静默检查更新（主窗口启动 5 秒后，避免拖慢启动）
@@ -2925,7 +2930,10 @@ async function init() {
   }, 5000);
 }
 
-init();
+init().catch((e) => {
+  console.error('Failed to initialize app:', e);
+  createTab().catch(console.error);
+});
 
 // Global drag-drop support with Tauri - using tauri://drag-drop event for full file paths
 let dragCounter = 0;

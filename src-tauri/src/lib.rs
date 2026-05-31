@@ -89,7 +89,7 @@ pub fn run() {
             });
 
             let alt_s = Shortcut::new(Some(Modifiers::ALT), Code::KeyS);
-            app.global_shortcut().on_shortcut(alt_s, |app, _shortcut, event| {
+            if let Err(err) = app.global_shortcut().on_shortcut(alt_s, |app, _shortcut, event| {
                 if event.state() != ShortcutState::Pressed {
                     return;
                 }
@@ -105,7 +105,9 @@ pub fn run() {
                         let _ = win.hide();
                     }
                 }
-            })?;
+            }) {
+                eprintln!("Failed to register Alt+S shortcut: {}", err);
+            }
 
             // Quick Terminal: Cmd+` on macOS, Ctrl+` elsewhere. Toggle visibility + focus.
             #[cfg(target_os = "macos")]
@@ -113,7 +115,7 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let quick_mod = Modifiers::CONTROL;
             let quick_shortcut = Shortcut::new(Some(quick_mod), Code::Backquote);
-            app.global_shortcut().on_shortcut(quick_shortcut, |app, _s, event| {
+            if let Err(err) = app.global_shortcut().on_shortcut(quick_shortcut, |app, _s, event| {
                 if event.state() != ShortcutState::Pressed { return; }
                 if let Some(win) = app.get_webview_window("quick") {
                     let is_visible = win.is_visible().unwrap_or(false);
@@ -125,7 +127,9 @@ pub fn run() {
                         let _ = win.set_focus();
                     }
                 }
-            })?;
+            }) {
+                eprintln!("Failed to register quick terminal shortcut: {}", err);
+            }
 
             // Auto-clear Dock badge when the main window regains focus —
             // the user is looking now, so the "something happened" hint has
