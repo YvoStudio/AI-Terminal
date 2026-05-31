@@ -47,21 +47,39 @@ pub fn run() {
             app.manage(parser.clone());
             app.manage(Arc::new(Mutex::new(WindowState { visible: true })));
 
-            // Idle-stream watcher: detect when AI tabs stop receiving output and emit
-            // done-unseen so the tab gets a red dot. Claude Code doesn't reliably emit
-            // BEL or OSC title at end-of-turn, so polling for silence is our best signal.
+            // Idle-stream watcher: last-resort safety net for tabs we couldn't
+            // classify via vt100 (Unknown ui_state). For tabs we *can* classify
+            // (Claude/Codex/Aider/Opencode), output_parser.rs drives transitions
+            // directly off the rendered footer — this loop is just a backstop
+            // for non-Claude TUIs whose patterns we haven't taught yet. 30s
+            // because tool calls and image generation can legitimately stream
+            // nothing for >20s.
             let idle_handle = app.handle().clone();
             std::thread::spawn(move || {
                 loop {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let done = {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    // Two jobs every tick:
+                    //  1. Commit debounced Working → IdleReady transitions whose
+                    //     observation window elapsed without a Working frame
+                    //     cancelling them. Driven from here because Claude stops
+                    //     emitting chunks once truly idle.
+                    //  2. Last-resort: tabs we couldn't classify but went silent
+                    //     for 30s.
+                    let (committed, idle_done) = {
                         let Ok(mut p) = parser.lock() else { continue };
-                        // Threshold must exceed the frontend's `isLikelyStillExecuting`
-                        // window (1800ms) so the debounce in main.ts releases instead of
-                        // looping back to executing.
-                        p.collect_idle_done(2000)
+                        let c = p.commit_pending_idle(800);
+                        let d = p.collect_idle_done(30000);
+                        (c, d)
                     };
-                    for tid in done {
+                    for (tid, status, ui) in committed {
+                        let _ = idle_handle.emit("tab-status-changed", serde_json::json!({
+                            "tabId": tid, "status": status,
+                        }));
+                        let _ = idle_handle.emit("tab-ai-ui-state-changed", serde_json::json!({
+                            "tabId": tid, "state": ui,
+                        }));
+                    }
+                    for tid in idle_done {
                         let _ = idle_handle.emit("tab-status-changed", serde_json::json!({
                             "tabId": tid,
                             "status": "done-unseen"

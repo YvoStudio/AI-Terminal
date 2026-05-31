@@ -988,7 +988,25 @@ function removeNoteBlock(tabId: string, blockId: string) {
   if (tabId === appState.activeTabId) renderNoteBlocks(true);
   appState.persistTabs();
 }
-function sendNoteBlock(tabId: string, blockId: string) {
+function reorderNoteBlock(tabId: string, srcId: string, dstId: string, dropAbove: boolean) {
+  const tab = appState.tabs.get(tabId);
+  if (!tab || srcId === dstId) return;
+  const srcIdx = tab.noteBlocks.findIndex(b => b.id === srcId);
+  if (srcIdx < 0) return;
+  const [src] = tab.noteBlocks.splice(srcIdx, 1);
+  // findIndex must run on the array *after* removal so dst index is fresh.
+  let insertIdx = tab.noteBlocks.findIndex(b => b.id === dstId);
+  if (insertIdx < 0) {
+    // dst was removed mid-drag — append as fallback so we don't lose the block
+    tab.noteBlocks.push(src);
+  } else {
+    if (!dropAbove) insertIdx += 1;
+    tab.noteBlocks.splice(insertIdx, 0, src);
+  }
+  if (tabId === appState.activeTabId) renderNoteBlocks(true);
+  appState.persistTabs();
+}
+function sendNoteBlock(tabId: string, blockId: string, submit = false) {
   const tab = appState.tabs.get(tabId);
   if (!tab) return;
   const block = tab.noteBlocks.find(b => b.id === blockId);
@@ -1004,6 +1022,11 @@ function sendNoteBlock(tabId: string, blockId: string) {
   }
   if (hasText) {
     api.writeTerminal(tabId, block.content);
+  }
+  // Auto-queue path: press Enter so Claude actually submits. Manual click on
+  // "发送" leaves the prompt in the input box for the user to review.
+  if (submit) {
+    api.writeTerminal(tabId, '\r');
   }
   removeNoteBlock(tabId, blockId);
 }
@@ -1082,6 +1105,74 @@ function showImagePreview(srcOrList: string | string[], startIndex = 0) {
 
 let lastRenderedTabId: string | null = null;
 let lastRenderedBlockCount = -1;
+/**
+ * Pointer-driven note-block reorder. We bypass HTML5 drag-and-drop because in
+ * Tauri's webview the drop indicators rendered invisibly and drop events were
+ * silently swallowed on some themes. With pointer events we own every step:
+ * find the hovered block via elementFromPoint, compute above/below from cursor
+ * Y, paint a marker bar in the gap, and commit the reorder on mouseup.
+ */
+function startBlockReorder(tabId: string, srcId: string, srcEl: HTMLElement, startX: number, startY: number) {
+  const DRAG_THRESHOLD = 4; // px before we treat it as a drag (vs. a click)
+  let dragging = false;
+
+  // The marker is a single absolutely-positioned bar in document coordinates —
+  // simpler than per-block ::before pseudo-elements and never clipped by the
+  // .note-block { overflow: hidden } that hides things popping out of borders.
+  const marker = document.createElement('div');
+  marker.className = 'note-block-pointer-marker';
+  let currentTarget: { id: string; above: boolean } | null = null;
+
+  const onMove = (ev: MouseEvent) => {
+    if (!dragging) {
+      if (Math.abs(ev.clientX - startX) < DRAG_THRESHOLD && Math.abs(ev.clientY - startY) < DRAG_THRESHOLD) return;
+      dragging = true;
+      srcEl.classList.add('dragging');
+      document.body.classList.add('note-block-reordering');
+      document.body.appendChild(marker);
+    }
+    // Hide the marker briefly so elementFromPoint sees the underlying block,
+    // not the marker itself.
+    marker.style.display = 'none';
+    const under = document.elementFromPoint(ev.clientX, ev.clientY);
+    marker.style.display = '';
+    const block = under?.closest('.note-block') as HTMLElement | null;
+    if (!block || !notepadBlocksEl.contains(block)) {
+      currentTarget = null;
+      marker.style.opacity = '0';
+      return;
+    }
+    const dstId = block.dataset.blockId;
+    if (!dstId || dstId === srcId) {
+      currentTarget = null;
+      marker.style.opacity = '0';
+      return;
+    }
+    const rect = block.getBoundingClientRect();
+    const above = ev.clientY < rect.top + rect.height / 2;
+    currentTarget = { id: dstId, above };
+    marker.style.opacity = '1';
+    marker.style.left = rect.left + 'px';
+    marker.style.width = rect.width + 'px';
+    marker.style.top = (above ? rect.top - 2 : rect.bottom - 1) + 'px';
+  };
+
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('mouseup', onUp, true);
+    srcEl.classList.remove('dragging');
+    document.body.classList.remove('note-block-reordering');
+    marker.remove();
+    if (dragging && currentTarget) {
+      reorderNoteBlock(tabId, srcId, currentTarget.id, currentTarget.above);
+    }
+  };
+
+  // Capture-phase so the listeners win against any sub-tree that calls
+  // stopPropagation on mousemove (the xterm wrapper, for instance).
+  document.addEventListener('mousemove', onMove, true);
+  document.addEventListener('mouseup', onUp, true);
+}
 
 function renderNoteBlocks(force = false) {
   if (!appState.activeTabId) { notepadBlocksEl.innerHTML = ''; lastRenderedTabId = null; lastRenderedBlockCount = -1; return; }
@@ -1095,9 +1186,30 @@ function renderNoteBlocks(force = false) {
   notepadBlocksEl.innerHTML = '';
 
   const tabId = appState.activeTabId;
-  for (const block of tab.noteBlocks) {
+  for (let blockIdx = 0; blockIdx < tab.noteBlocks.length; blockIdx++) {
+    const block = tab.noteBlocks[blockIdx];
     const el = document.createElement('div');
     el.className = 'note-block';
+    el.dataset.blockId = block.id;
+    // Mark the head-of-queue block so the user knows what will auto-send next.
+    if (blockIdx === 0) el.classList.add('queue-pending');
+
+    // Drag handle — pointer-driven reorder. HTML5 drag-and-drop in Tauri's
+    // webview was unreliable across themes (drop indicator invisible, drop
+    // events silently dropped). Pointer events give us full control: track
+    // mousedown→move→up ourselves, hit-test with elementFromPoint, and skip
+    // every quirk of the dataTransfer / ghost-image pipeline.
+    const dragHandle = document.createElement('div');
+    dragHandle.className = 'note-block-drag-handle';
+    dragHandle.innerHTML = '⠿';
+    dragHandle.title = '按住拖动以排序';
+    dragHandle.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      startBlockReorder(tabId, block.id, el, e.clientX, e.clientY);
+    });
+    el.appendChild(dragHandle);
+
     const textarea = document.createElement('textarea');
     textarea.placeholder = '输入文本...';
     textarea.value = block.content;
@@ -1261,9 +1373,6 @@ function renderNoteBlocks(force = false) {
   notepadBlocksEl.scrollTop = savedScrollTop;
 }
 
-document.getElementById('notepad-add-block')!.addEventListener('click', () => {
-  if (appState.activeTabId) addNoteBlock(appState.activeTabId);
-});
 let notepadScrolling = false;
 let notepadScrollTimer = 0;
 notepadBlocksEl.addEventListener('scroll', () => {
@@ -2036,7 +2145,14 @@ function armPendingDoneTimer(tabId: string): void {
   const timer = window.setTimeout(() => {
     pendingDoneTimers.delete(tabId);
     const tab = appState.tabs.get(tabId);
-    if (!tab || tab.status === 'executing') return;
+    if (!tab) return;
+    // Don't gate on `tab.status === 'executing'` here. The caller below sets
+    // status to 'executing' as a transient placeholder when isLikelyStillExecuting
+    // is true — checking that same value would make this timer permanently
+    // no-op for fast Claude responses (<1.8s), which is exactly the case the
+    // auto-send queue produces. Backend done-unseen + 700ms quiet window is
+    // sufficient; if a real 'executing' arrives in the window it calls
+    // clearPendingDoneTimer and this body never runs.
     const nextStatus = shouldShowDoneUnseen(tabId) ? 'done-unseen' : 'active';
     appState.setStatus(tabId, nextStatus);
     syncPendingAttention(nextStatus === 'done-unseen');
@@ -2097,15 +2213,25 @@ window.addEventListener('blur', () => {
 
 api.onTabStatusChanged((tabId, status) => {
   const existingTab = appState.tabs.get(tabId);
-  if (existingTab?.status === 'done-unseen' && status !== 'done-unseen') {
-    clearPendingDoneTimer(tabId);
-    return;
-  }
-
+  // 'executing' must be handled BEFORE the "keep red dot sticky" guard. After
+  // an auto-send fires, the tab is showing a red dot from the previous cycle's
+  // done-unseen — when Claude starts working on the auto-sent prompt, the
+  // backend's new 'executing' event has to bump lastExecutingAt[tab] or the
+  // SECOND cycle's done-unseen lookup sees stale timing and the red dot never
+  // re-arms when that response finishes.
   if (status === 'executing') {
     markExecutingSeen(tabId);
     clearPendingDoneTimer(tabId);
-    appState.setStatus(tabId, status);
+    // Preserve the red dot visually if it was already up — moving to
+    // 'executing' would hide the unseen-output cue the user hasn't acked yet.
+    if (existingTab?.status !== 'done-unseen') {
+      appState.setStatus(tabId, status);
+    }
+    return;
+  }
+
+  if (existingTab?.status === 'done-unseen' && status !== 'done-unseen') {
+    clearPendingDoneTimer(tabId);
     return;
   }
 
@@ -2124,8 +2250,58 @@ api.onTabStatusChanged((tabId, status) => {
     syncPendingAttention(false);
   }
 
-  // Auto-submit disabled — user sends notepad blocks manually
 });
+
+// Queue auto-send: when Claude transitions to idle-ready (true end of a turn,
+// debounced server-side), push the next non-empty note block as if the user
+// had typed it and pressed Enter. AwaitingConfirm is intentionally not a
+// trigger — the user must answer Y/N first, so we don't auto-send over it.
+//
+// Re-entry guard: the per-tab cooldown blocks a rapid second fire if the
+// backend emits two idle-ready events in close succession (e.g. resize redraw
+// after commit). Without it, two blocks could be sent into the same prompt.
+const lastQueueSendAt = new Map<string, number>();
+
+// Auto-send toggle — defaults to OFF so a freshly installed build won't surprise
+// users by injecting notepad blocks into their first AI session. The user opts
+// in via the header switch; the choice persists across reloads.
+const AUTOSEND_STORAGE_KEY = 'notepad-autosend-enabled';
+let notepadAutoSendEnabled = localStorage.getItem(AUTOSEND_STORAGE_KEY) === '1';
+(() => {
+  const cb = document.getElementById('notepad-autosend-checkbox') as HTMLInputElement | null;
+  if (!cb) return;
+  cb.checked = notepadAutoSendEnabled;
+  cb.addEventListener('change', () => {
+    notepadAutoSendEnabled = cb.checked;
+    localStorage.setItem(AUTOSEND_STORAGE_KEY, cb.checked ? '1' : '0');
+  });
+})();
+
+api.onTabAiUiStateChanged((tabId, state) => {
+  if (state !== 'idle-ready') return;
+  if (!notepadAutoSendEnabled) return;
+  // Hiding the notepad is the user's "stop pushing me prompts" gesture — if the
+  // panel is collapsed they can't even see the queue, so auto-sending into the
+  // active terminal would feel like an invisible side effect.
+  if (notepadEl.classList.contains('hidden')) return;
+  const tab = appState.tabs.get(tabId);
+  if (!tab || !tab.aiTool) return;
+  const next = tab.noteBlocks.find(
+    b => b.content.trim().length > 0 || (b.images && b.images.length > 0)
+  );
+  if (!next) return;
+  const lastSent = lastQueueSendAt.get(tabId) ?? 0;
+  if (Date.now() - lastSent < 1500) return;
+  // Small delay so Claude's input box is fully ready to receive paste.
+  setTimeout(() => {
+    const live = appState.tabs.get(tabId);
+    const stillThere = live?.noteBlocks.find(b => b.id === next.id);
+    if (!stillThere) return;
+    lastQueueSendAt.set(tabId, Date.now());
+    sendNoteBlock(tabId, next.id, true);
+  }, 300);
+});
+
 api.onTabAutoRenamed((tabId, name) => {
   const tab = appState.tabs.get(tabId);
   if (!tab || tab.title === name) return;

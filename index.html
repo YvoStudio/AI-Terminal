@@ -35,7 +35,11 @@
       <div id="notepad" class="hidden">
         <div id="notepad-header">
           <span>Notepad</span>
-          <button id="notepad-add-block" title="添加文本块">+</button>
+          <label id="notepad-autosend-toggle" class="switch" title="AI 输出完成后自动发送队列里第一个文本块">
+            <span class="switch-label">自动发送</span>
+            <input type="checkbox" id="notepad-autosend-checkbox">
+            <span class="switch-slider"></span>
+          </label>
         </div>
         <div id="notepad-blocks"></div>
       </div>

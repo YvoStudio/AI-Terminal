@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use vt100::Parser as VtParser;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -9,6 +10,34 @@ pub enum TabStatus {
     Executing,
     DoneUnseen,
     Waiting,
+}
+
+/// Classified UI state of an AI TUI session, derived from the rendered screen
+/// (not the raw byte stream). This is the deterministic source of truth that
+/// replaces the old "any-output-chunk ⇒ executing + 2s idle ⇒ done" heuristic,
+/// which falsely flipped during inter-tool pauses and animation gaps.
+///
+/// Emitted separately as `tab-ai-ui-state-changed` so future queue logic can
+/// distinguish IdleReady (safe to auto-submit) from AwaitingConfirm (DO NOT
+/// auto-submit — needs human Y/N).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiUiState {
+    Unknown,
+    Working,
+    IdleReady,
+    AwaitingConfirm,
+}
+
+impl AiUiState {
+    fn as_str(self) -> &'static str {
+        match self {
+            AiUiState::Unknown => "unknown",
+            AiUiState::Working => "working",
+            AiUiState::IdleReady => "idle-ready",
+            AiUiState::AwaitingConfirm => "awaiting-confirm",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +61,17 @@ struct TabState {
     last_output_ms: u64,
     last_input_ms: u64,
     last_done_unseen_ms: u64,
+    /// Virtual screen for AI TUI sessions. Every output byte is fed through so
+    /// we can classify the rendered footer ("esc to interrupt", "? for shortcuts",
+    /// "Do you want…") instead of guessing from stream silence.
+    screen: VtParser,
+    ui_state: AiUiState,
+    /// (target_state, first_observed_at_ms). Set when we observe an idle/confirm
+    /// classification while currently Working — committed only after the screen
+    /// has stayed in that state for the debounce window, because Claude's
+    /// spinner box momentarily disappears between frame redraws during streaming
+    /// and a single observation isn't enough to call "done".
+    pending_idle: Option<(AiUiState, u64)>,
 }
 
 impl TabState {
@@ -49,6 +89,10 @@ impl TabState {
             last_output_ms: 0,
             last_input_ms: 0,
             last_done_unseen_ms: 0,
+            // Matches pty_manager.rs defaults; resize_screen() keeps it in sync.
+            screen: VtParser::new(30, 120, 0),
+            ui_state: AiUiState::Unknown,
+            pending_idle: None,
         }
     }
 
@@ -104,6 +148,7 @@ impl OutputParser {
         on_rename: impl Fn(String, String),
         on_ai_detected: impl Fn(String, String, String),
         on_cwd_changed: impl Fn(String, String),
+        on_ui_state: impl Fn(String, &'static str),
     ) {
         let state = self
             .states
@@ -111,6 +156,12 @@ impl OutputParser {
             .or_insert_with(TabState::new);
         let now = now_ms();
         state.last_output_ms = now;
+
+        // Feed every byte into the virtual screen first — this is what every
+        // downstream "is the AI working / waiting / asking?" decision is built
+        // on. The parser maintains a real terminal grid (cursor pos, attrs,
+        // scrollback), so cursor blinks and title repaints don't perturb it.
+        state.screen.process(raw.as_bytes());
 
         // Output-side AI detection (first, so subsequent logic can use ai_tool).
         // Catches Claude / Aider sessions started outside our input tracking
@@ -129,12 +180,74 @@ impl OutputParser {
             }
         }
 
-        // For AI tabs, any output chunk means streaming is in progress. The idle-stream
-        // watcher (lib.rs) will flip to DoneUnseen after the last chunk.
-        // BUT: after we fire DoneUnseen once, refuse to re-arm executing until the user
-        // actually inputs something. Otherwise idle UI redraws (cursor blink, time
-        // counters) keep retriggering the red dot every couple of seconds.
-        if state.ai_tool.is_some() && !state.was_executing {
+        let tui_ai = is_tui_ai(state.ai_tool.as_deref());
+
+        if tui_ai {
+            // Classification is the source of truth. Working commits immediately
+            // because "esc to interrupt" is a strong positive signal. IdleReady
+            // is debounced via pending_idle: Claude's spinner box briefly
+            // disappears between frame redraws during streaming, which would
+            // otherwise cause Working ↔ IdleReady oscillation. AwaitingConfirm
+            // commits immediately — its pattern ("Do you want…" + numbered
+            // option) doesn't appear as transient flicker.
+            let new_ui = classify_ai_ui(state.screen.screen());
+            match new_ui {
+                AiUiState::Working => {
+                    state.pending_idle = None;
+                    if state.ui_state != AiUiState::Working {
+                        eprintln!(
+                            "[ui-state] tab={} {:?} → Working",
+                            tab_id, state.ui_state
+                        );
+                        state.ui_state = AiUiState::Working;
+                        on_ui_state(tab_id.to_string(), "working");
+                        if !state.was_executing {
+                            state.was_executing = true;
+                            on_status(tab_id.to_string(), TabStatus::Executing);
+                        }
+                    }
+                }
+                AiUiState::AwaitingConfirm => {
+                    state.pending_idle = None;
+                    if state.ui_state != AiUiState::AwaitingConfirm {
+                        eprintln!(
+                            "[ui-state] tab={} {:?} → AwaitingConfirm",
+                            tab_id, state.ui_state
+                        );
+                        state.ui_state = AiUiState::AwaitingConfirm;
+                        on_ui_state(tab_id.to_string(), "awaiting-confirm");
+                        let next = if state.was_executing {
+                            state.was_executing = false;
+                            state.last_done_unseen_ms = now;
+                            TabStatus::DoneUnseen
+                        } else {
+                            TabStatus::Waiting
+                        };
+                        on_status(tab_id.to_string(), next);
+                    }
+                }
+                AiUiState::IdleReady => {
+                    if state.ui_state == AiUiState::Working {
+                        // Defer — commit only after debounce in commit_pending_idle().
+                        match state.pending_idle {
+                            Some((AiUiState::IdleReady, _)) => {}
+                            _ => state.pending_idle = Some((AiUiState::IdleReady, now)),
+                        }
+                    } else if state.ui_state != AiUiState::IdleReady {
+                        eprintln!(
+                            "[ui-state] tab={} {:?} → IdleReady",
+                            tab_id, state.ui_state
+                        );
+                        state.ui_state = AiUiState::IdleReady;
+                        on_ui_state(tab_id.to_string(), "idle-ready");
+                        on_status(tab_id.to_string(), TabStatus::Waiting);
+                    }
+                }
+                AiUiState::Unknown => {}
+            }
+        } else if state.ai_tool.is_some() && !state.was_executing {
+            // Non-TUI AI (e.g., the auto-detected "shell" pseudo-tool): keep the
+            // legacy chunk-arrival path with the input-gate against idle redraws.
             let allow = state.last_input_ms >= state.last_done_unseen_ms;
             eprintln!(
                 "[exec-gate] tab={} last_input={} last_done={} allow={}",
@@ -156,27 +269,26 @@ impl OutputParser {
             }
         }
 
-        // Parse OSC 133 (shell integration): C = command started, D = command done, A = prompt shown
+        // Parse OSC 133 (shell integration): C = command started, D = command done, A = prompt shown.
+        // For TUI AI tabs the vt100 classification above already drives status — skip these flips
+        // so we don't fight ourselves when Claude happens to emit OSC 133 inside its own UI.
         for marker in extract_osc133(raw) {
             match marker {
                 Osc133::CommandStart => {
-                    // Same input-gate as the chunk path: don't let idle redraws that
-                    // happen to include OSC 133 C re-arm executing after a done-unseen.
-                    if state.last_input_ms >= state.last_done_unseen_ms {
+                    if !tui_ai && state.last_input_ms >= state.last_done_unseen_ms {
                         state.was_executing = true;
                         on_status(tab_id.to_string(), TabStatus::Executing);
                     }
                 }
                 Osc133::CommandDone(_exit) => {
-                    if state.was_executing {
+                    if !tui_ai && state.was_executing {
                         state.was_executing = false;
                         state.last_done_unseen_ms = now;
                         on_status(tab_id.to_string(), TabStatus::DoneUnseen);
                     }
                 }
                 Osc133::PromptStart => {
-                    // If not mid-execution, we're at a fresh prompt → Waiting only makes sense for AI tabs
-                    if state.ai_tool.is_some() && !state.was_executing {
+                    if !tui_ai && state.ai_tool.is_some() && !state.was_executing {
                         on_status(tab_id.to_string(), TabStatus::Waiting);
                     }
                 }
@@ -189,14 +301,13 @@ impl OutputParser {
         if let Some((title, has_status_prefix)) = extract_osc_title(raw) {
             eprintln!("OSC title detected: '{}'", title);
             if state.ai_tool.is_some() && !title.is_empty() {
-                // Only the rename matters here. Claude Code emits the title repeatedly
-                // during redraws WITHOUT any status prefix, so we cannot use this to
-                // infer streaming state — the idle-stream watcher (lib.rs) handles that.
-                if has_status_prefix && state.last_input_ms >= state.last_done_unseen_ms {
-                    // Gate re-arming on user input: Claude Code keeps repainting the
-                    // title with a spinner prefix even when truly idle. Without this
-                    // gate, the idle-stream watcher re-fires DoneUnseen seconds after
-                    // the user already saw the tab.
+                // Rename is always useful. The title's status-prefix-driven "executing"
+                // flip is kept only for non-TUI AI; TUI tabs trust vt100 classification
+                // (Claude repaints the title with a spinner prefix even when idle, which
+                // used to falsely re-arm executing here).
+                if !tui_ai && has_status_prefix
+                    && state.last_input_ms >= state.last_done_unseen_ms
+                {
                     state.was_executing = true;
                     on_status(tab_id.to_string(), TabStatus::Executing);
                 }
@@ -251,16 +362,20 @@ impl OutputParser {
                 continue;
             }
 
-            // User prompt: ❯ xxx
+            // User prompt: ❯ xxx — for TUI AI we trust vt100 classification
+            // (the bare ❯ glyph also shows up inside confirm boxes, which this
+            // crude line check can't distinguish).
             if state.ai_tool.is_some() && is_ai_waiting_prompt(trimmed) {
-                let next_status = if state.was_executing {
-                    state.was_executing = false;
-                    state.last_done_unseen_ms = now;
-                    TabStatus::DoneUnseen
-                } else {
-                    TabStatus::Waiting
-                };
-                on_status(tab_id.to_string(), next_status);
+                if !tui_ai {
+                    let next_status = if state.was_executing {
+                        state.was_executing = false;
+                        state.last_done_unseen_ms = now;
+                        TabStatus::DoneUnseen
+                    } else {
+                        TabStatus::Waiting
+                    };
+                    on_status(tab_id.to_string(), next_status);
+                }
                 continue;
             }
 
@@ -358,7 +473,7 @@ impl OutputParser {
             }
         }
 
-        if state.ai_tool.is_some() && is_ai_waiting_prompt(state.buffer.trim()) {
+        if !tui_ai && state.ai_tool.is_some() && is_ai_waiting_prompt(state.buffer.trim()) {
             let next_status = if state.was_executing {
                 state.was_executing = false;
                 state.last_done_unseen_ms = now;
@@ -379,23 +494,73 @@ impl OutputParser {
         state.buffer.clear();
     }
 
-    /// Scan all tabs and return tab_ids whose AI session has been idle long enough
-    /// to consider the streaming finished. Caller is responsible for emitting status events.
+    /// Last-resort safety net: if a tab has been silent for ages AND we never managed
+    /// to classify its UI state (vt100 returned Unknown — usually means a non-Claude
+    /// AI whose footer patterns we haven't taught it yet), flip to done so the user
+    /// at least gets a red dot. TUI AI tabs with a known ui_state are skipped because
+    /// vt100 already drives transitions deterministically.
     pub fn collect_idle_done(&mut self, idle_threshold_ms: u64) -> Vec<String> {
         let now = now_ms();
         let mut done = Vec::new();
         for (tab_id, state) in self.states.iter_mut() {
-            if state.was_executing
-                && state.ai_tool.is_some()
-                && state.last_output_ms > 0
-                && now.saturating_sub(state.last_output_ms) >= idle_threshold_ms
+            if !state.was_executing
+                || state.ai_tool.is_none()
+                || state.last_output_ms == 0
+                || now.saturating_sub(state.last_output_ms) < idle_threshold_ms
             {
-                state.was_executing = false;
-                state.last_done_unseen_ms = now;
-                done.push(tab_id.clone());
+                continue;
             }
+            // Trust vt100 for tabs we can classify.
+            if is_tui_ai(state.ai_tool.as_deref())
+                && state.ui_state != AiUiState::Unknown
+            {
+                continue;
+            }
+            state.was_executing = false;
+            state.last_done_unseen_ms = now;
+            done.push(tab_id.clone());
         }
         done
+    }
+
+    /// Commit any debounced IdleReady transitions whose observation window has
+    /// elapsed without a Working observation cancelling them. Returns the tabs
+    /// that flipped, along with their resulting TabStatus and ui_state string,
+    /// so the caller can emit the same two events that process() emits on
+    /// immediate transitions.
+    pub fn commit_pending_idle(&mut self, debounce_ms: u64)
+        -> Vec<(String, TabStatus, &'static str)>
+    {
+        let now = now_ms();
+        let mut out = Vec::new();
+        for (tab_id, state) in self.states.iter_mut() {
+            let Some((target, since)) = state.pending_idle else { continue };
+            if now.saturating_sub(since) < debounce_ms { continue; }
+
+            eprintln!(
+                "[ui-state] tab={} {:?} → {:?} (debounced)",
+                tab_id, state.ui_state, target
+            );
+            state.ui_state = target;
+            state.pending_idle = None;
+            let status = if state.was_executing {
+                state.was_executing = false;
+                state.last_done_unseen_ms = now;
+                TabStatus::DoneUnseen
+            } else {
+                TabStatus::Waiting
+            };
+            out.push((tab_id.clone(), status, target.as_str()));
+        }
+        out
+    }
+
+    /// Forward terminal resize to each tab's virtual screen so the bottom-row
+    /// classification keeps looking at the right rows after the user resizes.
+    pub fn resize_screen(&mut self, tab_id: &str, cols: u16, rows: u16) {
+        if let Some(state) = self.states.get_mut(tab_id) {
+            state.screen.set_size(rows, cols);
+        }
     }
 
     /// Record that the user wrote to this tab's PTY. Used to gate re-arming of
@@ -653,6 +818,57 @@ fn now_ms() -> u64 {
 
 fn strip_ansi(s: &str) -> String {
     strip_ansi_escapes::strip_str(s)
+}
+
+/// True for AI tools whose UI is a full-screen TUI we can introspect via vt100.
+/// "shell" (the auto-detected pseudo-tool for plain shells after 3 inputs) is
+/// not a TUI and is handled by the legacy OSC 133 / BEL path.
+fn is_tui_ai(ai_tool: Option<&str>) -> bool {
+    matches!(ai_tool, Some("claude") | Some("codex") | Some("aider") | Some("opencode"))
+}
+
+/// Classify an AI TUI's current UI state by inspecting the bottom rows of the
+/// rendered screen.
+///
+/// Anchor on the working indicator, not the idle indicator:
+/// - `esc to interrupt` only renders inside the spinner box while Claude is
+///   actually streaming. Its presence is a deterministic Working signal.
+/// - Its absence (combined with the input-box prompt `❯` being on screen,
+///   confirming we're looking at a real Claude UI and not a transient blank)
+///   is the IdleReady signal. We tried matching `? for shortcuts` previously
+///   but Claude Code v2.1 removed that footer.
+/// - `Do you want…` / `Do you trust…` plus a numbered option is the
+///   AwaitingConfirm box; checked first so a stale spinner line above the
+///   confirm box doesn't misclassify it as Working.
+fn classify_ai_ui(screen: &vt100::Screen) -> AiUiState {
+    // Pull the bottom ~12 rows. Whole-screen scans risk matching old text that
+    // scrolled into history but is still rendered above the input box.
+    let contents = screen.contents();
+    let lines: Vec<&str> = contents.split('\n').collect();
+    let tail_start = lines.len().saturating_sub(12);
+    let tail = lines[tail_start..].join("\n");
+    let lower = tail.to_lowercase();
+
+    let asks = lower.contains("do you want") || lower.contains("do you trust");
+    let numbered = tail.contains("❯ 1.") || tail.contains("❯ 2.")
+        || tail.contains("> 1.") || tail.contains("> 2.")
+        || tail.contains("1. Yes");
+    if asks && numbered {
+        return AiUiState::AwaitingConfirm;
+    }
+
+    if lower.contains("esc to interrupt") {
+        return AiUiState::Working;
+    }
+
+    // Idle: working indicator absent and the input prompt is visible. The `❯`
+    // can be followed by a regular space or U+00A0 (non-breaking space — what
+    // Claude actually emits inside its input box).
+    if tail.contains("❯ ") || tail.contains("❯\u{a0}") {
+        return AiUiState::IdleReady;
+    }
+
+    AiUiState::Unknown
 }
 
 fn is_ai_waiting_prompt(line: &str) -> bool {

@@ -286,6 +286,7 @@ export class TabBar {
   }
 
   private dragGhost: HTMLElement | null = null;
+  private dropMarker: HTMLElement | null = null;
 
   private showDragGhost(tabTitle: string, x: number, y: number) {
     if (!this.dragGhost) {
@@ -300,6 +301,29 @@ export class TabBar {
 
   private hideDragGhost() {
     if (this.dragGhost) { this.dragGhost.remove(); this.dragGhost = null; }
+  }
+
+  /**
+   * Floating vertical bar marking the drop position during reorder. We paint it
+   * in document coordinates (position: fixed) so #tab-list's overflow:auto
+   * doesn't clip it like it would a 2px box-shadow on the target tab — that
+   * shadow was nearly invisible on the white theme when tabs were packed.
+   */
+  private showDropMarker(targetEl: HTMLElement, side: 'left' | 'right') {
+    if (!this.dropMarker) {
+      this.dropMarker = document.createElement('div');
+      this.dropMarker.className = 'tab-drop-marker';
+      document.body.appendChild(this.dropMarker);
+    }
+    const rect = targetEl.getBoundingClientRect();
+    const x = side === 'left' ? rect.left : rect.right;
+    this.dropMarker.style.left = (x - 2) + 'px';
+    this.dropMarker.style.top = rect.top + 'px';
+    this.dropMarker.style.height = rect.height + 'px';
+  }
+
+  private hideDropMarker() {
+    if (this.dropMarker) { this.dropMarker.remove(); this.dropMarker = null; }
   }
 
   private setupDrag(el: HTMLElement, id: string) {
@@ -320,6 +344,7 @@ export class TabBar {
         document.removeEventListener('mouseleave', onLeave);
         this.hideDropZone();
         this.hideDragGhost();
+        this.hideDropMarker();
         containerEl.querySelectorAll('.split-pane').forEach(p => p.classList.remove('drop-target'));
         this.tabListEl.querySelectorAll('.tab-group').forEach(g => g.classList.remove('drop-target-group'));
         if (!dragging) return;
@@ -389,16 +414,26 @@ export class TabBar {
         // Tab reorder highlighting (only when not in drop zone area and not over panes/groups)
         const hasDropTarget = !!containerEl.querySelector('.split-pane.drop-target') || !!this.tabListEl.querySelector('.tab-group.drop-target-group');
         if (!this.dropZone && !hasDropTarget) {
-          this.tabListEl.querySelectorAll('.tab').forEach(t => {
+          let hoveredTab: HTMLElement | null = null;
+          let hoveredSide: 'left' | 'right' = 'left';
+          this.tabListEl.querySelectorAll<HTMLElement>('.tab').forEach(t => {
             t.classList.remove('drag-over-left', 'drag-over-right');
             if (t === el) return;
             const rect = t.getBoundingClientRect();
             if (ev.clientX >= rect.left && ev.clientX <= rect.right && ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
               const midX = rect.left + rect.width / 2;
-              t.classList.toggle('drag-over-left', ev.clientX < midX);
-              t.classList.toggle('drag-over-right', ev.clientX >= midX);
+              hoveredSide = ev.clientX < midX ? 'left' : 'right';
+              hoveredTab = t;
+              // Keep the legacy box-shadow class too — it provides a fallback
+              // tint for users with custom CSS or reduced-motion overrides.
+              t.classList.toggle('drag-over-left', hoveredSide === 'left');
+              t.classList.toggle('drag-over-right', hoveredSide === 'right');
             }
           });
+          if (hoveredTab) this.showDropMarker(hoveredTab, hoveredSide);
+          else this.hideDropMarker();
+        } else {
+          this.hideDropMarker();
         }
       };
       const onUp = (ev: MouseEvent) => {

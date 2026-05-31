@@ -141,6 +141,11 @@ fn make_pty_callback(
                     mgr.update_cwd(&tid, cwd.clone());
                     let _ = app.emit("tab-cwd-changed", serde_json::json!({ "tabId": tid, "cwd": cwd }));
                 },
+                |tid, ui_state| {
+                    let _ = app.emit("tab-ai-ui-state-changed", serde_json::json!({
+                        "tabId": tid, "state": ui_state
+                    }));
+                },
             );
         }
     }
@@ -252,12 +257,21 @@ pub fn mark_terminal_input(
 #[tauri::command]
 pub fn resize_terminal(
     state: State<'_, Arc<RwLock<PtyManager>>>,
+    parser_state: State<'_, Arc<Mutex<OutputParser>>>,
     tab_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let mgr = state.read().map_err(|e| e.to_string())?;
-    mgr.resize(&tab_id, cols, rows)
+    {
+        let mgr = state.read().map_err(|e| e.to_string())?;
+        mgr.resize(&tab_id, cols, rows)?;
+    }
+    // Keep the virtual screen in lock-step with the real PTY so bottom-row
+    // classification doesn't drift after a window resize.
+    if let Ok(mut parser) = parser_state.lock() {
+        parser.resize_screen(&tab_id, cols, rows);
+    }
+    Ok(())
 }
 
 #[tauri::command]

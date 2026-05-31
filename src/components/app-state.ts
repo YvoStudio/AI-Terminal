@@ -33,15 +33,20 @@ export interface TabState {
   noteBlocks: NoteBlock[];
   cwd: string;
   userRenamed: boolean; // true if user manually renamed — blocks auto-rename
-  pastedImages: string[]; // ordered list of clipboard-image paste paths (for [Image #N] preview)
-  // 当前 claude 会话在 pastedImages 中的起点偏移。claude 内部 [Image #N] 计数会在
-  // /clear、resume、重启时归零,但我们的 pastedImages 是 tab 生命周期累积的;
-  // 通过解析输出中的 [Image #N] 检测重置(N=1 且历史 max > 1)来推进 sessionStart。
-  pastedSessionStart: number;
-  // claude 当前会话内见过的最大 [Image #N]。当我们看到 N=1 但 max > 1 时,认定
-  // claude 重置了会话(由 /clear、resume、重启 claude 引起),把 sessionStart 推到
-  // pastedImages.length - 1。
-  pastedMaxObservedN: number;
+  pastedImages: string[]; // legacy: ordered list of paste paths, kept for back-compat fallback.
+  pastedSessionStart: number; // legacy: offset into pastedImages for the current Claude session.
+  pastedMaxObservedN: number; // legacy.
+  // Tab-monotonic image numbering. We rewrite Claude's `[Image #N]` (which
+  // restarts at 1 every /clear or re-launch) to `[Image #M]` where M is a
+  // counter that only resets when the tab itself is closed. That way an old
+  // reference in scrollback can never get overwritten by a later paste reusing
+  // the same N.
+  pastedTotal: number; // next M to assign; starts at 0 (so first paste → M=1).
+  pastedById: Map<number, string>; // M → image path. Source of truth for click resolution.
+  pendingPasteIds: number[]; // FIFO queue of pasted M values awaiting Claude's next [Image #N].
+  claudeImageMap: Map<number, number>; // current session's Claude N → our M.
+  lastImageRefAt: number; // ms timestamp of the last [Image #N] we resolved (for stale-session detection).
+  outputResidue: string; // trailing partial `[Image #...` buffered across output chunks so we don't miss a token split mid-stream.
 }
 
 class AppState {
@@ -59,7 +64,14 @@ class AppState {
     this.tabCounter++;
     const tab: TabState = {
       id, title: `Terminal ${this.tabCounter}`, status: 'active', shell: 'cmd',
-      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false, pastedImages: [], pastedSessionStart: 0, pastedMaxObservedN: 0,
+      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false,
+      pastedImages: [], pastedSessionStart: 0, pastedMaxObservedN: 0,
+      pastedTotal: 0,
+      pastedById: new Map(),
+      pendingPasteIds: [],
+      claudeImageMap: new Map(),
+      lastImageRefAt: 0,
+      outputResidue: '',
     };
     this.tabs.set(id, tab);
     this.tabOrder.push(id);
@@ -143,6 +155,14 @@ class AppState {
       tab.pastedImages.shift();
       if (tab.pastedSessionStart > 0) tab.pastedSessionStart--;
     }
+    // Monotonic numbering: pastedById grows forever, pendingPasteIds queues the
+    // M for the next [Image #N] Claude emits.
+    if (!tab.pastedById) tab.pastedById = new Map();
+    if (!tab.pendingPasteIds) tab.pendingPasteIds = [];
+    tab.pastedTotal = (tab.pastedTotal || 0) + 1;
+    const m = tab.pastedTotal;
+    tab.pastedById.set(m, path);
+    tab.pendingPasteIds.push(m);
   }
 
   resetPastedImages(id: string) {
@@ -151,31 +171,93 @@ class AppState {
       tab.pastedImages = [];
       tab.pastedSessionStart = 0;
       tab.pastedMaxObservedN = 0;
+      // Note: deliberately NOT clearing pastedById / pastedTotal — those are
+      // tab-lifetime and only reset when the tab itself is closed.
+      tab.pendingPasteIds = [];
+      tab.claudeImageMap = new Map();
+      tab.outputResidue = '';
     }
   }
 
   /**
-   * 观察输出中的 [Image #N],推断 claude 会话边界:
-   * - 正常情况(maxN 单调递增):只更新 pastedMaxObservedN,不动 sessionStart
-   * - 检测到重置(N=1 且历史 max > 1):说明 /clear / resume / 重启了 claude,
-   *   把 sessionStart 推到 length - 1(最新一张图变成新会话的 #1)
+   * Map a Claude-emitted `[Image #N]` to our tab-monotonic M. Called as output
+   * streams. Drives the rewrite that gives the user a number that never resets
+   * within a tab's lifetime — so old scrollback references never get clobbered
+   * by a later paste that happened to reuse Claude's N.
+   *
+   * Heuristic for Claude session restart (e.g. /clear): if N is already mapped
+   * but we have a fresh paste queued AND the last image ref was observed more
+   * than 5 seconds ago, treat it as a new session and re-bind from the queue.
+   * The 5-second gate prevents the "user pasted twice before submitting" path
+   * from being mis-detected — back-to-back redraws stay within the window.
+   */
+  resolveClaudeImageN(id: string, n: number): number | undefined {
+    const tab = this.tabs.get(id);
+    if (!tab) return undefined;
+    if (!tab.claudeImageMap) tab.claudeImageMap = new Map();
+    if (!tab.pendingPasteIds) tab.pendingPasteIds = [];
+    const now = Date.now();
+    const STALE_MS = 5000;
+    const existing = tab.claudeImageMap.get(n);
+    if (existing !== undefined) {
+      const stale = (tab.lastImageRefAt || 0) > 0 && (now - (tab.lastImageRefAt || 0)) > STALE_MS;
+      if (stale && tab.pendingPasteIds.length > 0) {
+        tab.claudeImageMap.clear();
+      } else {
+        tab.lastImageRefAt = now;
+        return existing;
+      }
+    }
+    if (tab.pendingPasteIds.length > 0) {
+      const m = tab.pendingPasteIds.shift()!;
+      tab.claudeImageMap.set(n, m);
+      tab.lastImageRefAt = now;
+      return m;
+    }
+    tab.lastImageRefAt = now;
+    return undefined;
+  }
+
+  /**
+   * Streaming rewrite: replace each `[Image #N]` in a freshly arrived chunk
+   * with `[Image #M]`. Holds back any trailing partial `[Image #…` so that a
+   * token split across chunk boundaries still gets rewritten when its tail
+   * arrives. The unrewritten residue is returned to the caller so they can
+   * also write the visible portion to the terminal first.
+   */
+  rewriteImageRefsForOutput(id: string, chunk: string): string {
+    const tab = this.tabs.get(id);
+    if (!tab) return chunk;
+    const data = (tab.outputResidue || '') + chunk;
+    // Hold back a trailing partial token if the buffer ends mid-`[Image #...`.
+    let safeEnd = data.length;
+    const tail = data.slice(Math.max(0, data.length - 16));
+    const partial = tail.match(/\[(I(m(a(g(e( +#? *\d*)?)?)?)?)?)?$/);
+    if (partial && partial[0].length > 0) {
+      safeEnd = data.length - partial[0].length;
+    }
+    const head = data.slice(0, safeEnd);
+    tab.outputResidue = data.slice(safeEnd);
+    return head.replace(/\[Image #(\d+)\]/g, (match, nStr) => {
+      const n = parseInt(nStr, 10);
+      const m = this.resolveClaudeImageN(id, n);
+      return (m !== undefined && m !== n) ? `[Image #${m}]` : match;
+    });
+  }
+
+  /**
+   * 观察输出中的 [Image #N],把"当前 claude 会话的图像"锚定到 pastedImages 末尾的
+   * maxN 张。这样 /clear、resume、重启 claude 等会话边界事件不再需要专门检测——
+   * 每个新会话从 #1 开始,且最近的一次粘贴一定是当前 #N,所以"最后 maxN 张就是当前
+   * 会话"恒成立。旧的"只在 N=1 且历史 max>1 时重置"漏掉了上一会话只有一张图的情况。
    */
   alignPastedFromOutput(id: string, maxN: number) {
     const tab = this.tabs.get(id);
     if (!tab || maxN <= 0) return;
-    if (tab.pastedSessionStart == null) tab.pastedSessionStart = 0;
-    if (tab.pastedMaxObservedN == null) tab.pastedMaxObservedN = 0;
     const len = tab.pastedImages?.length || 0;
-
-    if (maxN === 1 && tab.pastedMaxObservedN > 1 && len > 0) {
-      // claude 重置了:最近一次 paste 现在是新会话的 [Image #1]
-      tab.pastedSessionStart = len - 1;
-      tab.pastedMaxObservedN = 1;
-    } else if (maxN > tab.pastedMaxObservedN) {
-      // claude 会话内 N 单调增长,只追计数
-      tab.pastedMaxObservedN = maxN;
-    }
-    // else:maxN <= 历史 max 但 > 1,可能是 scrollback 重绘,忽略
+    if (len === 0) return;
+    tab.pastedSessionStart = Math.max(0, len - maxN);
+    tab.pastedMaxObservedN = Math.max(tab.pastedMaxObservedN || 0, maxN);
   }
 
   addSidebarEntry(id: string, entry: SidebarEntry) {

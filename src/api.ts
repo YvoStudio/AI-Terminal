@@ -111,6 +111,12 @@ export const api = {
     });
   },
 
+  onTabAiUiStateChanged(cb: (tabId: string, state: 'working' | 'idle-ready' | 'awaiting-confirm' | 'unknown') => void): void {
+    listen<{ tabId: string; state: string }>('tab-ai-ui-state-changed', (e) => {
+      cb(e.payload.tabId, e.payload.state as any);
+    });
+  },
+
   onCwdChanged(cb: (tabId: string, cwd: string) => void): void {
     listen<{ tabId: string; cwd: string }>('tab-cwd-changed', (e) => {
       cb(e.payload.tabId, e.payload.cwd);

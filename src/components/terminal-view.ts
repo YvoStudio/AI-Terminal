@@ -61,6 +61,10 @@ export class TerminalView {
       allowProposedApi: true,
       rightClickSelectsWord: true,
       macOptionClickForcesSelection: true,
+      // Claude TUI 在 diff 高亮行用 ANSI white 作前景,在浅色主题下会与浅绿/浅红
+      // 背景几乎同色而消失。开启 WCAG AA 自动对比度让 xterm.js 在前景对比不足
+      // 时自动调亮/调暗,而不需要为每个主题手调每个 ANSI 槽位。
+      minimumContrastRatio: 4.5,
       // OSC 8 hyperlinks: cmd/ctrl-click opens via Tauri shell plugin.
       // xterm.js invokes `activate` on click events for OSC 8 escaped URIs.
       linkHandler: {
@@ -420,20 +424,31 @@ export class TerminalView {
             activate: () => {
               const tab = appState.tabs.get(tabId);
               if (!tab) return;
+              const preview = (window as any).showImagePreview;
+              if (typeof preview !== 'function') return;
+              // Primary path: the rewriter turned Claude's N into our M, so the
+              // number we just parsed IS M. Look it up in the tab-monotonic
+              // map. Carousel order = ascending M so [prev]/[next] navigates
+              // through every paste in this tab's lifetime.
+              const byId = tab.pastedById;
+              if (byId && byId.has(n)) {
+                const ms = Array.from(byId.keys()).sort((a, b) => a - b);
+                const paths = ms.map(k => convertFileSrc(byId.get(k)!));
+                preview(paths, ms.indexOf(n));
+                return;
+              }
+              // Fallback for legacy scrollback rendered before the rewriter
+              // shipped — those tokens are still Claude's raw N. Use the old
+              // session-start indexing into pastedImages.
               const allPaths = tab.pastedImages || [];
               if (allPaths.length === 0) return;
               const sessionStart = tab.pastedSessionStart || 0;
               const sessionPaths = allPaths.slice(sessionStart);
-              const preview = (window as any).showImagePreview;
-              if (typeof preview !== 'function') return;
               if (n - 1 < sessionPaths.length) {
-                // 当前 claude 会话内的引用,优先级最高
                 preview(sessionPaths.map(p => convertFileSrc(p)), n - 1);
               } else if (n - 1 < allPaths.length) {
-                // 历史 token(scrollback 里 /clear 前的引用):兜底用完整数组按 N 直找
                 preview(allPaths.map(p => convertFileSrc(p)), n - 1);
               }
-              // 否则:超出本地累积上限(可能是 resumed 会话或 shift 过的旧引用),静默
             },
           });
         }
@@ -472,10 +487,14 @@ export class TerminalView {
 
     // Listen for output from Rust backend
     api.onTerminalOutput(tabId, (data) => {
-      this.terminal.write(data);
-      // 实时解析 claude 输出中的 [Image #N] 计数,回推会话起点。
-      // 修复:同一 tab 内 /clear 或重启 claude 后,内部 N 归零,但我们 pastedImages 是
-      // tab 维度累积的,会导致 [Image #1] 错点到第一张历史图。
+      // Tab-monotonic image numbering. Claude restarts its [Image #N] counter
+      // every /clear or re-launch — rewriting it to our M (which never resets
+      // until the tab is closed) means old scrollback references can never get
+      // overwritten by a later paste reusing the same N. The legacy
+      // alignPastedFromOutput stays as a fallback for refs that streamed past
+      // before this rewriter shipped.
+      const rewritten = appState.rewriteImageRefsForOutput(tabId, data);
+      this.terminal.write(rewritten);
       const re = /\[Image #(\d+)\]/g;
       let maxN = 0;
       let m: RegExpExecArray | null;
