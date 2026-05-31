@@ -8,6 +8,10 @@ on:
 
 jobs:
   build:
+    # Keep individual platform builds uploading to a DRAFT release so a half-
+    # finished matrix never leaves a public release with only Mac binaries. The
+    # `publish` job below flips the draft to published once every platform's
+    # asset upload has succeeded.
     permissions:
       contents: write
     strategy:
@@ -138,3 +142,24 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  publish:
+    # Flip the draft to published once every matrix build succeeded. Skipped
+    # automatically if any build job failed (default `needs:` semantics), so a
+    # broken Windows build never leaks a Mac-only release to the public.
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # tauri-action created the release as a draft from every matrix job;
+          # they all converge on the same tag, so a single edit promotes it.
+          gh release edit "$TAG" --repo "$REPO" --draft=false
+          echo "Released $TAG"
