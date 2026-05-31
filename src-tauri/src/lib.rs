@@ -165,7 +165,7 @@ pub fn run() {
                 .icon_as_template(false)
                 .tooltip("AI Terminal")
                 .menu(&tray_menu)
-                .menu_on_left_click(false)
+                .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     if event.id() == "tray-quit" {
                         app.exit(0);

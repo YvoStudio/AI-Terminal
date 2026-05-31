@@ -282,6 +282,7 @@ ZDOTDIR="{home}"
         }
     }
 
+    #[allow(dead_code)]
     pub fn destroy_all(&mut self) {
         self.instances.clear();
     }

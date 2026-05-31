@@ -500,18 +500,6 @@ pub async fn select_directory(app: AppHandle) -> Result<String, String> {
     Ok(path.map(|p| p.to_string()).unwrap_or_default())
 }
 
-#[tauri::command]
-pub async fn select_path(app: AppHandle) -> Result<String, String> {
-    use tauri_plugin_dialog::DialogExt;
-    // Use pick_folder first won't work — use std approach to show open panel with both
-    // On macOS, blocking_pick_file allows file selection; for dirs use separate command
-    // Simplest: try file first, if cancelled return empty
-    let path = app.dialog()
-        .file()
-        .set_title("选择文件或目录")
-        .blocking_pick_file();
-    Ok(path.map(|p| p.to_string()).unwrap_or_default())
-}
 
 // ── Claude session scanning ───────────────────────────────────────────────
 
@@ -826,7 +814,7 @@ pub fn read_clipboard_image() -> Result<String, String> {
 // ── Clipboard image ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn save_clipboard_image(app: AppHandle, data_url: String) -> Result<String, String> {
+pub fn save_clipboard_image(_app: AppHandle, data_url: String) -> Result<String, String> {
     let prefix = "data:image/";
     if !data_url.starts_with(prefix) { return Err("Invalid data URL".into()); }
     let rest = &data_url[prefix.len()..];

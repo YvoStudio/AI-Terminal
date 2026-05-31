@@ -52,7 +52,6 @@ struct TabState {
     entries: Vec<SidebarEntry>,
     buffer: String,
     mute_until: u64,
-    is_active: bool,
     was_executing: bool,
     user_input_count: u32,
     auto_renamed: bool,
@@ -80,7 +79,6 @@ impl TabState {
             entries: Vec::new(),
             buffer: String::new(),
             mute_until: 0,
-            is_active: false,
             was_executing: false,
             user_input_count: 0,
             auto_renamed: false,
@@ -112,6 +110,7 @@ impl OutputParser {
         }
     }
 
+    #[allow(dead_code)]
     pub fn init_tab(&mut self, tab_id: &str) {
         self.states
             .entry(tab_id.to_string())
@@ -485,6 +484,7 @@ impl OutputParser {
         }
     }
 
+    #[allow(dead_code)]
     pub fn mute_tab(&mut self, tab_id: &str, ms: u64) {
         let state = self
             .states
