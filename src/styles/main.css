@@ -185,7 +185,8 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .note-block-pointer-marker { position: fixed; height: 3px; background: var(--accent-blue); border-radius: 2px; z-index: 9999; pointer-events: none; box-shadow: 0 0 6px var(--accent-blue); transition: opacity 0.08s; }
 body.note-block-reordering { cursor: grabbing !important; user-select: none; }
 body.note-block-reordering * { cursor: grabbing !important; }
-.note-block textarea { background: transparent; color: var(--text-primary); border: none; outline: none; padding: 10px 12px; font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; line-height: 1.5; resize: none; min-height: 60px; }
+/* padding-right 给右上角绝对定位的拖拽手柄(28px 宽)留出空间，避免文字与其重叠 */
+.note-block textarea { background: transparent; color: var(--text-primary); border: none; outline: none; padding: 10px 34px 10px 12px; font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; line-height: 1.5; resize: none; min-height: 60px; }
 .note-block textarea::placeholder { color: var(--text-muted); }
 .note-block-actions { display: flex; justify-content: flex-end; gap: 4px; padding: 4px 8px 6px; border-top: 1px solid var(--border-color); }
 .note-block-btn { border: none; background: none; color: var(--text-muted); cursor: pointer; font-size: 11px; padding: 2px 8px; border-radius: 3px; display: flex; align-items: center; gap: 3px; }
@@ -194,7 +195,8 @@ body.note-block-reordering * { cursor: grabbing !important; }
 .note-block-btn.send:hover { background: rgba(78, 201, 176, 0.15); }
 .note-block-btn.delete { color: var(--accent-red); }
 .note-block-btn.delete:hover { background: rgba(241, 76, 76, 0.15); }
-.note-block-images { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px; }
+/* 同样为拖拽手柄留出右侧空间（图片区位于块顶部时） */
+.note-block-images { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 34px 6px 10px; }
 .note-block-img-wrap { position: relative; width: 60px; height: 60px; border-radius: 4px; overflow: hidden; border: 1px solid var(--border-color); }
 .note-block-img-wrap img { width: 100%; height: 100%; object-fit: cover; }
 .note-block-img-remove { position: absolute; top: 0; right: 0; background: rgba(0,0,0,0.7); color: #fff; border: none; cursor: pointer; font-size: 13px; line-height: 1; padding: 1px 4px; border-radius: 0 0 0 4px; opacity: 0; transition: opacity 0.15s; }
