@@ -14,6 +14,7 @@ Cross-platform tabbed terminal, deeply tuned for AI CLI tools (Claude Code in pa
 - **Themes** — multiple built-in color schemes, custom fonts
 
 ### AI optimizations
+- **Note queue · auto-submit to AI** — the side notepad holds a stack of text blocks (paste/drop images supported); with auto-send on, every time Claude finishes a turn and returns to idle the top block is injected as the next prompt and submitted with Enter, advancing the queue one by one with no manual babysitting. Manual "Send" instead just drops the content into the input box for you to review. Images are injected as a real paste, producing clickable `[Image #N]` references
 - **Tuned for Claude Code** — adapted to Claude Code's output rhythm, ANSI sequences, and long-output handling
 - **Triggers / Blocks** — detect key events in terminal output and run actions or inject code blocks
 - **Profiles** — per-tool / per-project launch arguments and environment variables
