@@ -838,6 +838,47 @@ pub fn save_clipboard_image(_app: AppHandle, data_url: String) -> Result<String,
     Ok(file_path.to_string_lossy().to_string())
 }
 
+/// Put an image (passed as a PNG data URL) onto the OS clipboard so an AI/TUI
+/// tool can read it via the empty-bracketed-paste trick — mirrors what a real
+/// Cmd+V image paste leaves in the clipboard, letting note-block images produce
+/// a proper `[Image #N]` reference instead of a raw path string.
+#[tauri::command]
+pub fn write_clipboard_image(data_url: String) -> Result<(), String> {
+    let prefix = "data:image/png;base64,";
+    let b64 = data_url
+        .strip_prefix(prefix)
+        .ok_or("Expected a PNG data URL")?;
+    let bytes = general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| e.to_string())?;
+
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    let width = info.width as usize;
+    let height = info.height as usize;
+
+    // canvas.toDataURL('image/png') emits 8-bit RGBA, but expand RGB defensively.
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
+        png::ColorType::Rgb => buf[..info.buffer_size()]
+            .chunks_exact(3)
+            .flat_map(|px| [px[0], px[1], px[2], 255])
+            .collect(),
+        other => return Err(format!("Unsupported PNG color type: {:?}", other)),
+    };
+
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width,
+            height,
+            bytes: rgba.into(),
+        })
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn convert_image_path(file_path: String) -> Result<String, String> {
     // Read the source image file

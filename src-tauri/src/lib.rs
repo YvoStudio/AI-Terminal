@@ -219,6 +219,7 @@ pub fn run() {
             commands::write_clipboard_text,
             commands::read_clipboard_image,
             commands::save_clipboard_image,
+            commands::write_clipboard_image,
             commands::convert_image_path,
             commands::notify_task_done,
             commands::clear_badge,

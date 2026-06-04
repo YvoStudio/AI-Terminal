@@ -213,6 +213,11 @@ export const api = {
     return invoke<string>('save_clipboard_image', { dataUrl });
   },
 
+  /** Put a PNG (data URL) onto the OS clipboard, for the AI image-paste trick. */
+  async writeClipboardImage(dataUrl: string): Promise<void> {
+    return invoke('write_clipboard_image', { dataUrl });
+  },
+
   async convertImagePath(filePath: string): Promise<string> {
     return invoke<string>('convert_image_path', { filePath });
   },

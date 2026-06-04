@@ -1006,7 +1006,27 @@ function reorderNoteBlock(tabId: string, srcId: string, dstId: string, dropAbove
   if (tabId === appState.activeTabId) renderNoteBlocks(true);
   appState.persistTabs();
 }
-function sendNoteBlock(tabId: string, blockId: string, submit = false) {
+/** Re-encode an on-disk image as an 8-bit RGBA PNG data URL via an offscreen
+ * canvas, so the backend can push it onto the OS clipboard regardless of the
+ * source format (png/jpg/webp…). Returns null if the image can't be loaded. */
+function imagePathToPngDataUrl(path: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx || !canvas.width || !canvas.height) { resolve(null); return; }
+      ctx.drawImage(img, 0, 0);
+      try { resolve(canvas.toDataURL('image/png')); } catch { resolve(null); }
+    };
+    img.onerror = () => resolve(null);
+    img.src = convertFileSrc(path);
+  });
+}
+
+async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
   const tab = appState.tabs.get(tabId);
   if (!tab) return;
   const block = tab.noteBlocks.find(b => b.id === blockId);
@@ -1014,18 +1034,51 @@ function sendNoteBlock(tabId: string, blockId: string, submit = false) {
   const hasText = block.content.trim().length > 0;
   const hasImages = block.images && block.images.length > 0;
   if (!hasText && !hasImages) return;
-  // Send images first (as file paths), then text content
+  const isAI = !!tab.aiTool;
+  // Send images first, then text content.
   if (hasImages) {
     for (const imgPath of block.images!) {
-      api.writeTerminal(tabId, imgPath + ' ');
+      // For AI/TUI tools, replicate a real Cmd+V image paste: drop the image on
+      // the OS clipboard then send an empty bracketed paste so the tool reads it
+      // and renders a clickable [Image #N] ref (resolved by the terminal link
+      // provider). Falls back to the raw path if the clipboard write fails.
+      let pasted = false;
+      if (isAI) {
+        const dataUrl = await imagePathToPngDataUrl(imgPath);
+        if (dataUrl) {
+          try {
+            await api.writeClipboardImage(dataUrl);
+            appState.addPastedImage(tabId, imgPath);
+            api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
+            pasted = true;
+            // Let the tool read the clipboard before we overwrite it (next image).
+            await new Promise(r => setTimeout(r, 250));
+          } catch (err) { console.error('Failed to send note-block image:', err); }
+        }
+      }
+      if (!pasted) {
+        api.writeTerminal(tabId, imgPath + ' ');
+      }
     }
   }
   if (hasText) {
-    api.writeTerminal(tabId, block.content);
+    // For AI/TUI tools, deliver the text as a bracketed paste (multiline-safe,
+    // mirrors a real Cmd+V) instead of raw keystrokes whose embedded newlines
+    // Claude could mis-handle.
+    if (isAI) {
+      api.writeTerminal(tabId, '\x1b[200~' + block.content + '\x1b[201~');
+    } else {
+      api.writeTerminal(tabId, block.content);
+    }
   }
   // Auto-queue path: press Enter so Claude actually submits. Manual click on
   // "发送" leaves the prompt in the input box for the user to review.
   if (submit) {
+    // Delay + separate write so the Enter can't arrive before Claude has
+    // ingested the text. Two writeTerminal IPC calls have no ordering guarantee,
+    // so a bare \r racing ahead lands on an empty prompt — submitting nothing —
+    // and the block is left sitting in the input (the "last block won't send" bug).
+    if (hasText || hasImages) await new Promise(r => setTimeout(r, 120));
     api.writeTerminal(tabId, '\r');
   }
   removeNoteBlock(tabId, blockId);
@@ -1174,6 +1227,21 @@ function startBlockReorder(tabId: string, srcId: string, srcEl: HTMLElement, sta
   document.addEventListener('mouseup', onUp, true);
 }
 
+/** Restore the text caret to a block's textarea after a re-render (which rebuilds
+ * the DOM and drops focus) — e.g. so the user can keep typing right after pasting
+ * an image into the block. */
+function focusNoteBlock(blockId: string): void {
+  requestAnimationFrame(() => {
+    const ta = notepadBlocksEl.querySelector(
+      `textarea[data-block-id="${blockId}"]`
+    ) as HTMLTextAreaElement | null;
+    if (!ta) return;
+    ta.focus();
+    const end = ta.value.length;
+    ta.setSelectionRange(end, end);
+  });
+}
+
 function renderNoteBlocks(force = false) {
   if (!appState.activeTabId) { notepadBlocksEl.innerHTML = ''; lastRenderedTabId = null; lastRenderedBlockCount = -1; return; }
   const tab = appState.tabs.get(appState.activeTabId);
@@ -1239,6 +1307,7 @@ function renderNoteBlocks(force = false) {
                 block.images.push(filePath);
                 appState.persistTabs();
                 renderNoteBlocks(true);
+                focusNoteBlock(block.id);
               }
             } catch (err) { console.error('Failed to save pasted image:', err); }
           };
@@ -1279,6 +1348,7 @@ function renderNoteBlocks(force = false) {
                   block.images.push(filePath);
                   appState.persistTabs();
                   renderNoteBlocks(true);
+                  focusNoteBlock(block.id);
                 }
               } catch (err) { console.error('Failed to save dropped image:', err); }
             };
@@ -1344,6 +1414,7 @@ function renderNoteBlocks(force = false) {
         block.images.push(p);
         appState.persistTabs();
         renderNoteBlocks(true);
+        focusNoteBlock(block.id);
       }
     });
     const sendBtn = document.createElement('button');
