@@ -220,6 +220,7 @@ pub fn run() {
             commands::read_clipboard_image,
             commands::save_clipboard_image,
             commands::write_clipboard_image,
+            commands::write_clipboard_image_from_path,
             commands::convert_image_path,
             commands::notify_task_done,
             commands::clear_badge,

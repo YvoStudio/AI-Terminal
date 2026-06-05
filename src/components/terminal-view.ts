@@ -32,6 +32,15 @@ export class TerminalView {
   private kittyStack: number[] = [0];
   private get kittyFlags() { return this.kittyStack[this.kittyStack.length - 1] || 0; }
 
+  /** AI/TUI mode for input purposes: either AI auto-detection fired for this tab,
+   * or the program is driving the alternate screen buffer (Claude, vim, etc.).
+   * Mirrors the check the paste/keydown handlers use so callers like the note
+   * block send path treat a session the same way a live Cmd+V would. */
+  isAiMode(): boolean {
+    const tab = appState.tabs.get(this.tabId);
+    return !!tab?.aiTool || this.terminal.buffer.active.type === 'alternate';
+  }
+
   constructor(
     private tabId: string,
     container: HTMLElement,

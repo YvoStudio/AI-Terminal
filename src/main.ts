@@ -1006,26 +1006,6 @@ function reorderNoteBlock(tabId: string, srcId: string, dstId: string, dropAbove
   if (tabId === appState.activeTabId) renderNoteBlocks(true);
   appState.persistTabs();
 }
-/** Re-encode an on-disk image as an 8-bit RGBA PNG data URL via an offscreen
- * canvas, so the backend can push it onto the OS clipboard regardless of the
- * source format (png/jpg/webp…). Returns null if the image can't be loaded. */
-function imagePathToPngDataUrl(path: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext('2d');
-      if (!ctx || !canvas.width || !canvas.height) { resolve(null); return; }
-      ctx.drawImage(img, 0, 0);
-      try { resolve(canvas.toDataURL('image/png')); } catch { resolve(null); }
-    };
-    img.onerror = () => resolve(null);
-    img.src = convertFileSrc(path);
-  });
-}
-
 async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
   const tab = appState.tabs.get(tabId);
   if (!tab) return;
@@ -1034,7 +1014,12 @@ async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
   const hasText = block.content.trim().length > 0;
   const hasImages = block.images && block.images.length > 0;
   if (!hasText && !hasImages) return;
-  const isAI = !!tab.aiTool;
+  // Match the terminal's own paste detection: AI auto-detection may not have
+  // fired (restored session, heuristic miss), but a program on the alternate
+  // buffer (Claude, vim…) still wants a real bracketed-paste, not a raw path.
+  // Without this the image falls through to writeTerminal(path) and lands as
+  // unclickable literal text in Claude's prompt.
+  const isAI = !!tab.aiTool || (terminalViews.get(tabId)?.isAiMode() ?? false);
   // Send images first, then text content.
   if (hasImages) {
     for (const imgPath of block.images!) {
@@ -1044,17 +1029,17 @@ async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
       // provider). Falls back to the raw path if the clipboard write fails.
       let pasted = false;
       if (isAI) {
-        const dataUrl = await imagePathToPngDataUrl(imgPath);
-        if (dataUrl) {
-          try {
-            await api.writeClipboardImage(dataUrl);
-            appState.addPastedImage(tabId, imgPath);
-            api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
-            pasted = true;
-            // Let the tool read the clipboard before we overwrite it (next image).
-            await new Promise(r => setTimeout(r, 250));
-          } catch (err) { console.error('Failed to send note-block image:', err); }
-        }
+        try {
+          // Decode + push to the OS clipboard in the backend — no webview canvas
+          // round-trip, which could fail to load or taint and silently drop the
+          // image to the raw-path fallback below (the unclickable-path bug).
+          await api.writeClipboardImageFromPath(imgPath);
+          appState.addPastedImage(tabId, imgPath);
+          api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
+          pasted = true;
+          // Let the tool read the clipboard before we overwrite it (next image).
+          await new Promise(r => setTimeout(r, 250));
+        } catch (err) { console.error('Failed to send note-block image:', err); }
       }
       if (!pasted) {
         api.writeTerminal(tabId, imgPath + ' ');

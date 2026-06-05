@@ -218,6 +218,12 @@ export const api = {
     return invoke('write_clipboard_image', { dataUrl });
   },
 
+  /** Put an on-disk image onto the OS clipboard, decoded in the backend (robust
+   * across formats, no fragile webview canvas round-trip). For the AI paste. */
+  async writeClipboardImageFromPath(path: string): Promise<void> {
+    return invoke('write_clipboard_image_from_path', { path });
+  },
+
   async convertImagePath(filePath: string): Promise<string> {
     return invoke<string>('convert_image_path', { filePath });
   },

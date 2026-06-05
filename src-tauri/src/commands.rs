@@ -879,6 +879,33 @@ pub fn write_clipboard_image(data_url: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Put an on-disk image onto the OS clipboard, decoding it in the backend so we
+/// never round-trip through a webview canvas. The canvas path (load via the
+/// asset protocol → drawImage → toDataURL) is fragile: it can fail to load or
+/// taint the canvas and throw, silently dropping the image to a raw-path
+/// fallback. Reading the file here decodes png/jpg/webp/gif/bmp uniformly and
+/// hands arboard real RGBA pixels — the same thing a real Cmd+V leaves behind.
+#[tauri::command]
+pub fn write_clipboard_image_from_path(path: String) -> Result<(), String> {
+    let img = image::ImageReader::open(&path)
+        .map_err(|e| format!("open {}: {}", path, e))?
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|e| format!("decode {}: {}", path, e))?
+        .to_rgba8();
+    let (width, height) = (img.width() as usize, img.height() as usize);
+
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width,
+            height,
+            bytes: img.into_raw().into(),
+        })
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn convert_image_path(file_path: String) -> Result<String, String> {
     // Read the source image file
