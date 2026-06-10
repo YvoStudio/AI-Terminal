@@ -893,6 +893,113 @@ pub fn cleanup_tab_images(tab_id: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Skill / slash-command discovery (for the note-block `/` menu) ─────────────
+
+#[derive(Serialize)]
+pub struct SkillItem {
+    name: String,
+    description: String,
+}
+
+/// Parse a Claude `SKILL.md`: pull `name` + `description` from the YAML
+/// frontmatter. Falls back to the containing dir name when `name` is absent.
+fn parse_skill_md(path: &std::path::Path) -> Option<SkillItem> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut name = String::new();
+    let mut description = String::new();
+    if let Some(rest) = content.strip_prefix("---") {
+        if let Some(end) = rest.find("\n---") {
+            for line in rest[..end].lines() {
+                let line = line.trim();
+                if let Some(v) = line.strip_prefix("name:") {
+                    name = v.trim().trim_matches('"').to_string();
+                } else if let Some(v) = line.strip_prefix("description:") {
+                    description = v.trim().trim_matches('"').to_string();
+                }
+            }
+        }
+    }
+    if name.is_empty() {
+        name = path.parent()?.file_name()?.to_string_lossy().to_string();
+    }
+    Some(SkillItem { name, description })
+}
+
+/// Each immediate sub-dir holding a `SKILL.md` is one skill. First name wins, so
+/// callers scan project dirs before global to let a workspace override.
+fn scan_skill_dir(
+    dir: &std::path::Path,
+    out: &mut Vec<SkillItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let skill_md = entry.path().join("SKILL.md");
+        if skill_md.is_file() {
+            if let Some(item) = parse_skill_md(&skill_md) {
+                if seen.insert(item.name.clone()) {
+                    out.push(item);
+                }
+            }
+        }
+    }
+}
+
+/// List the skills available to the note-block `/` menu for the active tab.
+/// Claude tabs: workspace `<cwd>/.claude/skills` (precedence) + global
+/// `~/.claude/skills`. Codex tabs: `~/.codex/prompts/*.md` (its slash prompts).
+#[tauri::command]
+pub fn list_skills(cwd: Option<String>, ai_tool: Option<String>) -> Vec<SkillItem> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    if ai_tool.as_deref() == Some("codex") {
+        let dir = std::path::Path::new(&home).join(".codex").join("prompts");
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+                if !seen.insert(stem.to_string()) {
+                    continue;
+                }
+                let desc = fs::read_to_string(&p)
+                    .ok()
+                    .and_then(|c| {
+                        c.lines()
+                            .find(|l| !l.trim().is_empty())
+                            .map(|l| l.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                out.push(SkillItem { name: stem.to_string(), description: desc });
+            }
+        }
+    } else {
+        if let Some(cwd) = cwd.as_deref() {
+            if !cwd.is_empty() {
+                scan_skill_dir(
+                    &std::path::Path::new(cwd).join(".claude").join("skills"),
+                    &mut out,
+                    &mut seen,
+                );
+            }
+        }
+        if !home.is_empty() {
+            scan_skill_dir(
+                &std::path::Path::new(&home).join(".claude").join("skills"),
+                &mut out,
+                &mut seen,
+            );
+        }
+    }
+
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
 /// Put an image (passed as a PNG data URL) onto the OS clipboard so an AI/TUI
 /// tool can read it via the empty-bracketed-paste trick — mirrors what a real
 /// Cmd+V image paste leaves in the clipboard, letting note-block images produce

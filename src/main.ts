@@ -1213,6 +1213,119 @@ function startBlockReorder(tabId: string, srcId: string, srcEl: HTMLElement, sta
   document.addEventListener('mouseup', onUp, true);
 }
 
+// ── Note-block `/` skill menu ────────────────────────────────────────────────
+// Typing `/` as the FIRST character of a block pops a dropdown of the skills
+// available to the active tab (claude: workspace + ~/.claude/skills; codex:
+// ~/.codex/prompts). Arrow keys + Enter/Tab pick one; Esc dismisses.
+interface SkillItem { name: string; description: string; }
+const skillCache = new Map<string, SkillItem[]>(); // tabId → skills (per session)
+let skillMenuEl: HTMLDivElement | null = null;
+const skillMenu = {
+  active: false,
+  textarea: null as HTMLTextAreaElement | null,
+  block: null as { content: string } | null,
+  filtered: [] as SkillItem[],
+  index: 0,
+};
+
+function hideSkillMenu(): void {
+  skillMenu.active = false;
+  skillMenu.textarea = null;
+  skillMenu.block = null;
+  skillMenu.filtered = [];
+  if (skillMenuEl) skillMenuEl.style.display = 'none';
+}
+
+function renderSkillMenu(): void {
+  if (!skillMenuEl) {
+    skillMenuEl = document.createElement('div');
+    skillMenuEl.className = 'skill-menu';
+    document.body.appendChild(skillMenuEl);
+  }
+  const el = skillMenuEl;
+  const ta = skillMenu.textarea;
+  if (!skillMenu.filtered.length || !ta) { el.style.display = 'none'; return; }
+  el.innerHTML = '';
+  skillMenu.filtered.forEach((item, i) => {
+    const row = document.createElement('div');
+    row.className = 'skill-menu-item' + (i === skillMenu.index ? ' selected' : '');
+    const name = document.createElement('div');
+    name.className = 'skill-menu-name';
+    name.textContent = '/' + item.name;
+    const desc = document.createElement('div');
+    desc.className = 'skill-menu-desc';
+    desc.textContent = item.description;
+    row.append(name, desc);
+    // mousedown (not click) so the textarea doesn't blur before we apply.
+    row.addEventListener('mousedown', (e) => { e.preventDefault(); applySkill(i); });
+    el.appendChild(row);
+  });
+  const r = ta.getBoundingClientRect();
+  el.style.display = 'block';
+  el.style.left = r.left + 'px';
+  el.style.top = (r.bottom + 2) + 'px';
+  el.style.width = r.width + 'px';
+  const sel = el.querySelector('.skill-menu-item.selected');
+  if (sel) sel.scrollIntoView({ block: 'nearest' });
+}
+
+function applySkill(i: number): void {
+  const item = skillMenu.filtered[i];
+  const ta = skillMenu.textarea;
+  const block = skillMenu.block;
+  if (!item || !ta || !block) { hideSkillMenu(); return; }
+  const caret = ta.selectionStart;
+  // Replace only the leading `/token` (start → caret); keep anything after caret.
+  if (!/^\/(\S*)$/.test(ta.value.slice(0, caret))) { hideSkillMenu(); return; }
+  const insert = '/' + item.name + ' ';
+  ta.value = insert + ta.value.slice(caret);
+  block.content = ta.value;
+  ta.selectionStart = ta.selectionEnd = insert.length;
+  ta.style.height = 'auto';
+  ta.style.height = ta.scrollHeight + 'px';
+  appState.persistTabs();
+  hideSkillMenu();
+  ta.focus();
+}
+
+async function updateSkillMenu(textarea: HTMLTextAreaElement, block: { content: string }): Promise<void> {
+  const caret = textarea.selectionStart;
+  // Only when the block starts with `/` and the caret is still inside that
+  // leading token — i.e. start→caret is `/` followed by non-space chars only.
+  const m = textarea.value.slice(0, caret).match(/^\/(\S*)$/);
+  if (!m) { hideSkillMenu(); return; }
+  const query = m[1].toLowerCase();
+  const tab = appState.activeTabId ? appState.tabs.get(appState.activeTabId) : null;
+  if (!tab) { hideSkillMenu(); return; }
+  let items = skillCache.get(tab.id);
+  if (!items) {
+    items = await api.listSkills(tab.cwd || '', tab.aiTool || '');
+    skillCache.set(tab.id, items);
+    // The user may have edited away from the leading slash while we awaited.
+    if (document.activeElement !== textarea || !/^\/(\S*)$/.test(textarea.value.slice(0, textarea.selectionStart))) return;
+  }
+  const filtered = query ? items.filter(s => s.name.toLowerCase().includes(query)) : items;
+  if (!filtered.length) { hideSkillMenu(); return; }
+  skillMenu.active = true;
+  skillMenu.textarea = textarea;
+  skillMenu.block = block;
+  skillMenu.filtered = filtered;
+  skillMenu.index = 0;
+  renderSkillMenu();
+}
+
+/** Keyboard nav while the skill menu is open. Returns true if the key was
+ * consumed (so the caller skips default textarea handling). */
+function handleSkillMenuKey(e: KeyboardEvent, textarea: HTMLTextAreaElement): boolean {
+  if (!skillMenu.active || skillMenu.textarea !== textarea || !skillMenu.filtered.length) return false;
+  const n = skillMenu.filtered.length;
+  if (e.key === 'ArrowDown') { e.preventDefault(); skillMenu.index = (skillMenu.index + 1) % n; renderSkillMenu(); return true; }
+  if (e.key === 'ArrowUp') { e.preventDefault(); skillMenu.index = (skillMenu.index - 1 + n) % n; renderSkillMenu(); return true; }
+  if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); applySkill(skillMenu.index); return true; }
+  if (e.key === 'Escape') { e.preventDefault(); hideSkillMenu(); return true; }
+  return false;
+}
+
 /** Restore the text caret to a block's textarea after a re-render (which rebuilds
  * the DOM and drops focus) — e.g. so the user can keep typing right after pasting
  * an image into the block. */
@@ -1229,6 +1342,7 @@ function focusNoteBlock(blockId: string): void {
 }
 
 function renderNoteBlocks(force = false) {
+  hideSkillMenu(); // textareas are about to be rebuilt — drop any stale menu ref
   if (!appState.activeTabId) { notepadBlocksEl.innerHTML = ''; lastRenderedTabId = null; lastRenderedBlockCount = -1; return; }
   const tab = appState.tabs.get(appState.activeTabId);
   if (!tab) return;
@@ -1275,6 +1389,13 @@ function renderNoteBlocks(force = false) {
       textarea.style.height = 'auto';
       textarea.style.height = textarea.scrollHeight + 'px';
       appState.persistTabs();
+      updateSkillMenu(textarea, block);
+    });
+    // `/` skill menu: arrow/enter/tab/esc navigation while it's open.
+    textarea.addEventListener('keydown', (e) => { handleSkillMenuKey(e, textarea); });
+    textarea.addEventListener('blur', () => {
+      // Delay so a mousedown on a menu item still registers before we close.
+      setTimeout(() => { if (skillMenu.textarea === textarea) hideSkillMenu(); }, 150);
     });
     textarea.addEventListener('paste', async (e) => {
       const items = e.clipboardData?.items;
@@ -1540,72 +1661,75 @@ const TIPS_PANEL_HTML = `
             <div class="tips-section">
               <div class="tips-section-title">启动命令</div>
               <div class="tips-item"><span class="tips-cmd">claude</span> 启动交互模式</div>
-              <div class="tips-item"><span class="tips-cmd">claude --continue</span> 继续最近一次会话</div>
-              <div class="tips-item"><span class="tips-cmd">claude --resume</span> 打开会话选择器</div>
-              <div class="tips-item"><span class="tips-cmd">claude "prompt"</span> 执行单次任务</div>
+              <div class="tips-item"><span class="tips-cmd">claude -c</span> 继续最近一次会话</div>
+              <div class="tips-item"><span class="tips-cmd">claude -r</span> 恢复 / 选择历史会话</div>
+              <div class="tips-item"><span class="tips-cmd">claude -p "提示"</span> 非交互执行后退出</div>
               <div class="tips-item"><span class="tips-cmd">claude --dangerously-skip-permissions</span> 跳过权限确认</div>
             </div>
             <div class="tips-section">
               <div class="tips-section-title">交互命令</div>
+              <div class="tips-item"><span class="tips-cmd">/clear</span> 清空上下文，开新对话</div>
               <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
-              <div class="tips-item"><span class="tips-cmd">/clear</span> 清空对话</div>
+              <div class="tips-item"><span class="tips-cmd">/context</span> 查看上下文占用</div>
               <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型</div>
-              <div class="tips-item"><span class="tips-cmd">/cost</span> 查看用量</div>
+              <div class="tips-item"><span class="tips-cmd">/usage</span> 查看用量与额度</div>
+              <div class="tips-item"><span class="tips-cmd">/rewind</span> 回退对话 / 代码</div>
               <div class="tips-item"><span class="tips-cmd">/help</span> 查看全部命令</div>
             </div>
             <div class="tips-section">
-              <div class="tips-section-title">上下文引用</div>
-              <div class="tips-item"><span class="tips-cmd">@file</span> 引用文件内容</div>
-              <div class="tips-item"><span class="tips-cmd">@dir</span> 引用目录结构</div>
-              <div class="tips-item"><span class="tips-cmd">@url</span> 抓取网页内容</div>
-              <div class="tips-item"><span class="tips-cmd">@git</span> 引用 Git 历史</div>
-              <div class="tips-item"><span class="tips-cmd">@terminal</span> 引用终端输出</div>
+              <div class="tips-section-title">快速输入</div>
+              <div class="tips-item"><span class="tips-cmd">@路径</span> 引用文件 / 目录（路径自动补全）</div>
+              <div class="tips-item"><span class="tips-cmd">!命令</span> shell 模式：直接执行并把输出加入上下文</div>
+              <div class="tips-item"><span class="tips-cmd">/</span> 行首唤出命令与 skill 菜单</div>
             </div>
           </div>
           <div class="tips-tab-content" data-content="opencode">
             <div class="tips-section">
               <div class="tips-section-title">启动命令</div>
               <div class="tips-item"><span class="tips-cmd">opencode</span> 启动交互界面</div>
-              <div class="tips-item"><span class="tips-cmd">opencode --continue</span> 继续最近会话</div>
-              <div class="tips-item"><span class="tips-cmd">opencode run "prompt"</span> 运行单次任务</div>
-              <div class="tips-item"><span class="tips-cmd">opencode --help</span> 查看完整参数</div>
+              <div class="tips-item"><span class="tips-cmd">opencode run "提示"</span> 非交互执行</div>
+              <div class="tips-item"><span class="tips-cmd">opencode run -c</span> 继续上次会话</div>
+              <div class="tips-item"><span class="tips-cmd">opencode models</span> 列出可用模型</div>
+              <div class="tips-item"><span class="tips-cmd">opencode -h</span> 查看完整参数</div>
             </div>
             <div class="tips-section">
               <div class="tips-section-title">内置命令</div>
-              <div class="tips-item"><span class="tips-cmd">/help</span> 查看帮助</div>
-              <div class="tips-item"><span class="tips-cmd">/init</span> 初始化项目说明</div>
+              <div class="tips-item"><span class="tips-cmd">/init</span> 分析项目并生成 AGENTS.md</div>
               <div class="tips-item"><span class="tips-cmd">/undo</span> 撤销上一条变更</div>
               <div class="tips-item"><span class="tips-cmd">/redo</span> 恢复撤销内容</div>
+              <div class="tips-item"><span class="tips-cmd">/share</span> 生成对话分享链接</div>
+              <div class="tips-item"><span class="tips-cmd">/connect</span> 配置模型 API Key</div>
             </div>
             <div class="tips-section">
               <div class="tips-section-title">提示</div>
-              <div class="tips-item"><span class="tips-cmd">@file</span> 可在提示中引用文件</div>
-              <div class="tips-item"><span class="tips-note">Agent</span> 支持子任务与多代理</div>
-              <div class="tips-item"><span class="tips-note">build / plan</span> 支持不同工作模式</div>
-              <div class="tips-item"><span class="tips-note">说明</span> 以 <span class="tips-cmd">/help</span> 与官网文档为准</div>
+              <div class="tips-item"><span class="tips-key">Tab</span> 切换 Plan / Build 模式</div>
+              <div class="tips-item"><span class="tips-note">说明</span> 以官网文档为准</div>
             </div>
           </div>
           <div class="tips-tab-content" data-content="codex">
             <div class="tips-section">
               <div class="tips-section-title">启动命令</div>
               <div class="tips-item"><span class="tips-cmd">codex</span> 启动交互模式</div>
-              <div class="tips-item"><span class="tips-cmd">codex --full-auto</span> 自动执行更多步骤</div>
-              <div class="tips-item"><span class="tips-cmd">codex --auto-edit</span> 自动应用代码修改</div>
-              <div class="tips-item"><span class="tips-cmd">codex --help</span> 查看完整参数</div>
+              <div class="tips-item"><span class="tips-cmd">codex --full-auto</span> 低摩擦自动执行</div>
+              <div class="tips-item"><span class="tips-cmd">codex -m &lt;模型&gt;</span> 指定模型</div>
+              <div class="tips-item"><span class="tips-cmd">codex -s workspace-write</span> 设置沙箱策略</div>
+              <div class="tips-item"><span class="tips-cmd">codex exec "提示"</span> 非交互执行</div>
+              <div class="tips-item"><span class="tips-cmd">codex resume</span> 恢复历史会话</div>
             </div>
             <div class="tips-section">
               <div class="tips-section-title">交互命令</div>
-              <div class="tips-item"><span class="tips-cmd">/help</span> 查看帮助</div>
-              <div class="tips-item"><span class="tips-cmd">/status</span> 查看当前会话与环境状态</div>
-              <div class="tips-item"><span class="tips-cmd">/mode</span> 切换执行模式</div>
-              <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型</div>
+              <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型 / 推理强度</div>
+              <div class="tips-item"><span class="tips-cmd">/approvals</span> 设置审批 / 执行策略</div>
+              <div class="tips-item"><span class="tips-cmd">/new</span> 开始新对话</div>
+              <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
+              <div class="tips-item"><span class="tips-cmd">/diff</span> 查看改动 diff</div>
+              <div class="tips-item"><span class="tips-cmd">/status</span> 会话状态与用量</div>
             </div>
             <div class="tips-section">
               <div class="tips-section-title">提示</div>
-              <div class="tips-item"><span class="tips-note">并行代理</span> 适合多任务并行处理</div>
-              <div class="tips-item"><span class="tips-note">终端 / IDE / App</span> 都可配合使用</div>
-              <div class="tips-item"><span class="tips-note">模型与模式</span> 建议随任务复杂度调整</div>
-              <div class="tips-item"><span class="tips-note">说明</span> 以 <span class="tips-cmd">/help</span> 与官方文档为准</div>
+              <div class="tips-item"><span class="tips-cmd">/review</span> 评审工作区改动</div>
+              <div class="tips-item"><span class="tips-cmd">/init</span> 生成 AGENTS.md</div>
+              <div class="tips-item"><span class="tips-note">说明</span> 以官方文档为准</div>
             </div>
           </div>
         </div>

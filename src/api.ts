@@ -225,6 +225,16 @@ export const api = {
     invoke('cleanup_tab_images', { tabId }).catch(() => {});
   },
 
+  /** List skills available to the note-block `/` menu for the active tab.
+   * Claude: <cwd>/.claude/skills + ~/.claude/skills. Codex: ~/.codex/prompts. */
+  async listSkills(cwd: string, aiTool: string): Promise<Array<{ name: string; description: string }>> {
+    try {
+      return await invoke('list_skills', { cwd: cwd || null, aiTool: aiTool || null });
+    } catch {
+      return [];
+    }
+  },
+
   /** Put a PNG (data URL) onto the OS clipboard, for the AI image-paste trick. */
   async writeClipboardImage(dataUrl: string): Promise<void> {
     return invoke('write_clipboard_image', { dataUrl });

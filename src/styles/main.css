@@ -153,6 +153,14 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .terminal-scroll-bottom.visible { display: flex; }
 .terminal-scroll-bottom:hover { opacity: 1; color: var(--text-primary); background: var(--bg-hover); }
 
+/* Note-block `/` skill menu */
+.skill-menu { display: none; position: fixed; z-index: 1000; max-height: 260px; overflow-y: auto; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.4); }
+.skill-menu-item { padding: 6px 10px; cursor: pointer; border-bottom: 1px solid var(--border-color); }
+.skill-menu-item:last-child { border-bottom: none; }
+.skill-menu-item.selected, .skill-menu-item:hover { background: var(--bg-hover); }
+.skill-menu-name { color: var(--accent-blue); font-weight: 600; font-size: 12px; }
+.skill-menu-desc { color: var(--text-muted); font-size: 11px; margin-top: 2px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
 /* Notepad */
 #notepad { width: 300px; min-width: 200px; max-width: 600px; background: var(--bg-secondary); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; flex-shrink: 0; }
 #notepad.hidden { display: none; }

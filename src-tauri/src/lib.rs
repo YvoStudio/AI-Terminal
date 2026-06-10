@@ -221,6 +221,7 @@ pub fn run() {
             commands::save_clipboard_image,
             commands::save_terminal_paste_image,
             commands::cleanup_tab_images,
+            commands::list_skills,
             commands::write_clipboard_image,
             commands::write_clipboard_image_from_path,
             commands::convert_image_path,
