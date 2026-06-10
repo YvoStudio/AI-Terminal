@@ -673,6 +673,7 @@ function exitSplitMode() {
 
 function closeTab(tabId: string) {
   api.closeTerminal(tabId);
+  api.cleanupTabImages(tabId); // wipe this tab's pasted-image temp dir
   const view = terminalViews.get(tabId);
   if (view) { view.purgeScrollback(); view.dispose(); terminalViews.delete(tabId); }
 

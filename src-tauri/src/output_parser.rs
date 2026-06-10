@@ -841,10 +841,20 @@ fn is_tui_ai(ai_tool: Option<&str>) -> bool {
 ///   AwaitingConfirm box; checked first so a stale spinner line above the
 ///   confirm box doesn't misclassify it as Working.
 fn classify_ai_ui(screen: &vt100::Screen) -> AiUiState {
-    // Pull the bottom ~12 rows. Whole-screen scans risk matching old text that
-    // scrolled into history but is still rendered above the input box.
+    // Pull the bottom ~12 rows of *content*. Whole-screen scans risk matching old
+    // text that scrolled into history but is still rendered above the input box.
+    //
+    // Claude Code renders inline (no alt-screen) and does NOT pin its input box to
+    // the bottom row — on a short conversation the box floats just below the
+    // content with blank rows beneath it. A fixed "last 12 grid rows" window would
+    // then scan only blanks and miss the box entirely (→ Unknown → the status is
+    // never updated, so a green Working dot from earlier never clears). Trim
+    // trailing blank rows first so the window always ends at the input box.
     let contents = screen.contents();
-    let lines: Vec<&str> = contents.split('\n').collect();
+    let mut lines: Vec<&str> = contents.split('\n').collect();
+    while lines.last().map_or(false, |l| l.trim().is_empty()) {
+        lines.pop();
+    }
     let tail_start = lines.len().saturating_sub(12);
     let tail = lines[tail_start..].join("\n");
     let lower = tail.to_lowercase();

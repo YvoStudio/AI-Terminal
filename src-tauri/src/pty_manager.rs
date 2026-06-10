@@ -108,7 +108,13 @@ impl PtyManager {
                 let _ = std::fs::create_dir_all(&tmp_dir);
                 let user_home = std::env::var("HOME").unwrap_or_default();
                 let zshrc_content = format!(
-                    r#"# AI Terminal: source user config, then install integration hooks
+                    r#"# AI Terminal: complete system PATH, source user config, then install integration hooks
+# Non-login shells skip /etc/zprofile, so path_helper never runs and PATH is
+# left at launchd's minimal default (e.g. when the app is started from Finder).
+# Run it ourselves BEFORE user config so ~/.zshrc still has the final say on order.
+if [[ -x /usr/libexec/path_helper ]]; then
+  eval "$(/usr/libexec/path_helper -s)"
+fi
 if [[ -f "{home}/.zshrc" ]]; then
   ZDOTDIR="{home}" source "{home}/.zshrc"
 fi

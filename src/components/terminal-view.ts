@@ -28,6 +28,7 @@ export class TerminalView {
 
   private mouseSelectionInProgress = false;
   private userScrolledUp = false;
+  private lastWheelAt = 0; // ms of the last wheel event — gates the resync backstop off active scrolling.
   // Kitty Keyboard Protocol (CSI u) state: flags stack. 0 = disabled.
   private kittyStack: number[] = [0];
   private get kittyFlags() { return this.kittyStack[this.kittyStack.length - 1] || 0; }
@@ -416,28 +417,15 @@ export class TerminalView {
               if (!tab) return;
               const preview = (window as any).showImagePreview;
               if (typeof preview !== 'function') return;
-              // Primary path: the rewriter turned Claude's N into our M, so the
-              // number we just parsed IS M. Look it up in the tab-monotonic
-              // map. Carousel order = ascending M so [prev]/[next] navigates
-              // through every paste in this tab's lifetime.
+              // The rewriter turned the AI's N into our tab-monotonic M, so the
+              // number shown IS M. Resolve it directly against pastedById.
+              // Carousel order = ascending M, so [prev]/[next] walks every paste
+              // in this tab's lifetime.
               const byId = tab.pastedById;
               if (byId && byId.has(n)) {
                 const ms = Array.from(byId.keys()).sort((a, b) => a - b);
                 const paths = ms.map(k => convertFileSrc(byId.get(k)!));
                 preview(paths, ms.indexOf(n));
-                return;
-              }
-              // Fallback for legacy scrollback rendered before the rewriter
-              // shipped — those tokens are still Claude's raw N. Use the old
-              // session-start indexing into pastedImages.
-              const allPaths = tab.pastedImages || [];
-              if (allPaths.length === 0) return;
-              const sessionStart = tab.pastedSessionStart || 0;
-              const sessionPaths = allPaths.slice(sessionStart);
-              if (n - 1 < sessionPaths.length) {
-                preview(sessionPaths.map(p => convertFileSrc(p)), n - 1);
-              } else if (n - 1 < allPaths.length) {
-                preview(allPaths.map(p => convertFileSrc(p)), n - 1);
               }
             },
           });
@@ -477,22 +465,15 @@ export class TerminalView {
 
     // Listen for output from Rust backend
     api.onTerminalOutput(tabId, (data) => {
-      // Tab-monotonic image numbering. Claude restarts its [Image #N] counter
-      // every /clear or re-launch — rewriting it to our M (which never resets
-      // until the tab is closed) means old scrollback references can never get
-      // overwritten by a later paste reusing the same N. The legacy
-      // alignPastedFromOutput stays as a fallback for refs that streamed past
-      // before this rewriter shipped.
+      // The AI CLI restarts its [Image #N] counter every new session. A new
+      // full-screen session re-enters the alt-screen buffer (CSI ?1049h / ?1047h
+      // / ?47h) — treat that as a hard session boundary and drop the stale N→M
+      // bindings so the next paste re-binds cleanly.
+      if (/\x1b\[\?(?:1049|1047|47)h/.test(data)) appState.resetAiSession(tabId);
+      // Rewrite the AI's resetting [Image #N] to our tab-monotonic [Image #M]
+      // (see app-state) so old references never collide with later pastes.
       const rewritten = appState.rewriteImageRefsForOutput(tabId, data);
       this.terminal.write(rewritten);
-      const re = /\[Image #(\d+)\]/g;
-      let maxN = 0;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(data)) !== null) {
-        const n = parseInt(m[1], 10);
-        if (n > maxN) maxN = n;
-      }
-      if (maxN > 0) appState.alignPastedFromOutput(tabId, maxN);
     });
 
     // Handle paste: intercept images, send bracketed paste for AI tools,
@@ -515,7 +496,7 @@ export class TerminalView {
             const reader = new FileReader();
             reader.onload = async () => {
               try {
-                const filePath = await api.saveClipboardImage(reader.result as string);
+                const filePath = await api.saveTerminalPasteImage(tabId, reader.result as string);
                 if (filePath) {
                   appState.addPastedImage(tabId, filePath);
                   const t = appState.tabs.get(tabId);
@@ -580,6 +561,7 @@ export class TerminalView {
 
     // Track user scroll: mouse wheel means user is scrolling manually
     this.wrapper.addEventListener('wheel', () => {
+      this.lastWheelAt = Date.now();
       const buf = this.terminal.buffer.active;
       // After wheel, check if user scrolled away from bottom
       requestAnimationFrame(() => {
@@ -602,8 +584,16 @@ export class TerminalView {
       }
       this.updateScrollBtn();
     });
-    // Periodic check for scroll position (catches mouse wheel and other scroll events)
-    this.scrollCheckTimer = setInterval(() => this.updateScrollBtn(), 500);
+    // Periodic check for scroll position (catches mouse wheel and other scroll
+    // events). Also resync the viewport scroll area as a self-healing backstop so
+    // a stale scroll range never strands the user "near bottom but can't reach it".
+    this.scrollCheckTimer = setInterval(() => {
+      // Only resync when the user isn't actively wheeling — syncScrollArea snaps
+      // scrollTop back to the buffer position, which would fight an in-progress
+      // gesture. After they stop, this heals any stale scroll range within 500ms.
+      if (Date.now() - this.lastWheelAt > 400) this.resyncViewport();
+      this.updateScrollBtn();
+    }, 500);
 
     this.resizeObserver = new ResizeObserver(() => {
       if (this.resizeTimer) clearTimeout(this.resizeTimer);
@@ -617,6 +607,18 @@ export class TerminalView {
     const atBottom = buf.baseY - buf.viewportY <= 3;
     if (atBottom) this.userScrolledUp = false;
     this.scrollBtn.classList.toggle('visible', !atBottom);
+  }
+
+  /** Force xterm's viewport to resize its scroll area to the current buffer
+   * length. Works around a desync where lines added while the user is scrolled
+   * up leave the DOM scroll range stale (so the wheel can't reach the true
+   * bottom until a resize/refresh). Passing `true` bypasses xterm's internal
+   * "buffer length unchanged" early-return. Private API — guarded so a future
+   * xterm bump degrades to the previous behaviour rather than throwing. */
+  private resyncViewport() {
+    try {
+      (this.terminal as any)?._core?.viewport?.syncScrollArea?.(true);
+    } catch {}
   }
 
   applyTheme(index: number) {

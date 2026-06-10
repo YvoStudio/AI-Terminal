@@ -838,6 +838,61 @@ pub fn save_clipboard_image(_app: AppHandle, data_url: String) -> Result<String,
     Ok(file_path.to_string_lossy().to_string())
 }
 
+/// Per-tab image directory: `$TMPDIR/ai-terminal-images/{tab_id}`. The tab id is
+/// validated to the charset our ids actually use (uuid: hex + dashes), so a
+/// crafted id can't traverse out of the images root.
+fn tab_images_dir(tab_id: &str) -> Option<PathBuf> {
+    if tab_id.is_empty() || tab_id.len() > 128 {
+        return None;
+    }
+    if !tab_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    Some(std::env::temp_dir().join("ai-terminal-images").join(tab_id))
+}
+
+/// Save a terminal-pasted image into the tab's own temp dir. Cleaned up wholesale
+/// by `cleanup_tab_images` when the tab closes — unlike `save_clipboard_image`,
+/// which notes use for storage that must outlive the tab.
+#[tauri::command]
+pub fn save_terminal_paste_image(tab_id: String, data_url: String) -> Result<String, String> {
+    let prefix = "data:image/";
+    if !data_url.starts_with(prefix) { return Err("Invalid data URL".into()); }
+    let rest = &data_url[prefix.len()..];
+    let semi = rest.find(';').ok_or("Invalid data URL")?;
+    let ext = &rest[..semi];
+    let base64_part = rest.find(',').map(|i| &rest[i+1..]).ok_or("Invalid data URL")?;
+
+    let bytes = general_purpose::STANDARD.decode(base64_part).map_err(|e| e.to_string())?;
+
+    let dir = tab_images_dir(&tab_id).ok_or("Invalid tab id")?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let file_path = dir.join(format!("paste-{}.{}", ts, ext));
+    fs::write(&file_path, bytes).map_err(|e| e.to_string())?;
+
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+/// Delete a tab's temp image dir and everything inside it. Called when the tab
+/// closes. Best-effort: a failure here just leaves a few temp files behind.
+#[tauri::command]
+pub fn cleanup_tab_images(tab_id: String) -> Result<(), String> {
+    if let Some(dir) = tab_images_dir(&tab_id) {
+        if dir.is_dir() {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+    Ok(())
+}
+
 /// Put an image (passed as a PNG data URL) onto the OS clipboard so an AI/TUI
 /// tool can read it via the empty-bracketed-paste trick — mirrors what a real
 /// Cmd+V image paste leaves in the clipboard, letting note-block images produce

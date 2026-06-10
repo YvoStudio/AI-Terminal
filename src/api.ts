@@ -213,6 +213,18 @@ export const api = {
     return invoke<string>('save_clipboard_image', { dataUrl });
   },
 
+  /** Save a terminal-pasted image into this tab's own temp dir, which is wiped
+   * when the tab closes. Distinct from saveClipboardImage, which notes use for
+   * persistent storage that must survive the tab. */
+  async saveTerminalPasteImage(tabId: string, dataUrl: string): Promise<string> {
+    return invoke<string>('save_terminal_paste_image', { tabId, dataUrl });
+  },
+
+  /** Delete a tab's temp image dir and everything inside it. Fire-and-forget. */
+  cleanupTabImages(tabId: string): void {
+    invoke('cleanup_tab_images', { tabId }).catch(() => {});
+  },
+
   /** Put a PNG (data URL) onto the OS clipboard, for the AI image-paste trick. */
   async writeClipboardImage(dataUrl: string): Promise<void> {
     return invoke('write_clipboard_image', { dataUrl });

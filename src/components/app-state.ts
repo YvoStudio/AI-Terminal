@@ -33,20 +33,16 @@ export interface TabState {
   noteBlocks: NoteBlock[];
   cwd: string;
   userRenamed: boolean; // true if user manually renamed — blocks auto-rename
-  pastedImages: string[]; // legacy: ordered list of paste paths, kept for back-compat fallback.
-  pastedSessionStart: number; // legacy: offset into pastedImages for the current Claude session.
-  pastedMaxObservedN: number; // legacy.
-  // Tab-monotonic image numbering. We rewrite Claude's `[Image #N]` (which
-  // restarts at 1 every /clear or re-launch) to `[Image #M]` where M is a
-  // counter that only resets when the tab itself is closed. That way an old
-  // reference in scrollback can never get overwritten by a later paste reusing
-  // the same N.
+  // Tab-monotonic image numbering. The AI CLI prints `[Image #N]` with N that
+  // restarts at 1 every new session (/clear, resume, relaunch). We rewrite it to
+  // `[Image #M]` where M only ever increments for the tab's lifetime, so an old
+  // reference can never be clobbered by a later paste that reused the same N.
   pastedTotal: number; // next M to assign; starts at 0 (so first paste → M=1).
   pastedById: Map<number, string>; // M → image path. Source of truth for click resolution.
-  pendingPasteIds: number[]; // FIFO queue of pasted M values awaiting Claude's next [Image #N].
-  claudeImageMap: Map<number, number>; // current session's Claude N → our M.
-  lastImageRefAt: number; // ms timestamp of the last [Image #N] we resolved (for stale-session detection).
-  outputResidue: string; // trailing partial `[Image #...` buffered across output chunks so we don't miss a token split mid-stream.
+  pendingPasteIds: number[]; // FIFO queue of pasted M values awaiting the AI's next [Image #N].
+  claudeImageMap: Map<number, number>; // current session's AI N → our M.
+  claudeMaxN: number; // highest N bound this session; a lower N while a paste is pending ⇒ new session.
+  outputResidue: string; // trailing partial `[Image #...` buffered across output chunks so a token split mid-stream isn't missed.
 }
 
 class AppState {
@@ -65,12 +61,11 @@ class AppState {
     const tab: TabState = {
       id, title: `Terminal ${this.tabCounter}`, status: 'active', shell: 'cmd',
       color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false,
-      pastedImages: [], pastedSessionStart: 0, pastedMaxObservedN: 0,
       pastedTotal: 0,
       pastedById: new Map(),
       pendingPasteIds: [],
       claudeImageMap: new Map(),
-      lastImageRefAt: 0,
+      claudeMaxN: 0,
       outputResidue: '',
     };
     this.tabs.set(id, tab);
@@ -148,15 +143,8 @@ class AppState {
   addPastedImage(id: string, path: string) {
     const tab = this.tabs.get(id);
     if (!tab) return;
-    if (!tab.pastedImages) tab.pastedImages = [];
-    if (tab.pastedSessionStart == null) tab.pastedSessionStart = 0;
-    tab.pastedImages.push(path);
-    if (tab.pastedImages.length > 50) {
-      tab.pastedImages.shift();
-      if (tab.pastedSessionStart > 0) tab.pastedSessionStart--;
-    }
-    // Monotonic numbering: pastedById grows forever, pendingPasteIds queues the
-    // M for the next [Image #N] Claude emits.
+    // Monotonic numbering: pastedById grows for the tab's lifetime; pendingPasteIds
+    // queues the M awaiting the AI's next [Image #N].
     if (!tab.pastedById) tab.pastedById = new Map();
     if (!tab.pendingPasteIds) tab.pendingPasteIds = [];
     tab.pastedTotal = (tab.pastedTotal || 0) + 1;
@@ -165,56 +153,39 @@ class AppState {
     tab.pendingPasteIds.push(m);
   }
 
-  resetPastedImages(id: string) {
+  /**
+   * The AI started a fresh session (new alt-screen, /clear, resume, relaunch):
+   * its [Image #N] counter restarts at 1. Drop the per-session N→M bindings so
+   * the next [Image #N] re-binds from the pending queue. Tab-lifetime state
+   * (pastedById / pastedTotal / pendingPasteIds) is deliberately preserved.
+   */
+  resetAiSession(id: string) {
     const tab = this.tabs.get(id);
-    if (tab) {
-      tab.pastedImages = [];
-      tab.pastedSessionStart = 0;
-      tab.pastedMaxObservedN = 0;
-      // Note: deliberately NOT clearing pastedById / pastedTotal — those are
-      // tab-lifetime and only reset when the tab itself is closed.
-      tab.pendingPasteIds = [];
-      tab.claudeImageMap = new Map();
-      tab.outputResidue = '';
-    }
+    if (!tab) return;
+    tab.claudeImageMap = new Map();
+    tab.claudeMaxN = 0;
   }
 
   /**
-   * Map a Claude-emitted `[Image #N]` to our tab-monotonic M. Called as output
-   * streams. Drives the rewrite that gives the user a number that never resets
-   * within a tab's lifetime — so old scrollback references never get clobbered
-   * by a later paste that happened to reuse Claude's N.
-   *
-   * Heuristic for Claude session restart (e.g. /clear): if N is already mapped
-   * but we have a fresh paste queued AND the last image ref was observed more
-   * than 5 seconds ago, treat it as a new session and re-bind from the queue.
-   * The 5-second gate prevents the "user pasted twice before submitting" path
-   * from being mis-detected — back-to-back redraws stay within the window.
+   * Map an AI-emitted `[Image #N]` to our tab-monotonic M. Bind once on first
+   * sight (consuming the pending-paste queue) and reuse that binding on every
+   * later redraw. Session restarts are handled by the caller (alt-screen reset)
+   * and by the N-regression check in rewriteImageRefsForOutput, both of which
+   * clear the per-session map before we get here.
    */
   resolveClaudeImageN(id: string, n: number): number | undefined {
     const tab = this.tabs.get(id);
     if (!tab) return undefined;
     if (!tab.claudeImageMap) tab.claudeImageMap = new Map();
     if (!tab.pendingPasteIds) tab.pendingPasteIds = [];
-    const now = Date.now();
-    const STALE_MS = 5000;
     const existing = tab.claudeImageMap.get(n);
-    if (existing !== undefined) {
-      const stale = (tab.lastImageRefAt || 0) > 0 && (now - (tab.lastImageRefAt || 0)) > STALE_MS;
-      if (stale && tab.pendingPasteIds.length > 0) {
-        tab.claudeImageMap.clear();
-      } else {
-        tab.lastImageRefAt = now;
-        return existing;
-      }
-    }
+    if (existing !== undefined) return existing;
     if (tab.pendingPasteIds.length > 0) {
       const m = tab.pendingPasteIds.shift()!;
       tab.claudeImageMap.set(n, m);
-      tab.lastImageRefAt = now;
+      if (n > (tab.claudeMaxN || 0)) tab.claudeMaxN = n;
       return m;
     }
-    tab.lastImageRefAt = now;
     return undefined;
   }
 
@@ -238,26 +209,27 @@ class AppState {
     }
     const head = data.slice(0, safeEnd);
     tab.outputResidue = data.slice(safeEnd);
+
+    // In-place session restart (e.g. /clear, which doesn't re-enter the
+    // alt-screen): the AI re-prints [Image #N] with N below the highest we've
+    // bound while a fresh paste is waiting. Its counter can only have reset, so
+    // drop the stale bindings before re-resolving.
+    if ((tab.pendingPasteIds?.length || 0) > 0 && (tab.claudeMaxN || 0) > 0) {
+      let chunkMax = 0;
+      const scan = /\[Image #(\d+)\]/g;
+      let s: RegExpExecArray | null;
+      while ((s = scan.exec(head)) !== null) {
+        const v = parseInt(s[1], 10);
+        if (v > chunkMax) chunkMax = v;
+      }
+      if (chunkMax > 0 && chunkMax < tab.claudeMaxN) this.resetAiSession(id);
+    }
+
     return head.replace(/\[Image #(\d+)\]/g, (match, nStr) => {
       const n = parseInt(nStr, 10);
       const m = this.resolveClaudeImageN(id, n);
       return (m !== undefined && m !== n) ? `[Image #${m}]` : match;
     });
-  }
-
-  /**
-   * 观察输出中的 [Image #N],把"当前 claude 会话的图像"锚定到 pastedImages 末尾的
-   * maxN 张。这样 /clear、resume、重启 claude 等会话边界事件不再需要专门检测——
-   * 每个新会话从 #1 开始,且最近的一次粘贴一定是当前 #N,所以"最后 maxN 张就是当前
-   * 会话"恒成立。旧的"只在 N=1 且历史 max>1 时重置"漏掉了上一会话只有一张图的情况。
-   */
-  alignPastedFromOutput(id: string, maxN: number) {
-    const tab = this.tabs.get(id);
-    if (!tab || maxN <= 0) return;
-    const len = tab.pastedImages?.length || 0;
-    if (len === 0) return;
-    tab.pastedSessionStart = Math.max(0, len - maxN);
-    tab.pastedMaxObservedN = Math.max(tab.pastedMaxObservedN || 0, maxN);
   }
 
   addSidebarEntry(id: string, entry: SidebarEntry) {
