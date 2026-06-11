@@ -728,6 +728,7 @@ function switchToTab(tabId: string) {
 function isValidCwd(cwd: string): boolean {
   if (!cwd || cwd.length > 500) return false;
   if (cwd.includes('"') || cwd.includes('\n') || cwd.includes('\x1b')) return false;
+  if (cwd.includes('<') || cwd.includes('>')) return false; // markup ≠ path
   // Must look like an absolute path
   if (!cwd.startsWith('/') && !/^[A-Za-z]:/.test(cwd)) return false;
   return true;
@@ -749,6 +750,12 @@ async function updateCwdDisplay(tabId: string, newCwd?: string) {
       cwd = await api.getTerminalCwd(tabId);
     } catch {
       cwd = '';
+    }
+    // Backend cwd can be polluted by prompt-heuristic misparses (e.g. grep-style
+    // `8:<script …>` output once landed here) — validate before showing, same as
+    // the newCwd branch. Keep the last good display instead.
+    if (cwd && !isValidCwd(cwd)) {
+      return;
     }
   }
 

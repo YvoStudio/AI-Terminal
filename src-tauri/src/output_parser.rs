@@ -981,7 +981,12 @@ fn extract_windows_cwd(prompt: &str) -> Option<String> {
         let path_part = &prompt[3..]; // Skip "PS "
         if let Some(idx) = path_part.rfind('>') {
             let before_gt = path_part[..idx].trim();
-            if before_gt.len() >= 2 && before_gt.chars().nth(1) == Some(':') {
+            // Drive letter must be alphabetic: `8:` from grep-style
+            // `line:content` output is NOT a drive (the Ktree footer bug).
+            if before_gt.len() >= 2
+                && before_gt.chars().next().map_or(false, |c| c.is_ascii_alphabetic())
+                && before_gt.chars().nth(1) == Some(':')
+            {
                 eprintln!("Extracted PS cwd: '{}'", before_gt);
                 return Some(before_gt.to_string());
             }
@@ -997,10 +1002,14 @@ fn extract_windows_cwd(prompt: &str) -> Option<String> {
     // Match patterns like "C:\path" or "G:\folder\file"
     if let Some(idx) = prompt.rfind('>') {
         let before_gt = prompt[..idx].trim();
-        // Check if it looks like a Windows path (has : or starts with \)
+        // Check if it looks like a Windows path (drive letter + ':' or UNC \\).
+        // The drive letter must be ALPHABETIC: AI/grep output like
+        // `8:<script src="updater.js"></script>` has a digit before ':' and a
+        // trailing '>', which used to slip through here and corrupt the cwd.
         if before_gt.len() >= 2 {
+            let first_is_alpha = before_gt.chars().next().map_or(false, |c| c.is_ascii_alphabetic());
             let second_char = before_gt.chars().nth(1);
-            if second_char == Some(':') || before_gt.starts_with('\\') {
+            if (first_is_alpha && second_char == Some(':')) || before_gt.starts_with('\\') {
                 // This is a Windows path like C:\path
                 let path = before_gt.to_string();
                 eprintln!("Extracted Windows cwd: '{}'", path);
@@ -1136,6 +1145,13 @@ fn extract_cd_path(cmd: &str, current_cwd: &str) -> Option<String> {
 
     // Remove quotes if present
     let path = args.trim_matches('"').trim_matches('\'');
+
+    // Sanity: a real path never contains markup/quotes/escapes. Screen content
+    // (grep results, HTML snippets) that got mistaken for a prompt lands here
+    // as a "relative path" and would get joined onto the cwd — reject it.
+    if path.contains('<') || path.contains('>') || path.contains('"') || path.contains('\u{1b}') {
+        return None;
+    }
 
     // Absolute path
     if is_absolute_path(path) {
