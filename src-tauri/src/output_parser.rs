@@ -183,7 +183,8 @@ impl OutputParser {
 
         if tui_ai {
             // Classification is the source of truth. Working commits immediately
-            // because "esc to interrupt" is a strong positive signal. IdleReady
+            // because its markers ("esc to interrupt" / the spinner's elapsed
+            // counter) are strong positive signals. IdleReady
             // is debounced via pending_idle: Claude's spinner box briefly
             // disappears between frame redraws during streaming, which would
             // otherwise cause Working ↔ IdleReady oscillation. AwaitingConfirm
@@ -831,9 +832,17 @@ fn is_tui_ai(ai_tool: Option<&str>) -> bool {
 /// rendered screen.
 ///
 /// Anchor on the working indicator, not the idle indicator:
-/// - `esc to interrupt` only renders inside the spinner box while Claude is
-///   actually streaming. Its presence is a deterministic Working signal.
-/// - Its absence (combined with the input-box prompt `❯` being on screen,
+/// - `esc to interrupt` renders while Claude is actually streaming. Its
+///   presence is a deterministic Working signal — but as of Claude Code
+///   v2.1.17x it is no longer reliable on its own: the footer hint rotates
+///   it with other hints (`← for agents`, …) and in some permission modes it
+///   never renders at all, so its absence says nothing.
+/// - The spinner line's elapsed counter (`✽ Harmonizing… (8s · ↓ 109 tokens)`,
+///   `✶ Nesting… (15s · thinking with high effort)`, `Harmonizing… running
+///   stop hook · 10s · …`) is the stable v2.1.17x Working signal: a `…` line
+///   carrying `<digits>s ·`. The finished-turn line (`✻ Cooked for 10s`) has
+///   no trailing `·`, so it doesn't match.
+/// - Absence of both (combined with the input-box prompt `❯` being on screen,
 ///   confirming we're looking at a real Claude UI and not a transient blank)
 ///   is the IdleReady signal. We tried matching `? for shortcuts` previously
 ///   but Claude Code v2.1 removed that footer.
@@ -871,6 +880,16 @@ fn classify_ai_ui(screen: &vt100::Screen) -> AiUiState {
         return AiUiState::Working;
     }
 
+    // v2.1.17x spinner line: `✽ Verbing… (8s · ↓ 109 tokens)`. The footer no
+    // longer shows `esc to interrupt` reliably (hint rotation / some modes drop
+    // it), so the elapsed counter on the `…` line is the Working anchor.
+    if lines[tail_start..]
+        .iter()
+        .any(|l| l.contains('…') && has_elapsed_counter(l))
+    {
+        return AiUiState::Working;
+    }
+
     // Idle: working indicator absent and the input prompt is visible. The `❯`
     // can be followed by a regular space or U+00A0 (non-breaking space — what
     // Claude actually emits inside its input box).
@@ -879,6 +898,37 @@ fn classify_ai_ui(screen: &vt100::Screen) -> AiUiState {
     }
 
     AiUiState::Unknown
+}
+
+/// True if the line carries Claude Code's live elapsed-time counter:
+/// `<digits>s` followed (after optional spaces) by `·` — e.g. `(8s · ↓ 109
+/// tokens)`, `(15s · thinking with high effort)`, `running stop hook · 10s ·
+/// ↓ 109 tokens)`. The trailing `·` is what separates a live counter from a
+/// plain duration in finished output (`✻ Cooked for 10s`).
+fn has_elapsed_counter(line: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == 's' {
+                let mut k = j + 1;
+                while k < chars.len() && (chars[k] == ' ' || chars[k] == '\u{a0}') {
+                    k += 1;
+                }
+                if k < chars.len() && chars[k] == '·' {
+                    return true;
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 fn is_ai_waiting_prompt(line: &str) -> bool {
@@ -1221,5 +1271,124 @@ fn dirs_next_home() -> Option<String> {
     #[cfg(not(target_os = "windows"))]
     {
         std::env::var("HOME").ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Render `lines` into a fresh 80x24 virtual screen and classify it.
+    fn classify_lines(lines: &[&str]) -> AiUiState {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(lines.join("\r\n").as_bytes());
+        classify_ai_ui(parser.screen())
+    }
+
+    const INPUT_BOX_TOP: &str = "╭──────────────────────────────────────╮";
+    const INPUT_BOX_MID: &str = "│ ❯\u{a0}                                    │";
+    const INPUT_BOX_BOT: &str = "╰──────────────────────────────────────╯";
+
+    // Frames below are taken from a real Claude Code v2.1.172 PTY recording —
+    // the version that moved `esc to interrupt` out of the spinner line and
+    // rotates it with other footer hints.
+
+    #[test]
+    fn v21_spinner_with_token_counter_is_working() {
+        assert_eq!(
+            classify_lines(&[
+                "✽ Harmonizing… (8s · ↓ 109 tokens)",
+                INPUT_BOX_TOP,
+                INPUT_BOX_MID,
+                INPUT_BOX_BOT,
+                "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+            ]),
+            AiUiState::Working
+        );
+    }
+
+    #[test]
+    fn v21_thinking_spinner_is_working() {
+        assert_eq!(
+            classify_lines(&[
+                "✶ Nesting… (15s · thinking with high effort)",
+                INPUT_BOX_TOP,
+                INPUT_BOX_MID,
+                INPUT_BOX_BOT,
+                "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+            ]),
+            AiUiState::Working
+        );
+    }
+
+    #[test]
+    fn v21_stop_hook_spinner_is_working() {
+        assert_eq!(
+            classify_lines(&[
+                "✻ Harmonizing… running stop hook · 10s · ↓ 109 tokens)",
+                INPUT_BOX_TOP,
+                INPUT_BOX_MID,
+                INPUT_BOX_BOT,
+            ]),
+            AiUiState::Working
+        );
+    }
+
+    #[test]
+    fn legacy_esc_to_interrupt_is_working() {
+        assert_eq!(
+            classify_lines(&[
+                "✻ Thinking… (esc to interrupt)",
+                INPUT_BOX_TOP,
+                INPUT_BOX_MID,
+                INPUT_BOX_BOT,
+            ]),
+            AiUiState::Working
+        );
+    }
+
+    #[test]
+    fn v21_finished_turn_is_idle() {
+        // `✻ Cooked for 10s` is the done line — a duration without the live
+        // counter's trailing `·` must not read as Working.
+        assert_eq!(
+            classify_lines(&[
+                "✻ Cooked for 10s",
+                INPUT_BOX_TOP,
+                INPUT_BOX_MID,
+                INPUT_BOX_BOT,
+                "  ⏵⏵ auto mode on (shift+tab to cycle)",
+            ]),
+            AiUiState::IdleReady
+        );
+    }
+
+    #[test]
+    fn confirm_box_wins_over_stale_spinner() {
+        assert_eq!(
+            classify_lines(&[
+                "✽ Harmonizing… (8s · ↓ 109 tokens)",
+                "Do you want to proceed?",
+                "❯ 1. Yes",
+                "  2. No",
+            ]),
+            AiUiState::AwaitingConfirm
+        );
+    }
+
+    #[test]
+    fn blank_screen_is_unknown() {
+        assert_eq!(classify_lines(&["", ""]), AiUiState::Unknown);
+    }
+
+    #[test]
+    fn elapsed_counter_matcher() {
+        assert!(has_elapsed_counter("✽ Harmonizing… (8s · ↓ 109 tokens)"));
+        assert!(has_elapsed_counter("(15s · thinking with high effort)"));
+        assert!(has_elapsed_counter("running stop hook · 10s · ↓109 tokens)"));
+        assert!(has_elapsed_counter("(8s\u{a0}· tokens)"));
+        assert!(!has_elapsed_counter("✻ Cooked for 10s"));
+        assert!(!has_elapsed_counter("downloaded 109 tokens"));
+        assert!(!has_elapsed_counter("plain text · with separators"));
     }
 }
