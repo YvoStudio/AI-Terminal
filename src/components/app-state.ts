@@ -151,6 +151,25 @@ class AppState {
     const m = tab.pastedTotal;
     tab.pastedById.set(m, path);
     tab.pendingPasteIds.push(m);
+    this.persistTabs();
+  }
+
+  /**
+   * App-restart restore: re-seed the tab-lifetime image numbering saved in
+   * SavedTab so numbering stays monotonic across app restarts and the
+   * [Image #M] refs in restored scrollback remain clickable. The pending-paste
+   * queue is deliberately NOT restored — a paste that never got bound belongs
+   * to a dead AI session and must not bind to the next session's [Image #1].
+   */
+  restorePastedImages(id: string, total?: number, images?: Record<string, string>) {
+    const tab = this.tabs.get(id);
+    if (!tab) return;
+    const entries = Object.entries(images || {})
+      .map(([k, v]) => [parseInt(k, 10), v] as [number, string])
+      .filter(([m]) => Number.isFinite(m) && m > 0);
+    tab.pastedById = new Map(entries);
+    const maxM = entries.reduce((acc, [m]) => Math.max(acc, m), 0);
+    tab.pastedTotal = Math.max(total || 0, maxM);
   }
 
   /**
@@ -158,10 +177,17 @@ class AppState {
    * its [Image #N] counter restarts at 1. Drop the per-session N→M bindings so
    * the next [Image #N] re-binds from the pending queue. Tab-lifetime state
    * (pastedById / pastedTotal / pendingPasteIds) is deliberately preserved.
+   *
+   * Only reset when there are pending pastes awaiting a fresh binding. Without
+   * pending pastes a reset is pointless and harmful: Claude Code emits ?1049h
+   * on every screen redraw within the same conversation, so clearing the map
+   * mid-session would orphan already-established N→M mappings and leave later
+   * [Image #N] references in AI responses un-rewritten.
    */
   resetAiSession(id: string) {
     const tab = this.tabs.get(id);
     if (!tab) return;
+    if ((tab.pendingPasteIds?.length || 0) === 0) return;
     tab.claudeImageMap = new Map();
     tab.claudeMaxN = 0;
   }
@@ -416,6 +442,10 @@ class AppState {
         cwd: validCwd,
         aiTool: tab.aiTool,
         userRenamed: tab.userRenamed || undefined,
+        pastedTotal: tab.pastedTotal || undefined,
+        pastedImages: tab.pastedById && tab.pastedById.size > 0
+          ? Object.fromEntries(Array.from(tab.pastedById, ([m, p]) => [String(m), p]))
+          : undefined,
       };
     });
     api.saveTabs(saved);

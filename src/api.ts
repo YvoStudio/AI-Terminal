@@ -22,6 +22,9 @@ export interface SavedTab {
   cwd?: string;
   aiTool?: string;
   userRenamed?: boolean;
+  /** 图片编号跨重启保持：M 计数器 + M→路径映射（key 为 M 的字符串形式） */
+  pastedTotal?: number;
+  pastedImages?: Record<string, string>;
 }
 
 export interface ClaudeSession {
@@ -158,6 +161,10 @@ export const api = {
 
   async getTerminalCwd(tabId: string): Promise<string> {
     return invoke<string>('get_terminal_cwd', { tabId });
+  },
+
+  async getGitBranch(cwd: string): Promise<string | null> {
+    return invoke<string | null>('get_git_branch', { cwd }).catch(() => null);
   },
 
   async getSidebarEntries(tabId: string): Promise<SidebarEntry[]> {

@@ -49,6 +49,10 @@ function getCleanFontFamilyOptions(): string {
     `;
 }
 
+function getThemeOptions(): string {
+  return themes.map((t, i) => `<option value="${i}">${t.name}</option>`).join('');
+}
+
 const terminalViews = new Map<string, TerminalView>();
 const container = document.getElementById('terminal-container')!;
 let windowHasFocus = document.hasFocus();
@@ -134,6 +138,7 @@ async function createTab(name?: string, noteBlocks?: Array<{ id: string; content
           cwdEl.textContent = shortCwd || '';
           cwdEl.title = tab.cwd || '';
         }
+        updateBranchDisplay(tab.cwd);
       }
     }
   }).catch(console.error);
@@ -177,6 +182,7 @@ async function createTabInPane(paneIndex: number) {
           cwdEl.textContent = shortCwd || '';
           cwdEl.title = tab.cwd || '';
         }
+        updateBranchDisplay(tab.cwd);
       }
     }
   }).catch(console.error);
@@ -773,6 +779,32 @@ async function updateCwdDisplay(tabId: string, newCwd?: string) {
   console.log('updateCwdDisplay: short =', shortCwd);
   cwdEl.textContent = shortCwd || '';
   cwdEl.title = cwd || '';
+
+  updateBranchDisplay(cwd, /*force*/ true);
+}
+
+// 防过期回包：只采纳最后一次请求的结果（快速切标签时旧请求可能后到）。
+// 终端输出监听会高频调用，同 cwd 3 秒内不重查（git checkout 后最迟 3 秒刷新）；
+// 切标签等用户动作传 force 立即刷新。
+let _branchReqSeq = 0;
+let _branchLastCwd = '';
+let _branchLastAt = 0;
+function updateBranchDisplay(cwd: string, force = false) {
+  const branchEl = document.getElementById('status-branch');
+  const nameEl = document.getElementById('status-branch-name');
+  if (!branchEl || !nameEl) return;
+  const now = Date.now();
+  if (!force && cwd === _branchLastCwd && now - _branchLastAt < 3000) return;
+  _branchLastCwd = cwd;
+  _branchLastAt = now;
+  const seq = ++_branchReqSeq;
+  const apply = (branch: string | null) => {
+    if (seq !== _branchReqSeq) return;
+    nameEl.textContent = branch || '';
+    branchEl.style.display = branch ? 'inline-flex' : 'none';
+  };
+  if (cwd) api.getGitBranch(cwd).then(apply);
+  else apply(null);
 }
 
 async function switchShell(tabId: string, shell: 'cmd' | 'powershell' | 'wsl') {
@@ -1636,7 +1668,7 @@ const TIPS_PANEL_HTML = `
             <div class="tips-item"><span class="tips-icon">📄</span>插入文件路径</div>
             <div class="tips-item"><span class="tips-icon">📁</span>插入目录路径</div>
             <div class="tips-item"><span class="tips-icon">🕘</span>历史面板可恢复标签或会话</div>
-            <div class="tips-item"><span class="tips-icon">🎨</span>右下角可切换主题</div>
+            <div class="tips-item"><span class="tips-icon">🎨</span>主题在本面板底部切换</div>
           </div>
           <div class="tips-section">
             <div class="tips-section-title">快捷键</div>
@@ -1759,6 +1791,13 @@ const TIPS_PANEL_HTML = `
           <label>字体</label>
           <select id="font-family-select">
             ${getCleanFontFamilyOptions()}
+          </select>
+        </div>
+        <div class="tips-setting-item">
+          <label>主题</label>
+          <select id="tips-theme-select">
+            <option value="auto">跟随系统</option>
+            ${getThemeOptions()}
           </select>
         </div>
       </div>
@@ -1980,6 +2019,21 @@ function toggleTipsPanel() {
     fontFamilySelect.addEventListener('change', () => {
       localStorage.setItem('terminal-font-family', fontFamilySelect.value);
       terminalViews.forEach(view => view.setFontFamily(fontFamilySelect.value));
+    });
+  }
+
+  // Theme change handler
+  const tipsThemeSelect = _tipsEl.querySelector('#tips-theme-select') as HTMLSelectElement;
+  if (tipsThemeSelect) {
+    tipsThemeSelect.value = isAutoTheme() ? 'auto' : String(TerminalView.getSavedThemeIndex());
+    tipsThemeSelect.addEventListener('change', () => {
+      if (tipsThemeSelect.value === 'auto') {
+        localStorage.setItem(AUTO_THEME_KEY, '1');
+        applyAutoTheme();
+      } else {
+        localStorage.setItem(AUTO_THEME_KEY, '0');
+        applyThemeToAll(parseInt(tipsThemeSelect.value, 10));
+      }
     });
   }
 
@@ -2700,7 +2754,7 @@ window.addEventListener('focus', () => {
 document.addEventListener('mouseup', (e) => {
   const target = e.target as HTMLElement;
   // Don't refocus if clicking on an input, button, or interactive element
-  if (target.closest('input, textarea, select, button, a, [contenteditable="true"], .tab-context-menu, .theme-picker, .tips-panel, .command-palette, .notepad-block, #notepad, .history-item, .palette-item, .terminal-search-bar')) return;
+  if (target.closest('input, textarea, select, button, a, [contenteditable="true"], .tab-context-menu, .tips-panel, .command-palette, .notepad-block, #notepad, .history-item, .palette-item, .terminal-search-bar')) return;
   if (appState.activeTabId) {
     const view = terminalViews.get(appState.activeTabId);
     if (view) view.focus();
@@ -2967,12 +3021,10 @@ function applyThemeToAll(index: number, fromAuto = false) {
   }
   // Update color-scheme for native scrollbar theming
   document.documentElement.style.colorScheme = t.light ? 'light' : 'dark';
-  const statusTheme = document.getElementById('status-theme');
-  if (statusTheme) statusTheme.textContent = t.name;
 }
 
+// 主题切换入口已移入技巧面板（Alt+K）；这里只做启动时应用 + 跟随系统监听
 function setupThemePicker() {
-  const themeEl = document.getElementById('status-theme')!;
   if (isAutoTheme()) applyAutoTheme();
   else applyThemeToAll(TerminalView.getSavedThemeIndex());
 
@@ -2981,86 +3033,6 @@ function setupThemePicker() {
     const onChange = () => { if (isAutoTheme()) applyAutoTheme(); };
     mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
   }
-
-  let pickerOpen = false; let pickerEl: HTMLElement | null = null;
-  const rebuild = () => {
-    if (!pickerEl) return;
-    pickerEl.innerHTML = '';
-    const auto = isAutoTheme();
-    const header = document.createElement('div');
-    header.className = 'theme-picker-item';
-    header.style.cssText = 'justify-content:space-between;font-size:12px;opacity:0.9;';
-    header.innerHTML = `<span>跟随系统</span><span style="font-weight:600;color:${auto ? 'var(--accent-green)' : 'var(--text-muted)'}">${auto ? '开' : '关'}</span>`;
-    header.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      localStorage.setItem(AUTO_THEME_KEY, auto ? '0' : '1');
-      if (!auto) applyAutoTheme();
-      rebuild();
-    });
-    pickerEl.appendChild(header);
-    if (isAutoTheme()) {
-      const lightIdx = defaultLightIdx();
-      const darkIdx = defaultDarkIdx();
-      const mkSelector = (label: string, currentIdx: number, key: string) => {
-        const row = document.createElement('div');
-        row.className = 'theme-picker-item';
-        row.style.cssText = 'justify-content:space-between;font-size:12px;';
-        const select = document.createElement('select');
-        select.style.cssText = 'background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;padding:2px 4px;font-size:12px;';
-        themes.forEach((t, i) => {
-          const opt = document.createElement('option');
-          opt.value = String(i); opt.textContent = t.name;
-          if (i === currentIdx) opt.selected = true;
-          select.appendChild(opt);
-        });
-        select.addEventListener('click', ev => ev.stopPropagation());
-        select.addEventListener('change', () => {
-          localStorage.setItem(key, select.value);
-          applyAutoTheme();
-        });
-        row.innerHTML = `<span>${label}</span>`;
-        row.appendChild(select);
-        pickerEl!.appendChild(row);
-      };
-      mkSelector('亮色', lightIdx, AUTO_THEME_LIGHT_KEY);
-      mkSelector('暗色', darkIdx, AUTO_THEME_DARK_KEY);
-      const sep = document.createElement('div');
-      sep.style.cssText = 'border-top:1px solid var(--border-color);margin:4px 0;';
-      pickerEl.appendChild(sep);
-    }
-    const currentIdx = TerminalView.getSavedThemeIndex();
-    themes.forEach((t, i) => {
-      const item = document.createElement('div');
-      item.className = `theme-picker-item${(!isAutoTheme() && i === currentIdx) ? ' active' : ''}`;
-      const dot = document.createElement('span');
-      dot.className = 'theme-color-dot';
-      dot.style.background = t.theme.background as string;
-      const label = document.createElement('span');
-      label.textContent = t.name;
-      item.appendChild(dot); item.appendChild(label);
-      item.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        localStorage.setItem(AUTO_THEME_KEY, '0');
-        applyThemeToAll(i);
-        pickerEl?.remove(); pickerEl = null; pickerOpen = false;
-      });
-      pickerEl!.appendChild(item);
-    });
-  };
-  themeEl.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (pickerOpen && pickerEl) { pickerEl.remove(); pickerEl = null; pickerOpen = false; return; }
-    pickerEl = document.createElement('div');
-    pickerEl.className = 'theme-picker';
-    document.body.appendChild(pickerEl);
-    pickerOpen = true;
-    rebuild();
-  });
-  document.addEventListener('mousedown', (e) => {
-    if (pickerOpen && pickerEl && !pickerEl.contains(e.target as Node) && !themeEl.contains(e.target as Node)) {
-      pickerEl.remove(); pickerEl = null; pickerOpen = false;
-    }
-  });
 }
 
 const IS_QUICK = new URLSearchParams(location.search).get('quick') === '1';
@@ -3100,7 +3072,10 @@ async function init() {
     // Protect restored tab names from auto-rename (if name is not default "Terminal N")
     const isCustomName = saved.name && !saved.name.startsWith('Terminal ') && !saved.name.startsWith('↻ ');
     try {
-      await createTab(saved.name, saved.noteBlocks, cwd, shell, saved.aiTool, saved.userRenamed || isCustomName, saved.id);
+      const tabId = await createTab(saved.name, saved.noteBlocks, cwd, shell, saved.aiTool, saved.userRenamed || isCustomName, saved.id);
+      if (saved.pastedTotal || saved.pastedImages) {
+        appState.restorePastedImages(tabId, saved.pastedTotal, saved.pastedImages);
+      }
       restoredCount++;
     } catch (e) {
       console.warn('Failed to restore tab, skipping:', e);

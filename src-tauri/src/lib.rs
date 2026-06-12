@@ -235,6 +235,7 @@ pub fn run() {
             commands::force_close_window,
             commands::load_quick_commands,
             commands::save_quick_commands,
+            commands::get_git_branch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Terminal");

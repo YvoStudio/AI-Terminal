@@ -29,6 +29,11 @@ pub struct SavedTab {
     pub cwd: String,
     #[serde(default, rename = "aiTool", alias = "ai_tool")]
     pub ai_tool: Option<String>,
+    // 图片编号跨重启保持：M 计数器 + M→路径映射（key 为 M 的字符串形式）
+    #[serde(default, rename = "pastedTotal")]
+    pub pasted_total: u32,
+    #[serde(default, rename = "pastedImages")]
+    pub pasted_images: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +299,21 @@ pub fn get_terminal_cwd(
 ) -> Result<String, String> {
     let mgr = state.read().map_err(|e| e.to_string())?;
     Ok(mgr.get_cwd(&tab_id))
+}
+
+#[tauri::command]
+pub fn get_git_branch(cwd: String) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&cwd)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !branch.is_empty() && branch != "HEAD" { Some(branch) } else { None }
+    } else {
+        None
+    }
 }
 
 #[tauri::command]
