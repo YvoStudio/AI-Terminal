@@ -226,17 +226,22 @@ export class TerminalView {
       // while the IME owns the keystroke.
       this.wrapper.addEventListener('compositionstart', () => {
         imeComposing = true;
+        // Start every composition from a clean helper-textarea. xterm records the
+        // composition start offset as the CURRENT textarea length and never
+        // clears the textarea itself (CompositionHelper relies on regular
+        // keydowns to do that). On macOS WebKit, after an IME commit the textarea
+        // keeps the committed text; moving the caret off the line end
+        // (←/PageUp/Home/click) with no intervening clearing keydown leaves that
+        // stale text in place, so the next composition re-sends the previous tail
+        // (e.g. "吗？" reappears at the new cursor). Clearing here — in capture
+        // phase, BEFORE xterm's own compositionstart records the offset — forces
+        // start=0 so only the freshly typed text is sent. (Doing this in
+        // compositionend is unsafe: our capture-phase setTimeout(0) would run
+        // before xterm's deferred read and wipe the committed text.)
+        xtermTextarea.value = '';
       }, true);
       this.wrapper.addEventListener('compositionend', () => {
         imeComposing = false;
-        // Clear xterm's hidden helper textarea once xterm has consumed the
-        // committed text (deferred a tick so we run AFTER its compositionend/
-        // input handlers). On macOS WebKit the textarea otherwise retains the
-        // last committed segment, which leaks back into the NEXT composition
-        // when the caret isn't at the line end — surfacing as the previous tail
-        // (e.g. "吗？") reappearing at the new cursor position. Guard on
-        // imeComposing so a composition that started in between is never wiped.
-        setTimeout(() => { if (!imeComposing) xtermTextarea.value = ''; }, 0);
       }, true);
       // Block IME composition on the WRAPPER (parent), so capture phase fires
       // BEFORE xterm's own listeners on the textarea.
