@@ -202,6 +202,25 @@ export class TabBar {
     });
   }
 
+  /**
+   * Keep the active tab visible. Tabs no longer shrink past a readable floor
+   * (~60px), so when there are many of them #tab-list scrolls horizontally —
+   * without this the active tab can sit off-screen after a switch.
+   */
+  private scrollActiveIntoView() {
+    requestAnimationFrame(() => {
+      const active = this.tabListEl.querySelector('.tab.active') as HTMLElement | null;
+      if (!active) return;
+      const listRect = this.tabListEl.getBoundingClientRect();
+      const tabRect = active.getBoundingClientRect();
+      if (tabRect.left < listRect.left) {
+        this.tabListEl.scrollLeft -= (listRect.left - tabRect.left) + 8;
+      } else if (tabRect.right > listRect.right) {
+        this.tabListEl.scrollLeft += (tabRect.right - listRect.right) + 8;
+      }
+    });
+  }
+
   private alignTabGroupsToSplitPanes() {
     requestAnimationFrame(() => {
       const containerEl = document.getElementById('terminal-container');
@@ -631,6 +650,7 @@ export class TabBar {
         el.className = `tab${id === appState.activeTabId ? ' active' : ''}`;
         this.tabListEl.appendChild(el);
       }
+      this.scrollActiveIntoView();
     }
 
     const statusTabs = document.getElementById('status-tabs');

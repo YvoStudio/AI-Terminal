@@ -1105,6 +1105,11 @@ async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
     // and the block is left sitting in the input (the "last block won't send" bug).
     if (hasText || hasImages) await new Promise(r => setTimeout(r, 120));
     api.writeTerminal(tabId, '\r');
+    appState.clearPromptDirty(tabId); // submitted — prompt is empty again
+  } else {
+    // Manual "发送" stages the text in the prompt for the user to review; treat
+    // it as unsubmitted content so auto-send won't paste another block over it.
+    appState.markPromptDirty(tabId);
   }
   removeNoteBlock(tabId, blockId);
 }
@@ -1511,6 +1516,19 @@ function renderNoteBlocks(force = false) {
       }
     });
     requestAnimationFrame(() => { textarea.style.height = 'auto'; textarea.style.height = textarea.scrollHeight + 'px'; });
+
+    // Clicking the block's dead space (the empty gutter beside the image row,
+    // padding, etc.) routes focus into this block's textarea. Without it those
+    // clicks do nothing and a follow-up paste lands in the terminal instead of
+    // here, because the terminal wrapper owns the only other paste handler.
+    el.addEventListener('mousedown', (e) => {
+      const t = e.target as HTMLElement;
+      if (t.closest('textarea, button, .note-block-img-wrap, .note-block-drag-handle')) return;
+      e.preventDefault(); // keep focus from leaving; we set it manually
+      textarea.focus();
+      const len = textarea.value.length;
+      textarea.setSelectionRange(len, len);
+    });
 
     // Image previews
     if (block.images && block.images.length > 0) {
@@ -2526,6 +2544,9 @@ api.onTabAiUiStateChanged((tabId, state) => {
   // panel is collapsed they can't even see the queue, so auto-sending into the
   // active terminal would feel like an invisible side effect.
   if (notepadEl.classList.contains('hidden')) return;
+  // The user is composing their own prompt in this tab — don't paste a note
+  // block on top of their unsubmitted text, or both get submitted together.
+  if (appState.isPromptDirty(tabId)) return;
   const tab = appState.tabs.get(tabId);
   if (!tab || !tab.aiTool) return;
   const next = tab.noteBlocks.find(
@@ -2539,6 +2560,8 @@ api.onTabAiUiStateChanged((tabId, state) => {
     const live = appState.tabs.get(tabId);
     const stillThere = live?.noteBlocks.find(b => b.id === next.id);
     if (!stillThere) return;
+    // Re-check: the user may have started typing during the delay window.
+    if (appState.isPromptDirty(tabId)) return;
     lastQueueSendAt.set(tabId, Date.now());
     sendNoteBlock(tabId, next.id, true);
   }, 300);
@@ -2992,6 +3015,7 @@ function applyThemeToAll(index: number, fromAuto = false) {
     root.style.setProperty('--border-color', adjust(20));
     root.style.setProperty('--tab-active-bg', bg);
     root.style.setProperty('--tab-inactive-bg', adjust(8));
+    root.style.setProperty('--tab-divider', 'rgba(0, 0, 0, 0.18)');
     root.style.setProperty('--accent-green', '#006400');
     root.style.setProperty('--accent-red', '#c41a16');
     root.style.setProperty('--accent-blue', '#003d99');
@@ -3014,6 +3038,7 @@ function applyThemeToAll(index: number, fromAuto = false) {
     root.style.setProperty('--border-color', lighten(25));
     root.style.setProperty('--tab-active-bg', bg);
     root.style.setProperty('--tab-inactive-bg', lighten(12));
+    root.style.setProperty('--tab-divider', 'rgba(255, 255, 255, 0.16)');
     root.style.setProperty('--accent-green', '#4ec9b0');
     root.style.setProperty('--accent-red', '#f14c4c');
     root.style.setProperty('--accent-blue', '#569cd6');

@@ -52,6 +52,17 @@ class AppState {
   splitState: SplitState | null = null;
   private tabCounter = 0;
   private listeners: Array<() => void> = [];
+  // Tabs where the user has typed into the prompt but not yet submitted/cleared
+  // it. Transient (not persisted). Queue auto-send checks this so it won't inject
+  // a note block on top of the user's in-progress input. See markPromptDirty.
+  private promptDirtyTabs = new Set<string>();
+
+  /** User typed printable input into this tab's prompt (composing). */
+  markPromptDirty(tabId: string) { this.promptDirtyTabs.add(tabId); }
+  /** Prompt was submitted (Enter) or cleared (Ctrl+C / Ctrl+U). */
+  clearPromptDirty(tabId: string) { this.promptDirtyTabs.delete(tabId); }
+  /** True while the user has unsubmitted text in this tab's prompt. */
+  isPromptDirty(tabId: string): boolean { return this.promptDirtyTabs.has(tabId); }
 
   subscribe(fn: () => void) { this.listeners.push(fn); }
   private notify() { this.listeners.forEach(fn => { try { fn(); } catch (e) { console.error('[AppState] listener error:', e); } }); }
@@ -80,6 +91,7 @@ class AppState {
     if (idx === -1) return null;
     this.tabOrder.splice(idx, 1);
     this.tabs.delete(id);
+    this.promptDirtyTabs.delete(id);
     if (this.activeTabId === id) {
       this.activeTabId = this.tabOrder.length === 0 ? null
         : this.tabOrder[Math.min(idx, this.tabOrder.length - 1)];

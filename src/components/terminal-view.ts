@@ -229,6 +229,14 @@ export class TerminalView {
       }, true);
       this.wrapper.addEventListener('compositionend', () => {
         imeComposing = false;
+        // Clear xterm's hidden helper textarea once xterm has consumed the
+        // committed text (deferred a tick so we run AFTER its compositionend/
+        // input handlers). On macOS WebKit the textarea otherwise retains the
+        // last committed segment, which leaks back into the NEXT composition
+        // when the caret isn't at the line end — surfacing as the previous tail
+        // (e.g. "吗？") reappearing at the new cursor position. Guard on
+        // imeComposing so a composition that started in between is never wiped.
+        setTimeout(() => { if (!imeComposing) xtermTextarea.value = ''; }, 0);
       }, true);
       // Block IME composition on the WRAPPER (parent), so capture phase fires
       // BEFORE xterm's own listeners on the textarea.
@@ -459,6 +467,15 @@ export class TerminalView {
       const isAutoSequence = fixed === '\x1b[I' || fixed === '\x1b[O';
       if (!isAutoSequence) {
         api.markTerminalInput(tabId);
+        // Track unsubmitted prompt text so queue auto-send won't inject a note
+        // block on top of what the user is typing. Enter (\r) submits; Ctrl+C
+        // (\x03) / Ctrl+U (\x15) clear the line; bare escape/cursor sequences
+        // (arrows, fn keys) aren't content so they leave the flag untouched.
+        if (fixed.includes('\r') || fixed === '\x03' || fixed === '\x15') {
+          appState.clearPromptDirty(tabId);
+        } else if (!fixed.startsWith('\x1b')) {
+          appState.markPromptDirty(tabId);
+        }
       }
       api.writeTerminal(tabId, fixed);
     });
