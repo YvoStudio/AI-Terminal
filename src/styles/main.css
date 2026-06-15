@@ -234,7 +234,7 @@ body.note-block-reordering * { cursor: grabbing !important; }
 
 /* Bottom Bar — same bg as terminal, tools float below input */
 #bottom-bar { display: flex; align-items: center; height: 32px; padding: 0 12px; background: var(--bg-primary); flex-shrink: 0; user-select: none; font-size: 11px; color: var(--text-muted); }
-.bottom-bar-tools { display: flex; align-items: center; gap: 4px; margin-left: 22px; }
+.bottom-bar-tools { display: flex; align-items: center; gap: 4px; }
 .bottom-bar-spacer { flex: 1; }
 .bottom-bar-cwd { font-size: 11px; color: var(--text-muted); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; font-family: 'Cascadia Code', 'Consolas', monospace; }
 .bottom-bar-info { display: flex; align-items: center; gap: 10px; }

@@ -1046,6 +1046,16 @@ function reorderNoteBlock(tabId: string, srcId: string, dstId: string, dropAbove
   if (tabId === appState.activeTabId) renderNoteBlocks(true);
   appState.persistTabs();
 }
+// Blocks a note block from being sent twice concurrently. The manual "发送"
+// click can race the auto-send timer: the image paste makes Claude flip to
+// idle-ready while sendNoteBlock is still awaiting the clipboard round-trip, and
+// the manual path doesn't mark the prompt dirty until it finishes — so the timer
+// fires sendNoteBlock again on the same (not-yet-removed) block. A double-click
+// on 发送 does the same. Either way the one paste reaches Claude twice and shows
+// up as both [Image #N] and [Image #N+1]. A blockId-keyed in-flight set is the
+// reliable interlock since the block isn't removed until the async send ends.
+const sendingBlocks = new Set<string>();
+
 async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
   const tab = appState.tabs.get(tabId);
   if (!tab) return;
@@ -1054,64 +1064,70 @@ async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
   const hasText = block.content.trim().length > 0;
   const hasImages = block.images && block.images.length > 0;
   if (!hasText && !hasImages) return;
-  // Match the terminal's own paste detection: AI auto-detection may not have
-  // fired (restored session, heuristic miss), but a program on the alternate
-  // buffer (Claude, vim…) still wants a real bracketed-paste, not a raw path.
-  // Without this the image falls through to writeTerminal(path) and lands as
-  // unclickable literal text in Claude's prompt.
-  const isAI = !!tab.aiTool || (terminalViews.get(tabId)?.isAiMode() ?? false);
-  // Send images first, then text content.
-  if (hasImages) {
-    for (const imgPath of block.images!) {
-      // For AI/TUI tools, replicate a real Cmd+V image paste: drop the image on
-      // the OS clipboard then send an empty bracketed paste so the tool reads it
-      // and renders a clickable [Image #N] ref (resolved by the terminal link
-      // provider). Falls back to the raw path if the clipboard write fails.
-      let pasted = false;
+  if (sendingBlocks.has(blockId)) return; // a send for this block is already in flight
+  sendingBlocks.add(blockId);
+  try {
+    // Match the terminal's own paste detection: AI auto-detection may not have
+    // fired (restored session, heuristic miss), but a program on the alternate
+    // buffer (Claude, vim…) still wants a real bracketed-paste, not a raw path.
+    // Without this the image falls through to writeTerminal(path) and lands as
+    // unclickable literal text in Claude's prompt.
+    const isAI = !!tab.aiTool || (terminalViews.get(tabId)?.isAiMode() ?? false);
+    // Send images first, then text content.
+    if (hasImages) {
+      for (const imgPath of block.images!) {
+        // For AI/TUI tools, replicate a real Cmd+V image paste: drop the image on
+        // the OS clipboard then send an empty bracketed paste so the tool reads it
+        // and renders a clickable [Image #N] ref (resolved by the terminal link
+        // provider). Falls back to the raw path if the clipboard write fails.
+        let pasted = false;
+        if (isAI) {
+          try {
+            // Decode + push to the OS clipboard in the backend — no webview canvas
+            // round-trip, which could fail to load or taint and silently drop the
+            // image to the raw-path fallback below (the unclickable-path bug).
+            await api.writeClipboardImageFromPath(imgPath);
+            appState.addPastedImage(tabId, imgPath);
+            api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
+            pasted = true;
+            // Let the tool read the clipboard before we overwrite it (next image).
+            await new Promise(r => setTimeout(r, 250));
+          } catch (err) { console.error('Failed to send note-block image:', err); }
+        }
+        if (!pasted) {
+          api.writeTerminal(tabId, imgPath + ' ');
+        }
+      }
+    }
+    if (hasText) {
+      // For AI/TUI tools, deliver the text as a bracketed paste (multiline-safe,
+      // mirrors a real Cmd+V) instead of raw keystrokes whose embedded newlines
+      // Claude could mis-handle.
       if (isAI) {
-        try {
-          // Decode + push to the OS clipboard in the backend — no webview canvas
-          // round-trip, which could fail to load or taint and silently drop the
-          // image to the raw-path fallback below (the unclickable-path bug).
-          await api.writeClipboardImageFromPath(imgPath);
-          appState.addPastedImage(tabId, imgPath);
-          api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
-          pasted = true;
-          // Let the tool read the clipboard before we overwrite it (next image).
-          await new Promise(r => setTimeout(r, 250));
-        } catch (err) { console.error('Failed to send note-block image:', err); }
-      }
-      if (!pasted) {
-        api.writeTerminal(tabId, imgPath + ' ');
+        api.writeTerminal(tabId, '\x1b[200~' + block.content + '\x1b[201~');
+      } else {
+        api.writeTerminal(tabId, block.content);
       }
     }
-  }
-  if (hasText) {
-    // For AI/TUI tools, deliver the text as a bracketed paste (multiline-safe,
-    // mirrors a real Cmd+V) instead of raw keystrokes whose embedded newlines
-    // Claude could mis-handle.
-    if (isAI) {
-      api.writeTerminal(tabId, '\x1b[200~' + block.content + '\x1b[201~');
+    // Auto-queue path: press Enter so Claude actually submits. Manual click on
+    // "发送" leaves the prompt in the input box for the user to review.
+    if (submit) {
+      // Delay + separate write so the Enter can't arrive before Claude has
+      // ingested the text. Two writeTerminal IPC calls have no ordering guarantee,
+      // so a bare \r racing ahead lands on an empty prompt — submitting nothing —
+      // and the block is left sitting in the input (the "last block won't send" bug).
+      if (hasText || hasImages) await new Promise(r => setTimeout(r, 120));
+      api.writeTerminal(tabId, '\r');
+      appState.clearPromptDirty(tabId); // submitted — prompt is empty again
     } else {
-      api.writeTerminal(tabId, block.content);
+      // Manual "发送" stages the text in the prompt for the user to review; treat
+      // it as unsubmitted content so auto-send won't paste another block over it.
+      appState.markPromptDirty(tabId);
     }
+    removeNoteBlock(tabId, blockId);
+  } finally {
+    sendingBlocks.delete(blockId);
   }
-  // Auto-queue path: press Enter so Claude actually submits. Manual click on
-  // "发送" leaves the prompt in the input box for the user to review.
-  if (submit) {
-    // Delay + separate write so the Enter can't arrive before Claude has
-    // ingested the text. Two writeTerminal IPC calls have no ordering guarantee,
-    // so a bare \r racing ahead lands on an empty prompt — submitting nothing —
-    // and the block is left sitting in the input (the "last block won't send" bug).
-    if (hasText || hasImages) await new Promise(r => setTimeout(r, 120));
-    api.writeTerminal(tabId, '\r');
-    appState.clearPromptDirty(tabId); // submitted — prompt is empty again
-  } else {
-    // Manual "发送" stages the text in the prompt for the user to review; treat
-    // it as unsubmitted content so auto-send won't paste another block over it.
-    appState.markPromptDirty(tabId);
-  }
-  removeNoteBlock(tabId, blockId);
 }
 
 function showImagePreview(srcOrList: string | string[], startIndex = 0) {

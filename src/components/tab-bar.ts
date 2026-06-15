@@ -652,14 +652,5 @@ export class TabBar {
       }
       this.scrollActiveIntoView();
     }
-
-    const statusTabs = document.getElementById('status-tabs');
-    if (statusTabs) statusTabs.textContent = `${appState.tabOrder.length} tab${appState.tabOrder.length !== 1 ? 's' : ''}`;
-
-    const statusState = document.getElementById('status-state');
-    if (statusState && appState.activeTabId) {
-      const tab = appState.tabs.get(appState.activeTabId);
-      statusState.textContent = tab ? tab.status : '';
-    }
   }
 }
