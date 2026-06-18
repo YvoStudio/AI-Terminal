@@ -29,6 +29,11 @@ export class TerminalView {
   private mouseSelectionInProgress = false;
   private userScrolledUp = false;
   private lastWheelAt = 0; // ms of the last wheel event — gates the resync backstop off active scrolling.
+  // ms of the last handled image paste. macOS' webview occasionally dispatches
+  // two `paste` events for a single Cmd+V; without this guard the second one
+  // re-runs the whole save→clipboard→bracketed-paste flow, so Claude reads the
+  // clipboard twice and renders one image as both [Image #N] and [Image #N+1].
+  private lastImagePasteAt = 0;
   // Kitty Keyboard Protocol (CSI u) state: flags stack. 0 = disabled.
   private kittyStack: number[] = [0];
   private get kittyFlags() { return this.kittyStack[this.kittyStack.length - 1] || 0; }
@@ -513,6 +518,12 @@ export class TerminalView {
         if (item.type.startsWith('image/')) {
           e.preventDefault();
           e.stopPropagation();
+          // Drop a duplicate paste from a double-dispatched Cmd+V (see field doc).
+          // Set synchronously here so the second event — which fires before the
+          // async FileReader below resolves — sees the recent timestamp and bails.
+          const now = Date.now();
+          if (now - this.lastImagePasteAt < 250) return;
+          this.lastImagePasteAt = now;
           const blob = item.getAsFile();
           if (blob) {
             const reader = new FileReader();
@@ -524,6 +535,12 @@ export class TerminalView {
                   const t = appState.tabs.get(tabId);
                   const ai = !!(t?.aiTool) || bufType === 'alternate';
                   if (ai) {
+                    // 先把刚保存的单张 PNG 规范化写回 OS 剪贴板,再发空 bracketed
+                    // paste 让 Claude 读它。否则 Claude 读的是用户原始 Cmd+V 的剪贴板,
+                    // 若其中含多种图像表示(PNG/TIFF 等),Claude 可能读出两次,把一次
+                    // 粘贴渲染成 [Image #N] 和 [Image #N+1]——而我们只记录了一次,
+                    // 改写不到第二个,编号就翻倍。与笔记块注入路径(sendNoteBlock)一致。
+                    try { await api.writeClipboardImageFromPath(filePath); } catch {}
                     api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
                   } else {
                     api.writeTerminal(tabId, filePath + ' ');
