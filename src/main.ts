@@ -1,7 +1,7 @@
 import { api } from './api';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { appState, type SplitLayout } from './components/app-state';
+import { appState, type SplitLayout, type NoteBlock, type TabState } from './components/app-state';
 import { TabBar } from './components/tab-bar';
 import { TerminalView } from './components/terminal-view';
 import { themes } from './components/themes';
@@ -97,12 +97,13 @@ function maybeShowSystemNotification(tabId: string): void {
   }
 }
 
-async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string; images?: string[] }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string, userRenamed?: boolean, preferredId?: string): Promise<string> {
+async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string; images?: string[] }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string, userRenamed?: boolean, preferredId?: string, autoSend?: boolean): Promise<string> {
   const tabId = await api.createTerminal(cwd, preferredId);
   const tab = appState.addTab(tabId);
   if (typeof name === 'string') tab.title = name;
   if (aiTool) tab.aiTool = aiTool;
   if (userRenamed) tab.userRenamed = true;
+  if (autoSend) tab.autoSend = true; // set before the view is built so the header toggle reflects it
   if (noteBlocks && noteBlocks.length > 0) {
     tab.noteBlocks = noteBlocks.map(b => ({
       id: b.id,
@@ -114,6 +115,9 @@ async function createTab(name?: string, noteBlocks?: Array<{ id: string; content
 
   const view = new TerminalView(tabId, container);
   terminalViews.set(tabId, view);
+  view.onNotepadRender = (id) => renderNoteBlocks(id, true);
+  view.onNotepadAddBlock = (id) => addNoteBlock(id);
+  renderNoteBlocks(tabId, true);
 
   // Regex triggers: fire on any output, even when tab is not active.
   api.onTerminalOutput(tabId, (chunk) => runTriggers(tabId, chunk));
@@ -168,6 +172,9 @@ async function createTabInPane(paneIndex: number) {
 
   const view = new TerminalView(tabId, container);
   terminalViews.set(tabId, view);
+  view.onNotepadRender = (id) => renderNoteBlocks(id, true);
+  view.onNotepadAddBlock = (id) => addNoteBlock(id);
+  renderNoteBlocks(tabId, true);
 
   api.onTerminalOutput(tabId, () => {
     if (appState.activeTabId === tabId) {
@@ -968,64 +975,44 @@ if (!shouldUseNativeTitleBar()) {
 }
 
 
-function refitActiveTerminal() {
-  if (appState.activeTabId) {
-    const view = terminalViews.get(appState.activeTabId);
-    if (view) requestAnimationFrame(() => view.fit());
-  }
+// Notepad toggle. Each TerminalView owns its own task-queue entry + floating
+// panel (see terminal-view.ts), so split panes each get one sized to the pane.
+// Opened via that per-pane entry button; the command palette / shortcuts toggle
+// the active pane's panel.
+function toggleActiveNotepad(): void {
+  const view = appState.activeTabId ? terminalViews.get(appState.activeTabId) : undefined;
+  if (!view) return;
+  view.toggleNotepad();
 }
-
-// Notepad toggle
-const notepadEl = document.getElementById('notepad')!;
-const notepadResizeEl = document.getElementById('notepad-resize-handle')!;
-const notepadBtn = document.getElementById('btn-toggle-notepad')!;
-const notepadBlocksEl = document.getElementById('notepad-blocks')!;
-function setNotepadVisible(visible: boolean) {
-  notepadEl.classList.toggle('hidden', !visible);
-  notepadResizeEl.style.display = visible ? '' : 'none';
-  notepadBtn.classList.toggle('active', visible);
-  localStorage.setItem('notepad-hidden', visible ? '' : '1');
-  refitActiveTerminal();
+function openActiveNotepad(): void {
+  const view = appState.activeTabId ? terminalViews.get(appState.activeTabId) : undefined;
+  if (!view) return;
+  view.setNotepadVisible(true);
 }
-notepadBtn.addEventListener('click', () => setNotepadVisible(notepadEl.classList.contains('hidden')));
-if (localStorage.getItem('notepad-hidden') !== '') setNotepadVisible(false);
-
-// Notepad resize
-  (() => {
-  let startX = 0, startWidth = 0;
-  notepadResizeEl.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    startX = e.clientX; startWidth = notepadEl.offsetWidth;
-    const cleanup = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.removeEventListener('mouseleave', cleanup);
-      refitActiveTerminal();
-    };
-    const onMove = (e: MouseEvent) => {
-      notepadEl.style.width = Math.max(200, Math.min(600, startWidth - (e.clientX - startX))) + 'px';
-    };
-    const onUp = () => cleanup();
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.addEventListener('mouseleave', cleanup);
-  });
-})();
 
 // Notepad blocks
 let blockCounter = 0;
+// A task is "sendable" once it has text or at least one image.
+function blockHasPayload(b: NoteBlock): boolean {
+  return b.content.trim().length > 0 || !!(b.images && b.images.length > 0);
+}
+// Head of the task queue: the first task with content. This is what auto-send
+// fires (when the tab's auto-send is on) and what we flag in the UI.
+function headOfQueueBlock(tab: TabState): NoteBlock | undefined {
+  return tab.noteBlocks.find(b => blockHasPayload(b));
+}
 function addNoteBlock(tabId: string, content = '') {
   const tab = appState.tabs.get(tabId);
   if (!tab) return;
   tab.noteBlocks.push({ id: `b${++blockCounter}`, content });
-  if (tabId === appState.activeTabId) renderNoteBlocks(true);
+  renderNoteBlocks(tabId, true);
   appState.persistTabs();
 }
 function removeNoteBlock(tabId: string, blockId: string) {
   const tab = appState.tabs.get(tabId);
   if (!tab) return;
   tab.noteBlocks = tab.noteBlocks.filter(b => b.id !== blockId);
-  if (tabId === appState.activeTabId) renderNoteBlocks(true);
+  renderNoteBlocks(tabId, true);
   appState.persistTabs();
 }
 function reorderNoteBlock(tabId: string, srcId: string, dstId: string, dropAbove: boolean) {
@@ -1043,7 +1030,7 @@ function reorderNoteBlock(tabId: string, srcId: string, dstId: string, dropAbove
     if (!dropAbove) insertIdx += 1;
     tab.noteBlocks.splice(insertIdx, 0, src);
   }
-  if (tabId === appState.activeTabId) renderNoteBlocks(true);
+  renderNoteBlocks(tabId, true);
   appState.persistTabs();
 }
 // Blocks a note block from being sent twice concurrently. The manual "发送"
@@ -1202,8 +1189,6 @@ function showImagePreview(srcOrList: string | string[], startIndex = 0) {
 }
 (window as any).showImagePreview = showImagePreview;
 
-let lastRenderedTabId: string | null = null;
-let lastRenderedBlockCount = -1;
 /**
  * Pointer-driven note-block reorder. We bypass HTML5 drag-and-drop because in
  * Tauri's webview the drop indicators rendered invisibly and drop events were
@@ -1236,7 +1221,8 @@ function startBlockReorder(tabId: string, srcId: string, srcEl: HTMLElement, sta
     const under = document.elementFromPoint(ev.clientX, ev.clientY);
     marker.style.display = '';
     const block = under?.closest('.note-block') as HTMLElement | null;
-    if (!block || !notepadBlocksEl.contains(block)) {
+    const container = terminalViews.get(tabId)?.notepadBlocksEl;
+    if (!block || !container || !container.contains(block)) {
       currentTarget = null;
       marker.style.opacity = '0';
       return;
@@ -1389,9 +1375,11 @@ function handleSkillMenuKey(e: KeyboardEvent, textarea: HTMLTextAreaElement): bo
 /** Restore the text caret to a block's textarea after a re-render (which rebuilds
  * the DOM and drops focus) — e.g. so the user can keep typing right after pasting
  * an image into the block. */
-function focusNoteBlock(blockId: string): void {
+function focusNoteBlock(tabId: string, blockId: string): void {
+  const container = terminalViews.get(tabId)?.notepadBlocksEl;
+  if (!container) return;
   requestAnimationFrame(() => {
-    const ta = notepadBlocksEl.querySelector(
+    const ta = container.querySelector(
       `textarea[data-block-id="${blockId}"]`
     ) as HTMLTextAreaElement | null;
     if (!ta) return;
@@ -1401,26 +1389,39 @@ function focusNoteBlock(blockId: string): void {
   });
 }
 
-function renderNoteBlocks(force = false) {
+// Render every live pane's notepad — used on broad state changes (each view
+// renders its own tab, so split panes stay in sync).
+function renderAllNoteBlocks(): void {
+  for (const tabId of terminalViews.keys()) renderNoteBlocks(tabId);
+}
+
+function renderNoteBlocks(tabId: string, force = false) {
+  const view = terminalViews.get(tabId);
+  if (!view) return;
+  const container = view.notepadBlocksEl;
+  const tab = appState.tabs.get(tabId);
+  if (!tab) { container.innerHTML = ''; view.setNotepadCount(0); return; }
+  view.setNotepadCount(tab.noteBlocks.length); // keep the entry badge current
+  // On non-forced (state-tick) renders, skip the rebuild when the panel is
+  // collapsed (nothing visible to update beyond the badge above — the common
+  // case, so this keeps frequent status ticks cheap) or while the user is
+  // editing inside it (don't drop their caret/focus). Real content changes and
+  // expand both pass force=true.
+  if (!force && (!view.isNotepadVisible() || container.contains(document.activeElement))) return;
   hideSkillMenu(); // textareas are about to be rebuilt — drop any stale menu ref
-  if (!appState.activeTabId) { notepadBlocksEl.innerHTML = ''; lastRenderedTabId = null; lastRenderedBlockCount = -1; return; }
-  const tab = appState.tabs.get(appState.activeTabId);
-  if (!tab) return;
-  if (!force && appState.activeTabId === lastRenderedTabId && tab.noteBlocks.length === lastRenderedBlockCount && notepadEl.contains(document.activeElement)) return;
 
-  const savedScrollTop = notepadBlocksEl.scrollTop;
-  lastRenderedTabId = appState.activeTabId;
-  lastRenderedBlockCount = tab.noteBlocks.length;
-  notepadBlocksEl.innerHTML = '';
+  const savedScrollTop = container.scrollTop;
+  container.innerHTML = '';
 
-  const tabId = appState.activeTabId;
+  // When auto-send is on, flag the head of the queue (the task that fires next).
+  const queuedId = tab.autoSend ? headOfQueueBlock(tab)?.id : undefined;
   for (let blockIdx = 0; blockIdx < tab.noteBlocks.length; blockIdx++) {
     const block = tab.noteBlocks[blockIdx];
     const el = document.createElement('div');
     el.className = 'note-block';
     el.dataset.blockId = block.id;
-    // Mark the head-of-queue block so the user knows what will auto-send next.
-    if (blockIdx === 0) el.classList.add('queue-pending');
+    // Mark the block that auto-send will fire next so the user knows what's queued.
+    if (block.id === queuedId) el.classList.add('queue-pending');
 
     // Drag handle — pointer-driven reorder. HTML5 drag-and-drop in Tauri's
     // webview was unreliable across themes (drop indicator invisible, drop
@@ -1473,8 +1474,8 @@ function renderNoteBlocks(force = false) {
                 if (!block.images) block.images = [];
                 block.images.push(filePath);
                 appState.persistTabs();
-                renderNoteBlocks(true);
-                focusNoteBlock(block.id);
+                renderNoteBlocks(tabId, true);
+                focusNoteBlock(tabId, block.id);
               }
             } catch (err) { console.error('Failed to save pasted image:', err); }
           };
@@ -1514,8 +1515,8 @@ function renderNoteBlocks(force = false) {
                   if (!block.images) block.images = [];
                   block.images.push(filePath);
                   appState.persistTabs();
-                  renderNoteBlocks(true);
-                  focusNoteBlock(block.id);
+                  renderNoteBlocks(tabId, true);
+                  focusNoteBlock(tabId, block.id);
                 }
               } catch (err) { console.error('Failed to save dropped image:', err); }
             };
@@ -1570,7 +1571,7 @@ function renderNoteBlocks(force = false) {
         rmBtn.addEventListener('click', () => {
           block.images = (block.images || []).filter(p => p !== imgPath);
           appState.persistTabs();
-          renderNoteBlocks(true);
+          renderNoteBlocks(tabId, true);
         });
         imgWrap.appendChild(img);
         imgWrap.appendChild(rmBtn);
@@ -1593,8 +1594,8 @@ function renderNoteBlocks(force = false) {
         if (!block.images) block.images = [];
         block.images.push(p);
         appState.persistTabs();
-        renderNoteBlocks(true);
-        focusNoteBlock(block.id);
+        renderNoteBlocks(tabId, true);
+        focusNoteBlock(tabId, block.id);
       }
     });
     const sendBtn = document.createElement('button');
@@ -1607,32 +1608,26 @@ function renderNoteBlocks(force = false) {
     deleteBtn.textContent = '删除';
     deleteBtn.textContent = '删除';
     deleteBtn.addEventListener('click', () => removeNoteBlock(tabId, block.id));
+
     actions.appendChild(imgBtn);
     actions.appendChild(deleteBtn);
     actions.appendChild(sendBtn);
     el.appendChild(textarea);
     el.appendChild(actions);
-    notepadBlocksEl.appendChild(el);
+    container.appendChild(el);
   }
 
-  const addBtn = document.createElement('div');
-  addBtn.className = 'notepad-empty';
-  addBtn.textContent = '+ 点击添加文本块';
-  addBtn.textContent = '+ 点击添加文本块';
-  addBtn.addEventListener('click', () => { if (appState.activeTabId) addNoteBlock(appState.activeTabId); });
-  notepadBlocksEl.appendChild(addBtn);
-  notepadBlocksEl.scrollTop = savedScrollTop;
+  // Empty-state hint (the add button itself lives in the panel footer).
+  if (tab.noteBlocks.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'notepad-empty';
+    empty.textContent = '暂无任务，点击下方「+ 添加任务」';
+    container.appendChild(empty);
+  }
+  container.scrollTop = savedScrollTop;
 }
 
-let notepadScrolling = false;
-let notepadScrollTimer = 0;
-notepadBlocksEl.addEventListener('scroll', () => {
-  notepadScrolling = true;
-  clearTimeout(notepadScrollTimer);
-  notepadScrollTimer = window.setTimeout(() => { notepadScrolling = false; }, 300);
-}, { passive: true });
-
-appState.subscribe(() => { if (!notepadScrolling) renderNoteBlocks(); });
+appState.subscribe(() => renderAllNoteBlocks());
 
 // 全局拖选状态
 let isSelectingText = false;
@@ -1715,13 +1710,14 @@ const TIPS_PANEL_HTML = `
             <div class="tips-item"><span class="tips-key">Alt+S</span> 显示/隐藏窗口（全局）</div>
           </div>
           <div class="tips-section">
-            <div class="tips-section-title">标签 & Notepad</div>
+            <div class="tips-section-title">标签 & 任务队列</div>
             <div class="tips-item"><span class="tips-icon">✏️</span>双击标签名可重命名</div>
             <div class="tips-item"><span class="tips-icon">↔️</span>拖动标签可排序</div>
             <div class="tips-item"><span class="tips-icon" style="color:var(--accent-red)">●</span>红点表示后台任务完成</div>
             <div class="tips-item"><span class="tips-icon">🎨</span>右键标签可修改颜色</div>
-            <div class="tips-item"><span class="tips-icon">+</span>Notepad 可预写提示词</div>
-            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>点击发送文本块到当前终端</div>
+            <div class="tips-item"><span class="tips-icon">📋</span>终端右下角入口展开任务队列，预写多条任务</div>
+            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>点「发送」把任务发到当前终端，拖右上角手柄可排序</div>
+            <div class="tips-item"><span class="tips-icon">⚡</span>开「自动发送」后 AI 空闲时自动发送队首任务</div>
           </div>
         </div>
         <div class="tips-column tips-column-ai">
@@ -1882,13 +1878,14 @@ function toggleTipsPanel() {
             <div class="tips-item"><span class="tips-key">Alt+K</span> 技巧面板</div>
           </div>
           <div class="tips-section">
-            <div class="tips-section-title">标签 & Notepad</div>
+            <div class="tips-section-title">标签 & 任务队列</div>
             <div class="tips-item"><span class="tips-icon">✏️</span>双击标签名可重命名</div>
             <div class="tips-item"><span class="tips-icon">↔️</span>拖动标签可排序</div>
             <div class="tips-item"><span class="tips-icon" style="color:var(--accent-red)">●</span>红点 = 后台任务完成</div>
             <div class="tips-item"><span class="tips-icon">🎨</span>右键标签可改颜色</div>
-            <div class="tips-item"><span class="tips-icon">+</span>Notepad 预写提示词</div>
-            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>点击发送文本块</div>
+            <div class="tips-item"><span class="tips-icon">📋</span>右下角入口展开任务队列预写任务</div>
+            <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>点「发送」发送任务，可拖动排序</div>
+            <div class="tips-item"><span class="tips-icon">⚡</span>开「自动发送」AI 空闲自动发队首</div>
           </div>
         </div>
         <div class="tips-column tips-column-ai">
@@ -2538,36 +2535,19 @@ api.onTabStatusChanged((tabId, status) => {
 // after commit). Without it, two blocks could be sent into the same prompt.
 const lastQueueSendAt = new Map<string, number>();
 
-// Auto-send toggle — defaults to OFF so a freshly installed build won't surprise
-// users by injecting notepad blocks into their first AI session. The user opts
-// in via the header switch; the choice persists across reloads.
-const AUTOSEND_STORAGE_KEY = 'notepad-autosend-enabled';
-let notepadAutoSendEnabled = localStorage.getItem(AUTOSEND_STORAGE_KEY) === '1';
-(() => {
-  const cb = document.getElementById('notepad-autosend-checkbox') as HTMLInputElement | null;
-  if (!cb) return;
-  cb.checked = notepadAutoSendEnabled;
-  cb.addEventListener('change', () => {
-    notepadAutoSendEnabled = cb.checked;
-    localStorage.setItem(AUTOSEND_STORAGE_KEY, cb.checked ? '1' : '0');
-  });
-})();
-
+// Auto-send is a per-session toggle (the "自动发送" switch in each pane's task-queue
+// header), defaulting to OFF. When on, the head of that tab's queue is sent each
+// time the AI goes idle-ready. We don't gate on panel visibility — the toggle is
+// the explicit intent signal, so it fires even when the panel is collapsed.
 api.onTabAiUiStateChanged((tabId, state) => {
   if (state !== 'idle-ready') return;
-  if (!notepadAutoSendEnabled) return;
-  // Hiding the notepad is the user's "stop pushing me prompts" gesture — if the
-  // panel is collapsed they can't even see the queue, so auto-sending into the
-  // active terminal would feel like an invisible side effect.
-  if (notepadEl.classList.contains('hidden')) return;
   // The user is composing their own prompt in this tab — don't paste a note
   // block on top of their unsubmitted text, or both get submitted together.
   if (appState.isPromptDirty(tabId)) return;
   const tab = appState.tabs.get(tabId);
   if (!tab || !tab.aiTool) return;
-  const next = tab.noteBlocks.find(
-    b => b.content.trim().length > 0 || (b.images && b.images.length > 0)
-  );
+  if (!tab.autoSend) return; // per-session toggle
+  const next = headOfQueueBlock(tab);
   if (!next) return;
   const lastSent = lastQueueSendAt.get(tabId) ?? 0;
   if (Date.now() - lastSent < 1500) return;
@@ -2707,7 +2687,7 @@ function runTriggers(tabId: string, chunk: string) {
         const title = appState.tabs.get(tabId)?.title || 'Trigger';
         api.fireNotification(title, captured).catch(() => {});
       } else if (t.action === 'notepad') {
-        if (appState.activeTabId === tabId) setNotepadVisible(true);
+        if (appState.activeTabId === tabId) openActiveNotepad();
         addNoteBlock(tabId, captured);
       }
     }
@@ -2793,7 +2773,7 @@ window.addEventListener('focus', () => {
 document.addEventListener('mouseup', (e) => {
   const target = e.target as HTMLElement;
   // Don't refocus if clicking on an input, button, or interactive element
-  if (target.closest('input, textarea, select, button, a, [contenteditable="true"], .tab-context-menu, .tips-panel, .command-palette, .notepad-block, #notepad, .history-item, .palette-item, .terminal-search-bar')) return;
+  if (target.closest('input, textarea, select, button, a, [contenteditable="true"], .tab-context-menu, .tips-panel, .command-palette, .note-block, .terminal-notepad, .history-item, .palette-item, .terminal-search-bar')) return;
   if (appState.activeTabId) {
     const view = terminalViews.get(appState.activeTabId);
     if (view) view.focus();
@@ -2834,7 +2814,7 @@ document.addEventListener('keydown', (e) => {
     const view = terminalViews.get(appState.activeTabId);
     const text = view?.getLastBlockText();
     if (!text) return;
-    setNotepadVisible(true);
+    openActiveNotepad();
     addNoteBlock(appState.activeTabId, text);
   }
   // Cmd/Ctrl+Shift+N: append current terminal selection as a new Notepad block
@@ -2844,7 +2824,7 @@ document.addEventListener('keydown', (e) => {
     const view = terminalViews.get(appState.activeTabId);
     const sel = view?.terminal.getSelection();
     if (!sel || !sel.trim()) return;
-    setNotepadVisible(true);
+    openActiveNotepad();
     addNoteBlock(appState.activeTabId, sel);
     view?.terminal.clearSelection();
   }
@@ -2903,7 +2883,7 @@ function toggleCommandPalette() {
     { label: '新建标签', detail: '⌘T', action: () => createTab() },
     { label: '关闭标签', detail: '⌘W', action: () => { if (appState.activeTabId) closeTab(appState.activeTabId); } },
     { label: '终端搜索', detail: '⌘F', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.toggleSearch(); } } },
-    { label: '切换笔记面板', action: () => setNotepadVisible(notepadEl.classList.contains('hidden')) },
+    { label: '切换笔记面板', action: () => toggleActiveNotepad() },
     { label: '清空终端', action: () => { if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.clear(); } } },
     { label: '检查更新', action: () => {
       import('./components/updater').then(({ checkForUpdates }) => checkForUpdates(false));
@@ -3081,9 +3061,8 @@ if (IS_QUICK) {
   document.documentElement.classList.add('quick-mode');
   const style = document.createElement('style');
   style.textContent = `
-    .quick-mode #btn-toggle-notepad,
-    .quick-mode #notepad,
-    .quick-mode #notepad-resize-handle,
+    .quick-mode .terminal-notepad,
+    .quick-mode .terminal-notepad-fab,
     .quick-mode #window-controls,
     .quick-mode #traffic-light-spacer,
     .quick-mode #btn-history { display: none !important; }
@@ -3113,7 +3092,7 @@ async function init() {
     // Protect restored tab names from auto-rename (if name is not default "Terminal N")
     const isCustomName = saved.name && !saved.name.startsWith('Terminal ') && !saved.name.startsWith('↻ ');
     try {
-      const tabId = await createTab(saved.name, saved.noteBlocks, cwd, shell, saved.aiTool, saved.userRenamed || isCustomName, saved.id);
+      const tabId = await createTab(saved.name, saved.noteBlocks, cwd, shell, saved.aiTool, saved.userRenamed || isCustomName, saved.id, saved.autoSend);
       if (saved.pastedTotal || saved.pastedImages) {
         appState.restorePastedImages(tabId, saved.pastedTotal, saved.pastedImages);
       }
@@ -3156,40 +3135,29 @@ listen<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-dr
   const tabId = appState.activeTabId;
   if (!tabId || !event.payload.paths || event.payload.paths.length === 0) return;
 
-  // Determine if we're dropping on notepad or terminal by checking element at drop position
+  // Determine if we're dropping on a pane's notepad or the terminal. With per-pane
+  // panels, route the drop to whichever (visible) notepad it landed inside and
+  // resolve that panel's owning tab from its wrapper.
   const pos = event.payload.position;
   const elementAtDrop = document.elementFromPoint(pos.x, pos.y);
-  const notepadEl = document.getElementById('notepad');
+  const droppedPanel = elementAtDrop?.closest('.terminal-notepad:not(.hidden)') as HTMLElement | null;
+  const notepadTabId = droppedPanel?.closest('.terminal-wrapper')?.getAttribute('data-tab-id') || null;
 
-  // Check if notepad is visible
-  const isNotepadVisible = notepadEl && !notepadEl.classList.contains('hidden');
-
-  // More lenient check: if drop is in right half of screen and notepad is visible, assume notepad
-  const windowWidth = window.innerWidth;
-  const isInRightHalf = pos.x > windowWidth * 0.6;
-
-  // Try to find textarea - either directly under drop or the focused textarea in notepad
   let notepadTextarea: HTMLTextAreaElement | null = null;
-  if (isNotepadVisible) {
-    // First check: is drop in right half of screen (notepad area)?
-    if (isInRightHalf || (elementAtDrop && notepadEl.contains(elementAtDrop))) {
-      // First try: check if drop is directly on a textarea
-      if (elementAtDrop?.tagName === 'TEXTAREA') {
-        notepadTextarea = elementAtDrop as HTMLTextAreaElement;
+  if (droppedPanel) {
+    if (elementAtDrop?.tagName === 'TEXTAREA') {
+      notepadTextarea = elementAtDrop as HTMLTextAreaElement;
+    } else {
+      const closestTextarea = elementAtDrop?.closest('.terminal-notepad-blocks textarea') as HTMLTextAreaElement | null;
+      if (closestTextarea) {
+        notepadTextarea = closestTextarea;
       } else {
-        // Second try: find closest textarea ancestor
-        const closestTextarea = elementAtDrop?.closest('#notepad-blocks textarea') as HTMLTextAreaElement | null;
-        if (closestTextarea) {
-          notepadTextarea = closestTextarea;
+        const activeEl = document.activeElement;
+        if (activeEl?.tagName === 'TEXTAREA' && droppedPanel.contains(activeEl)) {
+          notepadTextarea = activeEl as HTMLTextAreaElement;
         } else {
-          // Third try: use the currently focused textarea if it's in notepad
-          const activeEl = document.activeElement;
-          if (activeEl?.tagName === 'TEXTAREA' && notepadEl.contains(activeEl)) {
-            notepadTextarea = activeEl as HTMLTextAreaElement;
-          } else {
-            // Fourth try: find first textarea in notepad (drop on blank area)
-            notepadTextarea = notepadEl.querySelector('textarea');
-          }
+          // Drop on the panel's blank area → first textarea in that panel.
+          notepadTextarea = droppedPanel.querySelector('textarea');
         }
       }
     }
@@ -3205,8 +3173,8 @@ listen<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-dr
       const before = currentValue.substring(0, cursorPos);
       const after = currentValue.substring(cursorPos);
 
-      // Find the corresponding block
-      const tab = appState.tabs.get(tabId);
+      // Find the corresponding block in the panel's owning tab
+      const tab = notepadTabId ? appState.tabs.get(notepadTabId) : undefined;
       const blockId = notepadTextarea.dataset.blockId;
       const block = tab?.noteBlocks.find(b => b.id === blockId);
 
@@ -3219,7 +3187,7 @@ listen<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-dr
               if (!block.images) block.images = [];
               block.images.push(imgPath);
               appState.persistTabs();
-              renderNoteBlocks(true);
+              if (notepadTabId) renderNoteBlocks(notepadTabId, true);
             }
           } catch (err) {
             console.error('Failed to process dropped image:', err);

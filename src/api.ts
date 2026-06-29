@@ -18,6 +18,7 @@ export interface SavedTab {
   id?: string;
   name: string;
   noteBlocks?: Array<{ id: string; content: string; images?: string[] }>;
+  autoSend?: boolean;
   shell?: 'cmd' | 'powershell' | 'wsl';
   cwd?: string;
   aiTool?: string;

@@ -26,6 +26,18 @@ export class TerminalView {
   private scrollBtn: HTMLElement;
   private scrollCheckTimer: ReturnType<typeof setInterval> | null = null;
 
+  // Per-pane note-block (文本块) entry + floating panel. Built inside the wrapper
+  // like the scroll button so every visible terminal — including each split pane
+  // — has its own, anchored to and sized against that pane's width. main.ts owns
+  // the block rendering and fills notepadBlocksEl via the onNotepadRender hook.
+  notepadBlocksEl!: HTMLElement;
+  private notepadEl!: HTMLElement;
+  private notepadFab!: HTMLElement;
+  private notepadFabCount!: HTMLElement;
+  private notepadVisible = false;
+  onNotepadRender: ((tabId: string) => void) | null = null;
+  onNotepadAddBlock: ((tabId: string) => void) | null = null;
+
   private mouseSelectionInProgress = false;
   private userScrolledUp = false;
   private lastWheelAt = 0; // ms of the last wheel event — gates the resync backstop off active scrolling.
@@ -506,6 +518,10 @@ export class TerminalView {
     // Handle paste: intercept images, send bracketed paste for AI tools,
     // otherwise let xterm handle text paste naturally.
     this.wrapper.addEventListener('paste', (e: ClipboardEvent) => {
+      // The note-queue panel lives inside this wrapper, so a paste into one of its
+      // textareas bubbles up here. Let it reach the textarea (its own handler +
+      // default) instead of routing it into the terminal.
+      if ((e.target as HTMLElement)?.closest?.('.terminal-notepad')) return;
       const items = e.clipboardData?.items;
       if (!items) return;
 
@@ -571,6 +587,9 @@ export class TerminalView {
 
     // Right-click: copy if there's a selection, otherwise paste
     this.wrapper.addEventListener('contextmenu', (e: MouseEvent) => {
+      // Let the note-queue panel handle its own right-click (copy/paste in a task
+      // textarea) instead of routing to the terminal.
+      if ((e.target as HTMLElement)?.closest?.('.terminal-notepad')) return;
       e.preventDefault();
       if (this.terminal.hasSelection()) {
         navigator.clipboard.writeText(this.terminal.getSelection());
@@ -597,6 +616,8 @@ export class TerminalView {
       this.terminal.focus();
     });
     this.wrapper.appendChild(this.scrollBtn);
+
+    this.createNotepad();
 
     // Track user scroll: mouse wheel means user is scrolling manually
     this.wrapper.addEventListener('wheel', () => {
@@ -646,6 +667,107 @@ export class TerminalView {
     const atBottom = buf.baseY - buf.viewportY <= 3;
     if (atBottom) this.userScrolledUp = false;
     this.scrollBtn.classList.toggle('visible', !atBottom);
+  }
+
+  /** Build this pane's note-block entry button + floating panel. The panel is
+   * positioned (in CSS) against the wrapper, so its width tracks the pane. */
+  private createNotepad() {
+    const fab = document.createElement('button');
+    fab.className = 'terminal-notepad-fab';
+    fab.title = '任务队列';
+    fab.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13 1H3a1 1 0 00-1 1v12a1 1 0 001 1h10a1 1 0 001-1V2a1 1 0 00-1-1zM4 4h8v1H4zm0 3h8v1H4zm0 3h5v1H4z"/></svg>';
+    const count = document.createElement('span');
+    count.className = 'notepad-fab-count hidden';
+    fab.appendChild(count);
+    fab.addEventListener('click', () => this.setNotepadVisible(!this.notepadVisible));
+    this.wrapper.appendChild(fab);
+    this.notepadFab = fab;
+    this.notepadFabCount = count;
+
+    const panel = document.createElement('div');
+    panel.className = 'terminal-notepad hidden';
+    const header = document.createElement('div');
+    header.className = 'terminal-notepad-header';
+    const title = document.createElement('span');
+    title.className = 'terminal-notepad-title';
+    title.textContent = '任务队列';
+
+    // Per-session auto-send toggle — one per tab/pane (not per task). When on, the
+    // head of this tab's queue is auto-sent each time the AI goes idle.
+    const autoToggle = document.createElement('label');
+    autoToggle.className = 'terminal-notepad-autosend switch';
+    autoToggle.title = 'AI 输出完成后自动发送队列中的下一个任务';
+    const autoLabel = document.createElement('span');
+    autoLabel.className = 'switch-label';
+    autoLabel.textContent = '自动发送';
+    const autoInput = document.createElement('input');
+    autoInput.type = 'checkbox';
+    autoInput.checked = !!appState.tabs.get(this.tabId)?.autoSend;
+    autoInput.addEventListener('change', () => {
+      const tab = appState.tabs.get(this.tabId);
+      if (tab) { tab.autoSend = autoInput.checked; appState.persistTabs(); }
+      this.onNotepadRender?.(this.tabId); // refresh the head-of-queue marker
+    });
+    const autoSlider = document.createElement('span');
+    autoSlider.className = 'switch-slider';
+    autoToggle.appendChild(autoLabel);
+    autoToggle.appendChild(autoInput);
+    autoToggle.appendChild(autoSlider);
+
+    const collapse = document.createElement('button');
+    collapse.className = 'terminal-notepad-collapse';
+    collapse.title = '收起';
+    collapse.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11.5l-5-5h10z"/></svg>';
+    collapse.addEventListener('click', () => this.setNotepadVisible(false));
+    header.appendChild(title);
+    header.appendChild(collapse);
+    const blocks = document.createElement('div');
+    blocks.className = 'terminal-notepad-blocks';
+
+    // Footer pinned at the bottom: auto-send toggle on the left, add-task on the
+    // right. The add button lives here (not in the scrolling list) so it's always
+    // reachable, and main.ts owns the actual add via onNotepadAddBlock.
+    const footer = document.createElement('div');
+    footer.className = 'terminal-notepad-footer';
+    const addBtn = document.createElement('button');
+    addBtn.className = 'terminal-notepad-add';
+    addBtn.textContent = '+ 添加任务';
+    addBtn.addEventListener('click', () => this.onNotepadAddBlock?.(this.tabId));
+    footer.appendChild(autoToggle);
+    footer.appendChild(addBtn);
+
+    panel.appendChild(header);
+    panel.appendChild(blocks);
+    panel.appendChild(footer);
+    this.wrapper.appendChild(panel);
+    this.notepadEl = panel;
+    this.notepadBlocksEl = blocks;
+
+    // Initial visibility from the shared default (last toggled state). Defaults
+    // to collapsed on a fresh install.
+    this.notepadVisible = localStorage.getItem('notepad-hidden') === '';
+    this.applyNotepadVisibility();
+  }
+
+  private applyNotepadVisibility() {
+    this.notepadEl.classList.toggle('hidden', !this.notepadVisible);
+    this.notepadFab.classList.toggle('active', this.notepadVisible);
+  }
+
+  setNotepadVisible(visible: boolean) {
+    this.notepadVisible = visible;
+    localStorage.setItem('notepad-hidden', visible ? '' : '1');
+    this.applyNotepadVisibility();
+    if (visible) this.onNotepadRender?.(this.tabId);
+  }
+
+  toggleNotepad() { this.setNotepadVisible(!this.notepadVisible); }
+  isNotepadVisible() { return this.notepadVisible; }
+
+  /** Update the entry button's queued-block count badge. */
+  setNotepadCount(n: number) {
+    this.notepadFabCount.textContent = n > 0 ? String(n) : '';
+    this.notepadFabCount.classList.toggle('hidden', n === 0);
   }
 
   /** Force xterm's viewport to resize its scroll area to the current buffer

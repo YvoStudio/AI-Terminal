@@ -31,6 +31,9 @@ export interface TabState {
   aiTool: string;
   sidebarEntries: SidebarEntry[];
   noteBlocks: NoteBlock[];
+  // Per-session auto-send: when true, the head of this tab's task queue is sent
+  // automatically each time the AI goes idle-ready.
+  autoSend: boolean;
   cwd: string;
   userRenamed: boolean; // true if user manually renamed — blocks auto-rename
   // Tab-monotonic image numbering. The AI CLI prints `[Image #N]` with N that
@@ -71,7 +74,7 @@ class AppState {
     this.tabCounter++;
     const tab: TabState = {
       id, title: `Terminal ${this.tabCounter}`, status: 'active', shell: 'cmd',
-      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], cwd: '', userRenamed: false,
+      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], autoSend: false, cwd: '', userRenamed: false,
       pastedTotal: 0,
       pastedById: new Map(),
       pendingPasteIds: [],
@@ -451,6 +454,7 @@ class AppState {
           content: b.content,
           images: b.images ? [...b.images] : undefined,
         })),
+        autoSend: tab.autoSend || undefined,
         cwd: validCwd,
         aiTool: tab.aiTool,
         userRenamed: tab.userRenamed || undefined,
