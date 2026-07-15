@@ -1715,7 +1715,7 @@ const TIPS_PANEL_HTML = `
             <div class="tips-item"><span class="tips-icon">↔️</span>拖动标签可排序</div>
             <div class="tips-item"><span class="tips-icon" style="color:var(--accent-red)">●</span>红点表示后台任务完成</div>
             <div class="tips-item"><span class="tips-icon">🎨</span>右键标签可修改颜色</div>
-            <div class="tips-item"><span class="tips-icon">📋</span>终端右下角入口展开任务队列，预写多条任务</div>
+            <div class="tips-item"><span class="tips-icon">📋</span>终端右侧入口展开任务队列，预写多条任务</div>
             <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>点「发送」把任务发到当前终端，拖右上角手柄可排序</div>
             <div class="tips-item"><span class="tips-icon">⚡</span>开「自动发送」后 AI 空闲时自动发送队首任务</div>
           </div>
@@ -1883,7 +1883,7 @@ function toggleTipsPanel() {
             <div class="tips-item"><span class="tips-icon">↔️</span>拖动标签可排序</div>
             <div class="tips-item"><span class="tips-icon" style="color:var(--accent-red)">●</span>红点 = 后台任务完成</div>
             <div class="tips-item"><span class="tips-icon">🎨</span>右键标签可改颜色</div>
-            <div class="tips-item"><span class="tips-icon">📋</span>右下角入口展开任务队列预写任务</div>
+            <div class="tips-item"><span class="tips-icon">📋</span>右侧入口展开任务队列预写任务</div>
             <div class="tips-item"><span class="tips-icon" style="color:var(--accent-green)">▶</span>点「发送」发送任务，可拖动排序</div>
             <div class="tips-item"><span class="tips-icon">⚡</span>开「自动发送」AI 空闲自动发队首</div>
           </div>

@@ -178,11 +178,11 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 /* Notepad — a per-pane floating popover. Each TerminalView builds its own inside
    its .terminal-wrapper, so the panel stays centered in (and its width tracks)
    that pane. Opened via .terminal-notepad-fab, which sits just above the pane's
-   scroll-to-bottom button. */
+   prompt/status area. */
 .terminal-notepad {
-  position: absolute; left: 50%; bottom: 100px; z-index: 20;
+  position: absolute; left: 50%; bottom: 148px; z-index: 20;
   transform: translateX(-50%);
-  width: min(760px, calc(100% - 32px)); max-height: calc(100% - 132px);
+  width: min(760px, calc(100% - 32px)); max-height: calc(100% - 180px);
   background: var(--bg-secondary); border: 1px solid var(--border-color);
   border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,0.45);
   display: flex; flex-direction: column; overflow: hidden;
@@ -201,9 +201,9 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .terminal-notepad-footer .terminal-notepad-autosend { flex-shrink: 0; }
 .terminal-notepad-add { flex: 1; border: none; background: none; color: var(--text-secondary); cursor: pointer; font-size: 12px; padding: 8px; border-radius: 6px; text-align: center; }
 .terminal-notepad-add:hover { background: var(--bg-hover); color: var(--text-primary); }
-/* Per-pane entry button (the collapsed text-block "入口"), stacked above the
-   terminal's scroll-to-bottom button (which lives at right:16px; bottom:16px). */
-.terminal-notepad-fab { position: absolute; right: 16px; bottom: 56px; z-index: 15; height: 32px; padding: 0 10px; border-radius: 16px; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); opacity: 0.85; transition: opacity 0.15s, color 0.15s, background 0.15s, border-color 0.15s; }
+/* Per-pane entry button (the collapsed text-block "入口"), aligned on the
+   terminal's right edge above the prompt/status area. */
+.terminal-notepad-fab { position: absolute; right: 16px; bottom: 104px; z-index: 15; height: 32px; padding: 0 10px; border-radius: 16px; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); opacity: 0.85; transition: opacity 0.15s, color 0.15s, background 0.15s, border-color 0.15s; }
 .terminal-notepad-fab:hover { opacity: 1; color: var(--text-primary); background: var(--bg-hover); }
 .terminal-notepad-fab.active { color: var(--accent-blue); border-color: var(--accent-blue); opacity: 1; }
 .notepad-fab-count { font-size: 11px; font-weight: 600; min-width: 12px; text-align: center; }
