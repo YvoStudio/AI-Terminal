@@ -36,11 +36,11 @@ export interface TabState {
   autoSend: boolean;
   cwd: string;
   userRenamed: boolean; // true if user manually renamed — blocks auto-rename
-  // Tab-monotonic image numbering. The AI CLI prints `[Image #N]` with N that
-  // restarts at 1 every new session (/clear, resume, relaunch). We rewrite it to
-  // `[Image #M]` where M only ever increments for the tab's lifetime, so an old
-  // reference can never be clobbered by a later paste that reused the same N.
-  pastedTotal: number; // next M to assign; starts at 0 (so first paste → M=1).
+  // Image numbering. The AI CLI prints `[Image #N]` with N that restarts at 1
+  // every new session (/clear, resume, relaunch). We rewrite it to `[Image #M]`
+  // where M comes from ONE app-wide counter shared by all tabs (nextImageSeq),
+  // so no reset heuristic can ever produce two live refs with the same number.
+  pastedTotal: number; // last M assigned to this tab — persistence/migration only.
   pastedById: Map<number, string>; // M → image path. Source of truth for click resolution.
   pendingPasteIds: number[]; // FIFO queue of pasted M values awaiting the AI's next [Image #N].
   claudeImageMap: Map<number, number>; // current session's AI N → our M.
@@ -155,15 +155,26 @@ class AppState {
     this.notify();
   }
 
+  /** Global [Image #M] sequence shared by every tab — one unified counter that
+   * only counts up, so no reset heuristic can ever produce two live refs with
+   * the same number. Persisted so app restarts keep counting; wraps to 1 past
+   * 9999 to keep refs short. */
+  private nextImageSeq(): number {
+    let seq = parseInt(localStorage.getItem('image-seq-global') || '0', 10) || 0;
+    seq = seq >= 9999 ? 1 : seq + 1;
+    localStorage.setItem('image-seq-global', String(seq));
+    return seq;
+  }
+
   addPastedImage(id: string, path: string) {
     const tab = this.tabs.get(id);
     if (!tab) return;
-    // Monotonic numbering: pastedById grows for the tab's lifetime; pendingPasteIds
-    // queues the M awaiting the AI's next [Image #N].
+    // Globally monotonic numbering: pastedById records this tab's refs for click
+    // resolution; pendingPasteIds queues the M awaiting the AI's next [Image #N].
     if (!tab.pastedById) tab.pastedById = new Map();
     if (!tab.pendingPasteIds) tab.pendingPasteIds = [];
-    tab.pastedTotal = (tab.pastedTotal || 0) + 1;
-    const m = tab.pastedTotal;
+    const m = this.nextImageSeq();
+    tab.pastedTotal = m;
     tab.pastedById.set(m, path);
     tab.pendingPasteIds.push(m);
     this.persistTabs();
@@ -185,6 +196,13 @@ class AppState {
     tab.pastedById = new Map(entries);
     const maxM = entries.reduce((acc, [m]) => Math.max(acc, m), 0);
     tab.pastedTotal = Math.max(total || 0, maxM);
+    // Migration from per-tab counters: restored tabs may carry Ms above the
+    // stored global sequence — push it past them so new pastes can't collide
+    // with refs still visible in restored scrollback.
+    const seq = parseInt(localStorage.getItem('image-seq-global') || '0', 10) || 0;
+    if (tab.pastedTotal > seq && tab.pastedTotal < 9999) {
+      localStorage.setItem('image-seq-global', String(tab.pastedTotal));
+    }
   }
 
   /**
@@ -242,14 +260,23 @@ class AppState {
     if (!tab) return chunk;
     const data = (tab.outputResidue || '') + chunk;
     // Hold back a trailing partial token if the buffer ends mid-`[Image #...`.
+    // The partial must also cover a half-arrived CHA separator (see IMAGE_REF
+    // below), e.g. `[Image\x1b[13` with `G#1]` still in flight.
     let safeEnd = data.length;
-    const tail = data.slice(Math.max(0, data.length - 16));
-    const partial = tail.match(/\[(I(m(a(g(e( +#? *\d*)?)?)?)?)?)?$/);
+    const tail = data.slice(Math.max(0, data.length - 24));
+    const partial = tail.match(/\[(I(m(a(g(e([ \u00a0]*#? *\d*|\x1b(\[(\d*(G(#\d*)?)?)?)?)?)?)?)?)?)?$/);
     if (partial && partial[0].length > 0) {
       safeEnd = data.length - partial[0].length;
     }
     const head = data.slice(0, safeEnd);
     tab.outputResidue = data.slice(safeEnd);
+
+    // `[Image #N]` as Claude emits it. Inline refs (prompt echo) separate with a
+    // plain space, but transcript attachment lines (`⎿ [Image #1]`) position the
+    // number with a CHA cursor move instead: `[Image\x1b[13G#1]`. Match both;
+    // group 1 captures the separator verbatim so the rewrite preserves the
+    // original column alignment, group 2 is N.
+    const IMAGE_REF = () => /\[Image((?:[ \u00a0]+|\x1b\[\d+G))#(\d+)\]/g;
 
     // In-place session restart (e.g. /clear, which doesn't re-enter the
     // alt-screen): the AI re-prints [Image #N] with N below the highest we've
@@ -257,19 +284,19 @@ class AppState {
     // drop the stale bindings before re-resolving.
     if ((tab.pendingPasteIds?.length || 0) > 0 && (tab.claudeMaxN || 0) > 0) {
       let chunkMax = 0;
-      const scan = /\[Image #(\d+)\]/g;
+      const scan = IMAGE_REF();
       let s: RegExpExecArray | null;
       while ((s = scan.exec(head)) !== null) {
-        const v = parseInt(s[1], 10);
+        const v = parseInt(s[2], 10);
         if (v > chunkMax) chunkMax = v;
       }
       if (chunkMax > 0 && chunkMax < tab.claudeMaxN) this.resetAiSession(id);
     }
 
-    return head.replace(/\[Image #(\d+)\]/g, (match, nStr) => {
+    return head.replace(IMAGE_REF(), (match, sep, nStr) => {
       const n = parseInt(nStr, 10);
       const m = this.resolveClaudeImageN(id, n);
-      return (m !== undefined && m !== n) ? `[Image #${m}]` : match;
+      return (m !== undefined && m !== n) ? `[Image${sep}#${m}]` : match;
     });
   }
 

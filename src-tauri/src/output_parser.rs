@@ -825,7 +825,7 @@ fn strip_ansi(s: &str) -> String {
 /// "shell" (the auto-detected pseudo-tool for plain shells after 3 inputs) is
 /// not a TUI and is handled by the legacy OSC 133 / BEL path.
 fn is_tui_ai(ai_tool: Option<&str>) -> bool {
-    matches!(ai_tool, Some("claude") | Some("codex") | Some("aider") | Some("opencode"))
+    matches!(ai_tool, Some("claude") | Some("codex") | Some("aider") | Some("opencode") | Some("pi"))
 }
 
 /// Classify an AI TUI's current UI state by inspecting the bottom rows of the
@@ -994,6 +994,14 @@ fn match_prompt(line: &str) -> Option<String> {
         return Some(content.to_string());
     }
 
+    // "pi" needs an exact/word match — a bare starts_with("pi") would swallow
+    // ping/pip/pipenv echoes as commands.
+    let lower = content.to_lowercase();
+    if lower == "pi" || lower.starts_with("pi ") {
+        eprintln!("Command detected: '{}'", content);
+        return Some(content.to_string());
+    }
+
     None
 }
 
@@ -1091,6 +1099,10 @@ fn is_ai_command(cmd: &str) -> Option<&'static str> {
     if lower == "aider" || lower.starts_with("aider ") {
         eprintln!("Detected: aider");
         return Some("aider");
+    }
+    if lower == "pi" || lower.starts_with("pi ") {
+        eprintln!("Detected: pi");
+        return Some("pi");
     }
 
     // npx/yarn/pnpm patterns (e.g., "npx opencode", "pnpm exec opencode")

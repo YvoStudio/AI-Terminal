@@ -49,6 +49,15 @@ export class TerminalView {
   // Kitty Keyboard Protocol (CSI u) state: flags stack. 0 = disabled.
   private kittyStack: number[] = [0];
   private get kittyFlags() { return this.kittyStack[this.kittyStack.length - 1] || 0; }
+  // Output held back while a mouse selection is alive and the running TUI sends
+  // a destructive clear (CSI 2J/3J). pi-tui full-redraws wipe the scrollback on
+  // every repaint, which destroys the selection mid-drag; holding those frames
+  // until the selection is consumed makes selecting possible at all. Bounded by
+  // a byte cap and a timeout so a flood or an abandoned selection can't wedge
+  // the terminal.
+  private heldOutput: string[] = [];
+  private heldBytes = 0;
+  private holdTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** AI/TUI mode for input purposes: either AI auto-detection fired for this tab,
    * or the program is driving the alternate screen buffer (Claude, vim, etc.).
@@ -57,6 +66,67 @@ export class TerminalView {
   isAiMode(): boolean {
     const tab = appState.tabs.get(this.tabId);
     return !!tab?.aiTool || this.terminal.buffer.active.type === 'alternate';
+  }
+
+  /** Cmd/Ctrl+V, and Cmd/Ctrl+C while text is selected, belong to the terminal
+   * (copy/paste), never to the running app — mirrors the interception rules of
+   * the keydown handlers below. */
+  private isClipboardShortcut(e: KeyboardEvent): boolean {
+    if (!(e.ctrlKey || e.metaKey)) return false;
+    const key = e.key.toLowerCase();
+    return key === 'v' || (key === 'c' && this.terminal.hasSelection());
+  }
+
+  /** Send the running app its own paste keybinding (Ctrl+V), kitty-encoded when
+   * the app negotiated the protocol. Tools like pi read the OS clipboard
+   * themselves on this key — the way they attach images. */
+  sendCtrlV() {
+    api.writeTerminal(this.tabId, this.kittyFlags ? '\x1b[118;5u' : '\x16');
+  }
+
+  /** Build a buffer line's plain text plus a char-index → cell-column map.
+   * CJK wide chars occupy 2 cells but 1 char (the trailing cell has empty
+   * chars); without the map, [Image #N] ranges drift left of the glyphs. */
+  private lineTextWithCols(lineIndex: number): { text: string; charToCol: number[] } | null {
+    const line = this.terminal.buffer.active.getLine(lineIndex);
+    if (!line) return null;
+    let text = '';
+    const charToCol: number[] = []; // 字符下标 → 0-indexed cell 列
+    for (let c = 0; c < line.length; c++) {
+      const cell = line.getCell(c);
+      if (!cell) continue;
+      const chars = cell.getChars();
+      if (chars.length === 0) continue; // wide-char 的尾格
+      for (let k = 0; k < chars.length; k++) charToCol.push(c);
+      text += chars;
+    }
+    return { text, charToCol };
+  }
+
+  /** Open the image-preview carousel at ref M. The output rewriter turned the
+   * AI's N into our globally-unique M, so the number shown IS the pastedById
+   * key; carousel order = ascending M across this tab's lifetime. */
+  private openImagePreviewForRef(n: number) {
+    const tab = appState.tabs.get(this.tabId);
+    if (!tab) return;
+    const preview = (window as any).showImagePreview;
+    if (typeof preview !== 'function') return;
+    const byId = tab.pastedById;
+    if (byId && byId.has(n)) {
+      const ms = Array.from(byId.keys()).sort((a, b) => a - b);
+      const paths = ms.map(k => convertFileSrc(byId.get(k)!));
+      preview(paths, ms.indexOf(n));
+    }
+  }
+
+  private flushHeldOutput() {
+    if (this.holdTimer !== null) { clearTimeout(this.holdTimer); this.holdTimer = null; }
+    if (this.heldOutput.length) {
+      const pending = this.heldOutput.join('');
+      this.heldOutput = [];
+      this.heldBytes = 0;
+      this.terminal.write(pending);
+    }
   }
 
   constructor(
@@ -279,8 +349,13 @@ export class TerminalView {
       // Kitty Keyboard Protocol (CSI u): when enabled by the running app and
       // the key combo involves Ctrl/Alt in ways xterm can't encode, send
       // `CSI codepoint;mods u` directly and block xterm's default handling.
+      // Clipboard shortcuts must NOT be encoded: real kitty keeps cmd+c/cmd+v
+      // as terminal mappings, and encoding them here starves the copy/paste
+      // handlers below — TUIs that enable the protocol (e.g. pi) would swallow
+      // copy/paste entirely.
       if (this.kittyFlags && e.type === 'keydown' && !e.isComposing
-          && !imeComposing && e.key !== 'Process') {
+          && !imeComposing && e.key !== 'Process'
+          && !this.isClipboardShortcut(e)) {
         const isMod = e.ctrlKey || e.altKey || e.metaKey;
         const specials: Record<string, number> = {
           Enter: 13, Tab: 9, Backspace: 127, Escape: 27,
@@ -322,7 +397,12 @@ export class TerminalView {
       }
       // Cmd+C / Ctrl+C: copy selection instead of sending SIGINT
       if ((e.ctrlKey || e.metaKey) && key === 'c' && this.terminal.hasSelection()) {
-        if (e.type === 'keydown') navigator.clipboard.writeText(this.terminal.getSelection());
+        if (e.type === 'keydown') {
+          navigator.clipboard.writeText(this.terminal.getSelection());
+          // While output is held back for this selection, the copy is its
+          // natural end — clear it so the held frames flush immediately.
+          if (this.holdTimer !== null) this.terminal.clearSelection();
+        }
         return false;
       }
       // Cmd+V / Ctrl+V: for AI/TUI mode, prevent default xterm paste and send bracketed paste.
@@ -381,8 +461,10 @@ export class TerminalView {
     
     const endSelection = () => {
       this.mouseSelectionInProgress = false;
+      // Drag ended with nothing selected (plain click) — release held output.
+      if (!this.terminal.hasSelection()) this.flushHeldOutput();
     };
-    
+
     document.addEventListener('mouseup', () => {
       endSelection();
     });
@@ -397,9 +479,11 @@ export class TerminalView {
       }
     });
 
-    // 监听选择变化，确保不发送额外事件
     this.terminal.onSelectionChange(() => {
-      // 有选中文本时不做任何事
+      // Selection consumed or dismissed — release any output held for it.
+      if (!this.terminal.hasSelection() && !this.mouseSelectionInProgress) {
+        this.flushHeldOutput();
+      }
     });
 
     // Unicode 11 for proper emoji/CJK width calculation
@@ -409,59 +493,59 @@ export class TerminalView {
 
     try { this.terminal.loadAddon(new CanvasAddon()); } catch {}
 
-    // [Image #N] link provider — make Claude Code's image refs clickable to preview the original paste.
+    // [Image #N] link provider — draws the hover underline over Claude Code's
+    // image refs. Activation is deliberately NOT done here: the linkifier's
+    // hover-registered link is invalidated by any repaint between hover and
+    // click (Claude redraws on focus-in, so the very first click on an
+    // unfocused terminal always lost its link). Clicks are handled by the
+    // hit-testing click listener below instead.
     this.terminal.registerLinkProvider({
       provideLinks: (lineNumber, callback) => {
-        const buf = this.terminal.buffer.active;
-        const line = buf.getLine(lineNumber - 1);
-        if (!line) { callback(undefined); return; }
-        // 遍历 cell 同时构建 string 和 char→cell 映射:
-        // CJK 占 2 个 cell 但 1 个 char(宽字符的第二格 chars 为空),不建立映射会让
-        // link range 的 x 偏左。
-        let text = '';
-        const charToCol: number[] = []; // 字符下标 → 0-indexed cell 列
-        for (let c = 0; c < line.length; c++) {
-          const cell = line.getCell(c);
-          if (!cell) continue;
-          const chars = cell.getChars();
-          if (chars.length === 0) continue; // wide-char 的尾格
-          for (let k = 0; k < chars.length; k++) charToCol.push(c);
-          text += chars;
-        }
+        const info = this.lineTextWithCols(lineNumber - 1);
+        if (!info) { callback(undefined); return; }
         const re = /\[Image #(\d+)\]/g;
         const links: any[] = [];
         let m: RegExpExecArray | null;
-        while ((m = re.exec(text)) !== null) {
-          const n = parseInt(m[1], 10);
-          const startCol = (charToCol[m.index] ?? 0) + 1; // xterm 1-indexed
+        while ((m = re.exec(info.text)) !== null) {
+          const startCol = (info.charToCol[m.index] ?? 0) + 1; // xterm 1-indexed
           const lastCharIdx = m.index + m[0].length - 1;
-          const endCol = (charToCol[lastCharIdx] ?? line.length - 1) + 1;
+          const endCol = (info.charToCol[lastCharIdx] ?? startCol) + 1;
           links.push({
             range: {
               start: { x: startCol, y: lineNumber },
               end: { x: endCol, y: lineNumber },
             },
             text: m[0],
-            activate: () => {
-              const tab = appState.tabs.get(tabId);
-              if (!tab) return;
-              const preview = (window as any).showImagePreview;
-              if (typeof preview !== 'function') return;
-              // The rewriter turned the AI's N into our tab-monotonic M, so the
-              // number shown IS M. Resolve it directly against pastedById.
-              // Carousel order = ascending M, so [prev]/[next] walks every paste
-              // in this tab's lifetime.
-              const byId = tab.pastedById;
-              if (byId && byId.has(n)) {
-                const ms = Array.from(byId.keys()).sort((a, b) => a - b);
-                const paths = ms.map(k => convertFileSrc(byId.get(k)!));
-                preview(paths, ms.indexOf(n));
-              }
-            },
+            activate: () => {}, // see click listener below
           });
         }
         callback(links.length ? links : undefined);
       },
+    });
+
+    // Open [Image #N] previews from a direct click hit-test against the live
+    // buffer — immune to the hover/repaint race described above.
+    this.wrapper.addEventListener('click', (e) => {
+      if (this.terminal.hasSelection()) return;
+      const screen = this.wrapper.querySelector('.xterm-screen');
+      if (!screen) return;
+      const rect = screen.getBoundingClientRect();
+      if (e.clientX < rect.left || e.clientX >= rect.right
+          || e.clientY < rect.top || e.clientY >= rect.bottom) return;
+      const col = Math.floor((e.clientX - rect.left) / (rect.width / this.terminal.cols));
+      const row = Math.floor((e.clientY - rect.top) / (rect.height / this.terminal.rows));
+      const info = this.lineTextWithCols(this.terminal.buffer.active.viewportY + row);
+      if (!info) return;
+      const re = /\[Image #(\d+)\]/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(info.text)) !== null) {
+        const startCol = info.charToCol[m.index] ?? 0;
+        const endCol = info.charToCol[m.index + m[0].length - 1] ?? startCol;
+        if (col >= startCol && col <= endCol) {
+          this.openImagePreviewForRef(parseInt(m[1], 10));
+          return;
+        }
+      }
     });
 
     // Input → Rust backend
@@ -512,6 +596,19 @@ export class TerminalView {
       // Rewrite the AI's resetting [Image #N] to our tab-monotonic [Image #M]
       // (see app-state) so old references never collide with later pastes.
       const rewritten = appState.rewriteImageRefsForOutput(tabId, data);
+      // Hold destructive clears while a selection is alive (see heldOutput).
+      // Once holding, everything after queues too — chunks must stay ordered.
+      if (this.holdTimer !== null
+          || (/\x1b\[[23]J/.test(rewritten)
+              && (this.mouseSelectionInProgress || this.terminal.hasSelection()))) {
+        this.heldOutput.push(rewritten);
+        this.heldBytes += rewritten.length;
+        if (this.holdTimer === null) {
+          this.holdTimer = setTimeout(() => this.flushHeldOutput(), 10_000);
+        }
+        if (this.heldBytes > 4_000_000) this.flushHeldOutput();
+        return;
+      }
       this.terminal.write(rewritten);
     });
 
@@ -550,7 +647,14 @@ export class TerminalView {
                   appState.addPastedImage(tabId, filePath);
                   const t = appState.tabs.get(tabId);
                   const ai = !!(t?.aiTool) || bufType === 'alternate';
-                  if (ai) {
+                  if (t?.aiTool === 'pi') {
+                    // pi attaches clipboard images itself on its paste key
+                    // (Ctrl+V): reads the OS clipboard, saves the image,
+                    // attaches by path. The empty-bracketed-paste trick below
+                    // is Claude-specific — pi ignores it.
+                    try { await api.writeClipboardImageFromPath(filePath); } catch {}
+                    this.sendCtrlV();
+                  } else if (ai) {
                     // 先把刚保存的单张 PNG 规范化写回 OS 剪贴板,再发空 bracketed
                     // paste 让 Claude 读它。否则 Claude 读的是用户原始 Cmd+V 的剪贴板,
                     // 若其中含多种图像表示(PNG/TIFF 等),Claude 可能读出两次,把一次
@@ -912,6 +1016,7 @@ export class TerminalView {
     this.resizeObserver.disconnect();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     if (this.scrollCheckTimer) clearInterval(this.scrollCheckTimer);
+    if (this.holdTimer !== null) clearTimeout(this.holdTimer);
     if (this.scrollbackSaveTimer) clearInterval(this.scrollbackSaveTimer);
     // Best-effort final save so the next launch restores the freshest state.
     try {

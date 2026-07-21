@@ -1075,7 +1075,14 @@ async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
             // image to the raw-path fallback below (the unclickable-path bug).
             await api.writeClipboardImageFromPath(imgPath);
             appState.addPastedImage(tabId, imgPath);
-            api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
+            if (tab.aiTool === 'pi') {
+              // pi reads the clipboard itself on its paste key (Ctrl+V) and
+              // attaches the image by path; the empty bracketed paste is
+              // Claude-specific and pi ignores it.
+              terminalViews.get(tabId)?.sendCtrlV();
+            } else {
+              api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
+            }
             pasted = true;
             // Let the tool read the clipboard before we overwrite it (next image).
             await new Promise(r => setTimeout(r, 250));
@@ -2371,6 +2378,8 @@ let _closeHistoryPanel: (() => void) | null = null;
             setTimeout(() => api.writeTerminal(tabId, 'opencode\n'), 500);
           } else if (item.aiTool === 'codex') {
             setTimeout(() => api.writeTerminal(tabId, 'codex\n'), 500);
+          } else if (item.aiTool === 'pi') {
+            setTimeout(() => api.writeTerminal(tabId, 'pi\n'), 500);
           }
           switchToTab(tabId);
         }
