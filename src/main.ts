@@ -2433,13 +2433,19 @@ let _closeHistoryPanel: (() => void) | null = null;
   fileBtn.addEventListener('click', async () => {
     if (!appState.activeTabId) return;
     const p = await api.selectFile();
-    if (p) api.writeTerminal(appState.activeTabId, p);
+    if (p) {
+      appState.markPromptDirty(appState.activeTabId);
+      api.writeTerminal(appState.activeTabId, p);
+    }
   });
 
   dirBtn.addEventListener('click', async () => {
     if (!appState.activeTabId) return;
     const p = await api.selectDirectory();
-    if (p) api.writeTerminal(appState.activeTabId, p);
+    if (p) {
+      appState.markPromptDirty(appState.activeTabId);
+      api.writeTerminal(appState.activeTabId, p);
+    }
   });
 })();
 
@@ -3265,7 +3271,8 @@ listen<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-dr
         notepadTextarea.dispatchEvent(new Event('input', { bubbles: true }));
       }
     } else {
-      // Dropping on terminal - write file path
+      // Dropping on terminal stages an unsubmitted path in the prompt.
+      appState.markPromptDirty(tabId);
       if (isImage) {
         // For images, copy to app directory and get the asset URL
         try {
@@ -3352,6 +3359,7 @@ function renderQuickCommands() {
     chip.title = cmd.content;
     chip.addEventListener('click', () => {
       if (!appState.activeTabId) return;
+      appState.markPromptDirty(appState.activeTabId);
       api.writeTerminal(appState.activeTabId, cmd.content);
     });
     chip.addEventListener('contextmenu', (e) => {

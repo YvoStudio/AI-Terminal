@@ -142,13 +142,34 @@ export class TerminalView {
     }
   }
 
+  /** AI TUIs are keyboard-driven; if one (or untrusted command output) leaves a
+   * DEC mouse-reporting mode enabled, xterm hands drag/wheel events to the PTY
+   * and disables normal selection/scrolling for that tab. Reset only the mouse
+   * modes, locally in xterm, so host mouse interaction remains available. */
+  private restoreHostMouse() {
+    const aiTool = appState.tabs.get(this.tabId)?.aiTool;
+    const keyboardDrivenAgent = aiTool === 'claude' || aiTool === 'codex'
+      || aiTool === 'aider' || aiTool === 'opencode' || aiTool === 'pi';
+    if (keyboardDrivenAgent && this.terminal.modes.mouseTrackingMode !== 'none') {
+      this.terminal.write(
+        '\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l'
+        + '\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l'
+      );
+    }
+  }
+
+  private writeOutput(data: string) {
+    // Check after parsing each chunk: DEC modes take effect during write().
+    this.terminal.write(data, () => this.restoreHostMouse());
+  }
+
   private flushHeldOutput() {
     if (this.holdTimer !== null) { clearTimeout(this.holdTimer); this.holdTimer = null; }
     if (this.heldOutput.length) {
       const pending = this.heldOutput.join('');
       this.heldOutput = [];
       this.heldBytes = 0;
-      this.terminal.write(pending);
+      this.writeOutput(pending);
     }
   }
 
@@ -211,7 +232,7 @@ export class TerminalView {
     if (!isQuick) {
       api.loadScrollback(tabId).then((sb) => {
         if (sb && sb.length > 0) {
-          this.terminal.write(sb + '\r\n\x1b[2m── session restored ──\x1b[0m\r\n');
+          this.writeOutput(sb + '\r\n\x1b[2m── session restored ──\x1b[0m\r\n');
         }
       }).catch(() => {});
       // Save scrollback every 10s (debounced) to bound disk writes
@@ -324,6 +345,8 @@ export class TerminalView {
         if (e.shiftKey && shiftHeld && !e.ctrlKey && !e.metaKey && !e.altKey
             && e.key.length === 1 && !/^[a-zA-Z]$/.test(e.key)) {
           e.preventDefault();
+          api.markTerminalInput(tabId);
+          appState.markPromptDirty(tabId);
           api.writeTerminal(tabId, e.key);
           suppressChar = e.key;
           suppressUntil = Date.now() + 300;
@@ -369,6 +392,26 @@ export class TerminalView {
 
     // Intercept key events inside xterm before it processes them
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      // Cmd/Ctrl+Backspace: clear the whole unsubmitted prompt. AI editors use
+      // one Ctrl+C for this; shells use readline's Ctrl+U. Swallow the shortcut
+      // when an AI prompt is known empty so it can never become "exit agent".
+      // This must run before Kitty encoding, which would otherwise turn the
+      // shortcut into CSI 127;...u and bypass this host-level action.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'Backspace') {
+        if (e.type === 'keydown') {
+          const aiTool = appState.tabs.get(tabId)?.aiTool;
+          const isAgent = aiTool === 'claude' || aiTool === 'codex' || aiTool === 'aider'
+            || aiTool === 'opencode' || aiTool === 'pi';
+          if (!isAgent || appState.isPromptDirty(tabId)) {
+            api.markTerminalInput(tabId);
+            api.writeTerminal(tabId, isAgent ? '\x03' : '\x15');
+            appState.clearPromptDirty(tabId);
+          }
+        }
+        e.preventDefault();
+        return false;
+      }
+
       // Kitty Keyboard Protocol (CSI u): when enabled by the running app and
       // the key combo involves Ctrl/Alt in ways xterm can't encode, send
       // `CSI codepoint;mods u` directly and block xterm's default handling.
@@ -637,7 +680,7 @@ export class TerminalView {
         if (this.heldBytes > 4_000_000) this.flushHeldOutput();
         return;
       }
-      this.terminal.write(data);
+      this.writeOutput(data);
     });
 
     // Handle paste: intercept images, send bracketed paste for AI tools,
@@ -673,6 +716,8 @@ export class TerminalView {
                 const filePath = await api.saveTerminalPasteImage(tabId, reader.result as string);
                 if (filePath) {
                   appState.addPastedImage(tabId, filePath);
+                  api.markTerminalInput(tabId);
+                  appState.markPromptDirty(tabId);
                   const t = appState.tabs.get(tabId);
                   const ai = !!(t?.aiTool) || bufType === 'alternate';
                   if (t?.aiTool === 'pi') {
@@ -711,6 +756,8 @@ export class TerminalView {
         e.stopPropagation();
         const text = e.clipboardData?.getData('text/plain');
         if (text) {
+          api.markTerminalInput(tabId);
+          appState.markPromptDirty(tabId);
           api.writeTerminal(tabId, '\x1b[200~' + text + '\x1b[201~');
         }
       }
@@ -799,6 +846,20 @@ export class TerminalView {
     const atBottom = buf.baseY - buf.viewportY <= 3;
     if (atBottom) this.userScrolledUp = false;
     this.scrollBtn.classList.toggle('visible', !atBottom);
+  }
+
+  /** FitAddon must round the available width down to a whole number of cells.
+   * Center the rendered cell grid in the full terminal width instead of leaving
+   * the scrollbar and sub-cell remainder entirely on the right. The left CSS
+   * padding ensures centering never pushes the last column under the scrollbar. */
+  private centerScreen() {
+    const el = this.terminal.element;
+    const screen = el?.querySelector('.xterm-screen') as HTMLElement | null;
+    if (!el || !screen) return;
+    const paddingLeft = parseFloat(getComputedStyle(el).paddingLeft) || 0;
+    const screenWidth = screen.getBoundingClientRect().width;
+    const centeredLeft = Math.max(paddingLeft, (el.clientWidth - screenWidth) / 2);
+    screen.style.marginLeft = `${centeredLeft - paddingLeft}px`;
   }
 
   /** Build this pane's note-block entry button + floating panel. The panel is
@@ -963,6 +1024,7 @@ export class TerminalView {
       const savedViewportY = buf.viewportY;
 
       this.fitAddon.fit();
+      this.centerScreen();
       api.resizeTerminal(this.tabId, this.terminal.cols, this.terminal.rows);
 
       // If user hasn't scrolled up, always stay at bottom
@@ -974,10 +1036,13 @@ export class TerminalView {
     } catch {}
   }
 
-  show() { this.wrapper.classList.add('visible'); requestAnimationFrame(() => this.fit()); }
+  show() {
+    this.wrapper.classList.add('visible');
+    requestAnimationFrame(() => { this.fit(); this.restoreHostMouse(); });
+  }
   hide() { this.wrapper.classList.remove('visible'); }
-  write(data: string) { this.terminal.write(data); }
-  focus() { this.terminal.focus(); }
+  write(data: string) { this.writeOutput(data); }
+  focus() { this.restoreHostMouse(); this.terminal.focus(); }
   clear() { this.terminal.clear(); }
 
   toggleSearch() {

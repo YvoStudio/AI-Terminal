@@ -19,6 +19,36 @@ struct WindowState {
     visible: bool,
 }
 
+/// Install the small, managed Pi extension that renders task duration inside
+/// Pi's own TUI. Keeping this in Pi (rather than painting over xterm) means the
+/// live timer participates in Pi's redraws and the completed duration becomes a
+/// durable transcript entry without entering the LLM context.
+fn install_pi_task_duration_extension() {
+    const SOURCE: &str = include_str!("../resources/pi-task-duration.ts");
+
+    let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| std::path::PathBuf::from(home).join(".pi").join("agent"))
+        });
+    let Some(agent_dir) = agent_dir else { return };
+    let extension_dir = agent_dir.join("extensions");
+    let extension_path = extension_dir.join("ai-terminal-task-duration.ts");
+
+    let already_current = std::fs::read_to_string(&extension_path)
+        .map(|current| current == SOURCE)
+        .unwrap_or(false);
+    if already_current { return; }
+
+    if let Err(err) = std::fs::create_dir_all(&extension_dir)
+        .and_then(|_| std::fs::write(&extension_path, SOURCE))
+    {
+        eprintln!("Failed to install Pi task-duration extension: {}", err);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Create .lproj directories next to binary so macOS recognizes Chinese localization
@@ -42,6 +72,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            install_pi_task_duration_extension();
             app.manage(Arc::new(RwLock::new(PtyManager::new())));
             let parser = Arc::new(Mutex::new(OutputParser::new()));
             app.manage(parser.clone());
