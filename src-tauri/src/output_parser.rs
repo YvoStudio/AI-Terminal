@@ -190,7 +190,7 @@ impl OutputParser {
             // otherwise cause Working ↔ IdleReady oscillation. AwaitingConfirm
             // commits immediately — its pattern ("Do you want…" + numbered
             // option) doesn't appear as transient flicker.
-            let new_ui = classify_ai_ui(state.screen.screen());
+            let new_ui = classify_ai_ui(state.screen.screen(), state.ai_tool.as_deref());
             match new_ui {
                 AiUiState::Working => {
                     state.pending_idle = None;
@@ -849,7 +849,10 @@ fn is_tui_ai(ai_tool: Option<&str>) -> bool {
 /// - `Do you want…` / `Do you trust…` plus a numbered option is the
 ///   AwaitingConfirm box; checked first so a stale spinner line above the
 ///   confirm box doesn't misclassify it as Working.
-fn classify_ai_ui(screen: &vt100::Screen) -> AiUiState {
+///
+/// pi renders none of those markers, so it gets its own classifier — see
+/// classify_pi_ui.
+fn classify_ai_ui(screen: &vt100::Screen, ai_tool: Option<&str>) -> AiUiState {
     // Pull the bottom ~12 rows of *content*. Whole-screen scans risk matching old
     // text that scrolled into history but is still rendered above the input box.
     //
@@ -876,6 +879,10 @@ fn classify_ai_ui(screen: &vt100::Screen) -> AiUiState {
         return AiUiState::AwaitingConfirm;
     }
 
+    if ai_tool == Some("pi") {
+        return classify_pi_ui(&lines[tail_start..]);
+    }
+
     if lower.contains("esc to interrupt") {
         return AiUiState::Working;
     }
@@ -898,6 +905,80 @@ fn classify_ai_ui(screen: &vt100::Screen) -> AiUiState {
     }
 
     AiUiState::Unknown
+}
+
+/// Classify pi's (@earendil-works/pi-coding-agent) TUI from the same tail
+/// window. pi shows none of the markers the Claude matcher keys on — no `❯`
+/// prompt inside its input box, no `esc to interrupt`, no `(8s · …)` elapsed
+/// counter — so running it through classify_ai_ui leaves every pi tab pinned at
+/// Unknown. Unknown never emits a ui-state event, so the task queue's
+/// `idle-ready` trigger never fires and auto-send silently does nothing.
+///
+/// pi's bottom chrome (v0.81):
+/// ```text
+///   ⠋ Working...     ← status line; two blank rows when idle (IdleStatus)
+///
+///   ──────────────   ← editor top border (pi-tui DynamicBorder: `─` × width)
+///   <input rows>
+///   ──────────────   ← editor bottom border
+///   ~/some/project (main)
+///   $0.12 (sub) 3.4%/272k (auto)          (openai-codex) gpt-5.6-sol • high
+/// ```
+///
+/// Working anchors on the braille spinner frame pi-tui's Loader animates —
+/// the message beside it ("Working...", "Auto-compacting...", whatever an
+/// extension sets) is not stable, the spinner is.
+///
+/// Idle requires BOTH the editor border and the footer's context meter. The
+/// border alone is not enough: pi reuses DynamicBorder for its overlays (model
+/// picker, trust dialog, extension loaders), and auto-sending into an open
+/// selector would confirm whatever row happens to be highlighted. When an
+/// overlay covers the footer we fall through to Unknown, which leaves the
+/// previous state in place rather than emitting a bogus idle-ready.
+fn classify_pi_ui(tail: &[&str]) -> AiUiState {
+    if tail.iter().any(|l| has_braille_spinner(l)) {
+        return AiUiState::Working;
+    }
+    if tail.iter().any(|l| is_pi_border(l)) && tail.iter().any(|l| has_pi_context_meter(l)) {
+        return AiUiState::IdleReady;
+    }
+    AiUiState::Unknown
+}
+
+/// True if the line carries one of pi-tui's spinner frames (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`).
+/// Matches the whole braille block so a custom `indicator.frames` from an
+/// extension still reads as Working; U+2800 (blank braille) is excluded since
+/// it renders as whitespace.
+fn has_braille_spinner(line: &str) -> bool {
+    line.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
+}
+
+/// True for a pi editor/overlay border row: DynamicBorder fills the full
+/// terminal width with U+2500 and nothing else. Claude's input box draws
+/// corners (`╭──╮`), so its rows never come out as a pure run.
+fn is_pi_border(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.chars().take(20).count() == 20 && trimmed.chars().all(|c| c == '─')
+}
+
+/// True for pi's footer stats line. The context meter is the only part that
+/// always renders — `3.4%/272k`, or `?/272k` right after a compaction while the
+/// token count is still unknown. Cost, cache-hit and model name are all
+/// conditional, so we match on `%`-or-`?` + `/` + the window size's digits.
+fn has_pi_context_meter(line: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    for i in 1..chars.len() {
+        if chars[i] != '/' {
+            continue;
+        }
+        if chars[i - 1] != '%' && chars[i - 1] != '?' {
+            continue;
+        }
+        if matches!(chars.get(i + 1), Some(c) if c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// True if the line carries Claude Code's live elapsed-time counter:
@@ -1292,9 +1373,13 @@ mod tests {
 
     /// Render `lines` into a fresh 80x24 virtual screen and classify it.
     fn classify_lines(lines: &[&str]) -> AiUiState {
+        classify_lines_for(lines, Some("claude"))
+    }
+
+    fn classify_lines_for(lines: &[&str], ai_tool: Option<&str>) -> AiUiState {
         let mut parser = vt100::Parser::new(24, 80, 0);
         parser.process(lines.join("\r\n").as_bytes());
-        classify_ai_ui(parser.screen())
+        classify_ai_ui(parser.screen(), ai_tool)
     }
 
     const INPUT_BOX_TOP: &str = "╭──────────────────────────────────────╮";
@@ -1391,6 +1476,99 @@ mod tests {
     #[test]
     fn blank_screen_is_unknown() {
         assert_eq!(classify_lines(&["", ""]), AiUiState::Unknown);
+    }
+
+    // pi frames below are from a real pi v0.81.1 PTY recording.
+
+    const PI_BORDER: &str = "────────────────────────────────────────────────────────────────────────────";
+    const PI_INPUT: &str = " ";
+    const PI_CWD: &str = "~/github/AI-Terminal (main)";
+    const PI_FOOTER: &str = "$0.000 (sub) 0.0%/272k (auto)       (openai-codex) gpt-5.6-sol • high";
+
+    #[test]
+    fn pi_spinner_is_working() {
+        assert_eq!(
+            classify_lines_for(
+                &[
+                    " reply with exactly: pong",
+                    "",
+                    " ⠋ Working...",
+                    "",
+                    PI_BORDER,
+                    PI_INPUT,
+                    PI_BORDER,
+                    PI_CWD,
+                    PI_FOOTER,
+                ],
+                Some("pi")
+            ),
+            AiUiState::Working
+        );
+    }
+
+    #[test]
+    fn pi_empty_status_line_is_idle() {
+        // IdleStatus renders two blank rows where the spinner was — the editor
+        // border plus the footer's context meter are what say "at the prompt".
+        assert_eq!(
+            classify_lines_for(
+                &["", "", PI_BORDER, PI_INPUT, PI_BORDER, PI_CWD, PI_FOOTER],
+                Some("pi")
+            ),
+            AiUiState::IdleReady
+        );
+    }
+
+    #[test]
+    fn pi_idle_frame_is_unknown_under_claude_matcher() {
+        // Regression anchor for the bug this classifier fixes: pi's prompt has
+        // no `❯`, so the Claude path never reaches IdleReady and the task
+        // queue's auto-send never fires.
+        assert_eq!(
+            classify_lines_for(
+                &["", "", PI_BORDER, PI_INPUT, PI_BORDER, PI_CWD, PI_FOOTER],
+                Some("claude")
+            ),
+            AiUiState::Unknown
+        );
+    }
+
+    #[test]
+    fn pi_overlay_without_footer_is_unknown() {
+        // A selector overlay (model picker, trust dialog) reuses the same
+        // border but covers the footer. Unknown keeps the previous state, so we
+        // never auto-send Enter into a highlighted menu row.
+        assert_eq!(
+            classify_lines_for(
+                &[
+                    PI_BORDER,
+                    " Project trust",
+                    " ~/github/AI-Terminal",
+                    " > Trust this project",
+                    "   Do not trust",
+                    PI_BORDER,
+                ],
+                Some("pi")
+            ),
+            AiUiState::Unknown
+        );
+    }
+
+    #[test]
+    fn pi_context_meter_matcher() {
+        assert!(has_pi_context_meter("$0.000 (sub) 0.0%/272k (auto)"));
+        assert!(has_pi_context_meter("↑1.2k ↓340 12.5%/1M"));
+        assert!(has_pi_context_meter("?/272k (auto)")); // post-compaction
+        assert!(!has_pi_context_meter("~/src/foo (main)"));
+        assert!(!has_pi_context_meter("see docs/faq.md ? / maybe"));
+    }
+
+    #[test]
+    fn pi_border_matcher() {
+        assert!(is_pi_border(&"─".repeat(80)));
+        assert!(!is_pi_border("─────")); // too short to be a full-width border
+        assert!(!is_pi_border("╭──────────────────────────────────────╮"));
+        assert!(!is_pi_border("──────────── some label ────────────"));
     }
 
     #[test]

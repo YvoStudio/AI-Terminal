@@ -1035,15 +1035,19 @@ function reorderNoteBlock(tabId: string, srcId: string, dstId: string, dropAbove
 }
 // Blocks a note block from being sent twice concurrently. The manual "发送"
 // click can race the auto-send timer: the image paste makes Claude flip to
-// idle-ready while sendNoteBlock is still awaiting the clipboard round-trip, and
-// the manual path doesn't mark the prompt dirty until it finishes — so the timer
-// fires sendNoteBlock again on the same (not-yet-removed) block. A double-click
-// on 发送 does the same. Either way the one paste reaches Claude twice and shows
-// up as both [Image #N] and [Image #N+1]. A blockId-keyed in-flight set is the
-// reliable interlock since the block isn't removed until the async send ends.
+// idle-ready while sendNoteBlock is still awaiting the clipboard round-trip, so
+// the timer fires sendNoteBlock again on the same (not-yet-removed) block. A
+// double-click on 发送 does the same. Either way the one paste reaches Claude
+// twice and shows up as both [Image #N] and [Image #N+1]. A blockId-keyed
+// in-flight set is the reliable interlock since the block isn't removed until
+// the async send ends.
 const sendingBlocks = new Set<string>();
 
-async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
+// Both entry points — the 发送 button and the auto-send timer — paste the block
+// and press Enter. The button used to only stage the text in the prompt for
+// review, which meant every queued task still needed a manual Enter in the
+// terminal; "send" now means sent.
+async function sendNoteBlock(tabId: string, blockId: string) {
   const tab = appState.tabs.get(tabId);
   if (!tab) return;
   const block = tab.noteBlocks.find(b => b.id === blockId);
@@ -1103,21 +1107,14 @@ async function sendNoteBlock(tabId: string, blockId: string, submit = false) {
         api.writeTerminal(tabId, block.content);
       }
     }
-    // Auto-queue path: press Enter so Claude actually submits. Manual click on
-    // "发送" leaves the prompt in the input box for the user to review.
-    if (submit) {
-      // Delay + separate write so the Enter can't arrive before Claude has
-      // ingested the text. Two writeTerminal IPC calls have no ordering guarantee,
-      // so a bare \r racing ahead lands on an empty prompt — submitting nothing —
-      // and the block is left sitting in the input (the "last block won't send" bug).
-      if (hasText || hasImages) await new Promise(r => setTimeout(r, 120));
-      api.writeTerminal(tabId, '\r');
-      appState.clearPromptDirty(tabId); // submitted — prompt is empty again
-    } else {
-      // Manual "发送" stages the text in the prompt for the user to review; treat
-      // it as unsubmitted content so auto-send won't paste another block over it.
-      appState.markPromptDirty(tabId);
-    }
+    // Press Enter so the AI actually submits. Delay + separate write so the
+    // Enter can't arrive before the text has been ingested. Two writeTerminal
+    // IPC calls have no ordering guarantee, so a bare \r racing ahead lands on
+    // an empty prompt — submitting nothing — and the block is left sitting in
+    // the input (the "last block won't send" bug).
+    if (hasText || hasImages) await new Promise(r => setTimeout(r, 120));
+    api.writeTerminal(tabId, '\r');
+    appState.clearPromptDirty(tabId); // submitted — prompt is empty again
     removeNoteBlock(tabId, blockId);
   } finally {
     sendingBlocks.delete(blockId);
@@ -1696,7 +1693,11 @@ function getCurrentTerminalFontSize(): number {
 }
 
 const TIPS_PANEL_HTML = `
-      <h3>使用技巧</h3>
+      <div class="tips-header">
+        <h3>使用技巧</h3>
+        <button class="tips-close" type="button" title="关闭 (Esc / Alt+K)" aria-label="关闭">✕</button>
+      </div>
+      <div class="tips-body">
       <div class="tips-columns">
         <div class="tips-column">
           <div class="tips-section">
@@ -1732,6 +1733,7 @@ const TIPS_PANEL_HTML = `
             <button class="tips-tab active" data-tab="claude">Claude Code</button>
             <button class="tips-tab" data-tab="opencode">OpenCode</button>
             <button class="tips-tab" data-tab="codex">Codex</button>
+            <button class="tips-tab" data-tab="pi">Pi Agent</button>
           </div>
           <div class="tips-tab-content active" data-content="claude">
             <div class="tips-section">
@@ -1786,7 +1788,7 @@ const TIPS_PANEL_HTML = `
             <div class="tips-section">
               <div class="tips-section-title">启动命令</div>
               <div class="tips-item"><span class="tips-cmd">codex</span> 启动交互模式</div>
-              <div class="tips-item"><span class="tips-cmd">codex --full-auto</span> 低摩擦自动执行</div>
+              <div class="tips-item"><span class="tips-cmd">codex -a on-request</span> 设置审批策略</div>
               <div class="tips-item"><span class="tips-cmd">codex -m &lt;模型&gt;</span> 指定模型</div>
               <div class="tips-item"><span class="tips-cmd">codex -s workspace-write</span> 设置沙箱策略</div>
               <div class="tips-item"><span class="tips-cmd">codex exec "提示"</span> 非交互执行</div>
@@ -1795,7 +1797,7 @@ const TIPS_PANEL_HTML = `
             <div class="tips-section">
               <div class="tips-section-title">交互命令</div>
               <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型 / 推理强度</div>
-              <div class="tips-item"><span class="tips-cmd">/approvals</span> 设置审批 / 执行策略</div>
+              <div class="tips-item"><span class="tips-cmd">/permissions</span> 设置执行权限（原 /approvals）</div>
               <div class="tips-item"><span class="tips-cmd">/new</span> 开始新对话</div>
               <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
               <div class="tips-item"><span class="tips-cmd">/diff</span> 查看改动 diff</div>
@@ -1806,6 +1808,34 @@ const TIPS_PANEL_HTML = `
               <div class="tips-item"><span class="tips-cmd">/review</span> 评审工作区改动</div>
               <div class="tips-item"><span class="tips-cmd">/init</span> 生成 AGENTS.md</div>
               <div class="tips-item"><span class="tips-note">说明</span> 以官方文档为准</div>
+            </div>
+          </div>
+          <div class="tips-tab-content" data-content="pi">
+            <div class="tips-section">
+              <div class="tips-section-title">启动命令</div>
+              <div class="tips-item"><span class="tips-cmd">pi</span> 启动交互模式</div>
+              <div class="tips-item"><span class="tips-cmd">pi -c</span> 继续最近一次会话</div>
+              <div class="tips-item"><span class="tips-cmd">pi -r</span> 选择历史会话恢复</div>
+              <div class="tips-item"><span class="tips-cmd">pi -p "提示"</span> 非交互执行后退出</div>
+              <div class="tips-item"><span class="tips-cmd">pi @文件 "提示"</span> 带文件内容提问</div>
+              <div class="tips-item"><span class="tips-cmd">pi --model &lt;模型&gt;</span> 指定模型启动</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">交互命令</div>
+              <div class="tips-item"><span class="tips-cmd">/login</span> 登录 / 配置 API Key</div>
+              <div class="tips-item"><span class="tips-cmd">/model</span> 切换模型</div>
+              <div class="tips-item"><span class="tips-cmd">/new</span> 开始新会话</div>
+              <div class="tips-item"><span class="tips-cmd">/resume</span> 恢复历史会话</div>
+              <div class="tips-item"><span class="tips-cmd">/compact</span> 压缩上下文</div>
+              <div class="tips-item"><span class="tips-cmd">/session</span> 会话信息 / token / 费用</div>
+              <div class="tips-item"><span class="tips-cmd">/tree</span> 跳回会话任意节点继续</div>
+            </div>
+            <div class="tips-section">
+              <div class="tips-section-title">快速输入</div>
+              <div class="tips-item"><span class="tips-cmd">@</span> 模糊搜索并引用文件</div>
+              <div class="tips-item"><span class="tips-cmd">!命令</span> 执行 shell 并把输出给模型（<span class="tips-cmd">!!</span> 不进上下文）</div>
+              <div class="tips-item"><span class="tips-key">Shift+Tab</span> 切换思考等级</div>
+              <div class="tips-item"><span class="tips-cmd">/hotkeys</span> 查看全部快捷键</div>
             </div>
           </div>
         </div>
@@ -1848,6 +1878,7 @@ const TIPS_PANEL_HTML = `
           <a href="https://github.com/YvoStudio/AI-Terminal" target="_blank" rel="noreferrer" class="tips-about-link">GitHub</a>
         </div>
       </div>
+      </div>
     `;
 
 function isCopyableTipCommand(text: string): boolean {
@@ -1855,6 +1886,8 @@ function isCopyableTipCommand(text: string): boolean {
   return value.startsWith('claude')
     || value.startsWith('opencode')
     || value.startsWith('codex')
+    || value === 'pi'
+    || value.startsWith('pi ')
     || value.startsWith('/')
     || value.startsWith('@');
 }
@@ -1994,6 +2027,7 @@ function toggleTipsPanel() {
       </div>
     `; */
   _tipsEl.innerHTML = TIPS_PANEL_HTML;
+  _tipsEl.querySelector('.tips-close')?.addEventListener('click', () => closeTipsPanel());
   _tipsEl.addEventListener('click', (e) => e.stopPropagation());
   _tipsEl.addEventListener('mousedown', (e) => e.stopPropagation());
   document.body.appendChild(_tipsEl);
@@ -2016,7 +2050,7 @@ function toggleTipsPanel() {
   if (appState.activeTabId) {
     const currentTab = appState.tabs.get(appState.activeTabId);
     const aiTool = currentTab?.aiTool || '';
-    const tabMap: Record<string, string> = { claude: 'claude', opencode: 'opencode', codex: 'codex' };
+    const tabMap: Record<string, string> = { claude: 'claude', opencode: 'opencode', codex: 'codex', pi: 'pi' };
     const targetTab = tabMap[aiTool];
     if (targetTab && _tipsEl) {
       const targetTabBtn = _tipsEl.querySelector(`.tips-tab[data-tab="${targetTab}"]`) as HTMLElement;
@@ -2568,7 +2602,7 @@ api.onTabAiUiStateChanged((tabId, state) => {
     // Re-check: the user may have started typing during the delay window.
     if (appState.isPromptDirty(tabId)) return;
     lastQueueSendAt.set(tabId, Date.now());
-    sendNoteBlock(tabId, next.id, true);
+    sendNoteBlock(tabId, next.id);
   }, 300);
 });
 
@@ -2806,6 +2840,7 @@ document.addEventListener('keydown', (e) => {
   else if (isCtrl && e.key === 'w') { e.preventDefault(); if (appState.activeTabId) closeTab(appState.activeTabId); }
   else if (isCtrl && e.key === 'f') { e.preventDefault(); if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.toggleSearch(); } }
   else if (e.altKey && e.key === 'k') { e.preventDefault(); toggleTipsPanel(); }
+  else if (e.key === 'Escape' && _tipsOpen) { e.preventDefault(); closeTipsPanel(); }
   else if (isCtrl && e.key === 'Tab') { e.preventDefault(); if (e.shiftKey) appState.switchToPrev(); else appState.switchToNext(); if (appState.activeTabId) switchToTab(appState.activeTabId); }
   else if (isCtrl && e.shiftKey && e.key === 'p') { e.preventDefault(); toggleCommandPalette(); }
   // Cmd/Ctrl+Shift+ArrowUp: copy last command output to clipboard
@@ -3029,7 +3064,21 @@ function applyThemeToAll(index: number, fromAuto = false) {
     // Derive UI colors from theme background
     const bg = t.theme.background || t.uiBg;
     const r = parseInt(bg.slice(1,3),16), g = parseInt(bg.slice(3,5),16), b = parseInt(bg.slice(5,7),16);
-    const lighten = (amt: number) => '#' + [r,g,b].map(c => Math.min(255, c + amt).toString(16).padStart(2,'0')).join('');
+    // Floor the lift on near-black themes. A flat `+amt` is fine over #1e1e1e
+    // but collapses over #000: bg-secondary lands on #0a0a0a and the border on
+    // #191919, so every floating surface (task queue, search bar, skill menu)
+    // dissolves into the terminal background — and the black drop shadows that
+    // are supposed to separate them do nothing on black either.
+    //
+    // The floor keys off the brightest channel, and the same lift is applied to
+    // all three, so a tinted dark theme keeps its hue instead of being clamped
+    // to neutral grey. Any theme whose brightest channel is already >= amt is
+    // completely unaffected — #1e1e1e and lighter derive exactly as before.
+    const peak = Math.max(r, g, b);
+    const lighten = (amt: number) => {
+      const lift = Math.max(amt, amt * 2 - peak);
+      return '#' + [r,g,b].map(c => Math.min(255, c + lift).toString(16).padStart(2,'0')).join('');
+    };
     const darken = (amt: number) => '#' + [r,g,b].map(c => Math.max(0, c - amt).toString(16).padStart(2,'0')).join('');
     root.style.setProperty('--bg-secondary', lighten(10));
     root.style.setProperty('--bg-tertiary', lighten(18));

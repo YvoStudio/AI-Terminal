@@ -37,16 +37,34 @@ export interface TabState {
   cwd: string;
   userRenamed: boolean; // true if user manually renamed — blocks auto-rename
   // Image numbering. The AI CLI prints `[Image #N]` with N that restarts at 1
-  // every new session (/clear, resume, relaunch). We rewrite it to `[Image #M]`
-  // where M comes from ONE app-wide counter shared by all tabs (nextImageSeq),
-  // so no reset heuristic can ever produce two live refs with the same number.
+  // every new session (/clear, resume, relaunch). Its N stays on screen exactly
+  // as printed; our globally-unique M (nextImageSeq) lives only in imageEpochs
+  // and is resolved at click time. See bindImageRefsFromOutput for why the
+  // number is no longer substituted into the stream.
   pastedTotal: number; // last M assigned to this tab — persistence/migration only.
   pastedById: Map<number, string>; // M → image path. Source of truth for click resolution.
   pendingPasteIds: number[]; // FIFO queue of pasted M values awaiting the AI's next [Image #N].
-  claudeImageMap: Map<number, number>; // current session's AI N → our M.
-  claudeMaxN: number; // highest N bound this session; a lower N while a paste is pending ⇒ new session.
+  imageEpochs: ImageEpoch[]; // one per AI session, oldest first. See ImageEpoch.
   outputResidue: string; // trailing partial `[Image #...` buffered across output chunks so a token split mid-stream isn't missed.
 }
+
+/** Live probe for the buffer line an epoch is anchored to. Backed by an xterm
+ *  marker, which keeps the index correct as scrollback is trimmed and reports
+ *  -1 once the line itself has been trimmed away. */
+export type LineAnchor = () => number;
+
+/** One AI session's worth of `[Image #N]` bindings.
+ *
+ *  N restarts at 1 every session, so the number alone doesn't identify an
+ *  image — two sessions both print `[Image #1]` for different pastes, and both
+ *  can be on screen at once once the first has scrolled up. What disambiguates
+ *  them is WHERE they were drawn: everything below `startLine` belongs to this
+ *  session, everything above it to an earlier one. */
+type ImageEpoch = {
+  startLine: LineAnchor;
+  map: Map<number, number>; // this session's AI N → our M
+  maxN: number; // highest N bound here; a lower N while a paste is pending ⇒ new session
+};
 
 class AppState {
   activeTabId: string | null = null;
@@ -78,8 +96,7 @@ class AppState {
       pastedTotal: 0,
       pastedById: new Map(),
       pendingPasteIds: [],
-      claudeImageMap: new Map(),
-      claudeMaxN: 0,
+      imageEpochs: [],
       outputResidue: '',
     };
     this.tabs.set(id, tab);
@@ -186,6 +203,11 @@ class AppState {
    * [Image #M] refs in restored scrollback remain clickable. The pending-paste
    * queue is deliberately NOT restored — a paste that never got bound belongs
    * to a dead AI session and must not bind to the next session's [Image #1].
+   *
+   * KNOWN GAP: imageEpochs are not persisted, so `[Image #N]` refs inside
+   * restored scrollback resolve to nothing and clicking them does nothing.
+   * Persisting them needs the anchors stored relative to the end of the
+   * serialized scrollback (absolute buffer lines don't survive the restore).
    */
   restorePastedImages(id: string, total?: number, images?: Record<string, string>) {
     const tab = this.tabs.get(id);
@@ -207,57 +229,106 @@ class AppState {
 
   /**
    * The AI started a fresh session (new alt-screen, /clear, resume, relaunch):
-   * its [Image #N] counter restarts at 1. Drop the per-session N→M bindings so
-   * the next [Image #N] re-binds from the pending queue. Tab-lifetime state
-   * (pastedById / pastedTotal / pendingPasteIds) is deliberately preserved.
+   * its [Image #N] counter restarts at 1. Open a new epoch so the next
+   * [Image #N] re-binds from the pending queue without clobbering the previous
+   * session's bindings — those still have to resolve for the refs left behind
+   * in scrollback. Tab-lifetime state (pastedById / pastedTotal /
+   * pendingPasteIds) is deliberately preserved.
    *
    * Only reset when there are pending pastes awaiting a fresh binding. Without
-   * pending pastes a reset is pointless and harmful: Claude Code emits ?1049h
-   * on every screen redraw within the same conversation, so clearing the map
-   * mid-session would orphan already-established N→M mappings and leave later
-   * [Image #N] references in AI responses un-rewritten.
+   * pending pastes a reset is pointless: Claude Code emits ?1049h on every
+   * screen redraw within the same conversation, so it would churn epochs
+   * mid-session for nothing.
    */
-  resetAiSession(id: string) {
+  resetAiSession(id: string, makeAnchor: () => LineAnchor) {
     const tab = this.tabs.get(id);
     if (!tab) return;
     if ((tab.pendingPasteIds?.length || 0) === 0) return;
-    tab.claudeImageMap = new Map();
-    tab.claudeMaxN = 0;
+    this.beginImageEpoch(tab, makeAnchor);
+  }
+
+  /** Open a new epoch anchored at the caller's current buffer line, and drop
+   *  any older epoch whose anchor line has been trimmed out of scrollback —
+   *  the refs it covered scrolled away with it, so nothing can resolve there.
+   *
+   *  If the newest epoch hasn't bound anything yet it is re-anchored in place
+   *  rather than stacked on. Claude Code emits ?1049h on every screen redraw,
+   *  so while a paste is pending this runs many times in a row; stacking would
+   *  bury the epoch that actually holds the bindings under empty ones and make
+   *  resolveImageRefAt return nothing. */
+  private beginImageEpoch(tab: TabState, makeAnchor: () => LineAnchor): ImageEpoch {
+    if (!tab.imageEpochs) tab.imageEpochs = [];
+    tab.imageEpochs = tab.imageEpochs.filter(e => e.startLine() >= 0);
+    const newest = tab.imageEpochs[tab.imageEpochs.length - 1];
+    if (newest && newest.map.size === 0) {
+      newest.startLine = makeAnchor();
+      return newest;
+    }
+    const epoch: ImageEpoch = { startLine: makeAnchor(), map: new Map(), maxN: 0 };
+    tab.imageEpochs.push(epoch);
+    return epoch;
+  }
+
+  private currentImageEpoch(tab: TabState, makeAnchor: () => LineAnchor): ImageEpoch {
+    const epochs = tab.imageEpochs;
+    if (epochs && epochs.length > 0) return epochs[epochs.length - 1];
+    return this.beginImageEpoch(tab, makeAnchor);
   }
 
   /**
-   * Map an AI-emitted `[Image #N]` to our tab-monotonic M. Bind once on first
-   * sight (consuming the pending-paste queue) and reuse that binding on every
-   * later redraw. Session restarts are handled by the caller (alt-screen reset)
-   * and by the N-regression check in rewriteImageRefsForOutput, both of which
-   * clear the per-session map before we get here.
+   * Resolve an on-screen `[Image #N]` sitting at absolute buffer line `line`
+   * into the M we assigned when that image was pasted.
+   *
+   * Picks the newest epoch anchored at or above the line, so a stale `[Image
+   * #1]` left in scrollback by an earlier session resolves through THAT
+   * session's bindings instead of the current one's — which is the collision
+   * the old stream-rewriting numbering existed to prevent.
    */
-  resolveClaudeImageN(id: string, n: number): number | undefined {
+  resolveImageRefAt(id: string, line: number, n: number): number | undefined {
     const tab = this.tabs.get(id);
-    if (!tab) return undefined;
-    if (!tab.claudeImageMap) tab.claudeImageMap = new Map();
-    if (!tab.pendingPasteIds) tab.pendingPasteIds = [];
-    const existing = tab.claudeImageMap.get(n);
-    if (existing !== undefined) return existing;
-    if (tab.pendingPasteIds.length > 0) {
-      const m = tab.pendingPasteIds.shift()!;
-      tab.claudeImageMap.set(n, m);
-      if (n > (tab.claudeMaxN || 0)) tab.claudeMaxN = n;
-      return m;
+    if (!tab?.imageEpochs?.length) return undefined;
+    for (let i = tab.imageEpochs.length - 1; i >= 0; i--) {
+      const start = tab.imageEpochs[i].startLine();
+      if (start < 0) continue; // anchor trimmed away
+      if (start <= line) return tab.imageEpochs[i].map.get(n);
     }
     return undefined;
   }
 
   /**
-   * Streaming rewrite: replace each `[Image #N]` in a freshly arrived chunk
-   * with `[Image #M]`. Holds back any trailing partial `[Image #…` so that a
-   * token split across chunk boundaries still gets rewritten when its tail
-   * arrives. The unrewritten residue is returned to the caller so they can
-   * also write the visible portion to the terminal first.
+   * Map an AI-emitted `[Image #N]` to our tab-monotonic M. Bind once on first
+   * sight (consuming the pending-paste queue) and reuse that binding on every
+   * later redraw. Session restarts open a new epoch — via the alt-screen reset
+   * in the caller, or the N-regression check below — so a rebound N never
+   * clobbers the previous session's mapping.
    */
-  rewriteImageRefsForOutput(id: string, chunk: string): string {
+  private bindImageRefInEpoch(tab: TabState, epoch: ImageEpoch, n: number): void {
+    if (!tab.pendingPasteIds) tab.pendingPasteIds = [];
+    if (epoch.map.has(n)) return; // already bound — this is a redraw of the same ref
+    if (tab.pendingPasteIds.length === 0) return;
+    epoch.map.set(n, tab.pendingPasteIds.shift()!);
+    if (n > epoch.maxN) epoch.maxN = n;
+  }
+
+  /**
+   * Streaming scan: bind every `[Image #N]` in a freshly arrived chunk to the M
+   * we assigned when that image was pasted. Holds back a trailing partial
+   * `[Image #…` so a token split across chunk boundaries is still seen once its
+   * tail arrives.
+   *
+   * The chunk is deliberately NOT modified. This used to substitute our M into
+   * the stream so the on-screen number was globally unique — but M comes from a
+   * counter that only ever grows (49, 300, 4000…) while the AI's N restarts at
+   * 1 each session, so the substitution almost always made the line WIDER. The
+   * AI redraws its inline UI by moving the cursor up a row count computed from
+   * the string lengths IT emitted; a widened line that wrapped one row further
+   * than the AI accounted for left the previous draw un-erased, which is the
+   * duplicated-message ghost. Resolution moved to click time instead — see
+   * resolveImageRefAt.
+   */
+  bindImageRefsFromOutput(id: string, chunk: string, makeAnchor: () => LineAnchor): void {
     const tab = this.tabs.get(id);
-    if (!tab) return chunk;
+    if (!tab) return;
     const data = (tab.outputResidue || '') + chunk;
     // Hold back a trailing partial token if the buffer ends mid-`[Image #...`.
     // The partial must also cover a half-arrived CHA separator (see IMAGE_REF
@@ -274,15 +345,17 @@ class AppState {
     // `[Image #N]` as Claude emits it. Inline refs (prompt echo) separate with a
     // plain space, but transcript attachment lines (`⎿ [Image #1]`) position the
     // number with a CHA cursor move instead: `[Image\x1b[13G#1]`. Match both;
-    // group 1 captures the separator verbatim so the rewrite preserves the
-    // original column alignment, group 2 is N.
+    // group 2 is N (group 1 is the separator, unused now that we only read).
     const IMAGE_REF = () => /\[Image((?:[ \u00a0]+|\x1b\[\d+G))#(\d+)\]/g;
+
+    let epoch = this.currentImageEpoch(tab, makeAnchor);
 
     // In-place session restart (e.g. /clear, which doesn't re-enter the
     // alt-screen): the AI re-prints [Image #N] with N below the highest we've
     // bound while a fresh paste is waiting. Its counter can only have reset, so
-    // drop the stale bindings before re-resolving.
-    if ((tab.pendingPasteIds?.length || 0) > 0 && (tab.claudeMaxN || 0) > 0) {
+    // open a new epoch — the old bindings stay valid for the refs still sitting
+    // in scrollback above the new epoch's anchor.
+    if ((tab.pendingPasteIds?.length || 0) > 0 && epoch.maxN > 0) {
       let chunkMax = 0;
       const scan = IMAGE_REF();
       let s: RegExpExecArray | null;
@@ -290,14 +363,14 @@ class AppState {
         const v = parseInt(s[2], 10);
         if (v > chunkMax) chunkMax = v;
       }
-      if (chunkMax > 0 && chunkMax < tab.claudeMaxN) this.resetAiSession(id);
+      if (chunkMax > 0 && chunkMax < epoch.maxN) epoch = this.beginImageEpoch(tab, makeAnchor);
     }
 
-    return head.replace(IMAGE_REF(), (match, sep, nStr) => {
-      const n = parseInt(nStr, 10);
-      const m = this.resolveClaudeImageN(id, n);
-      return (m !== undefined && m !== n) ? `[Image${sep}#${m}]` : match;
-    });
+    const refs = IMAGE_REF();
+    let m: RegExpExecArray | null;
+    while ((m = refs.exec(head)) !== null) {
+      this.bindImageRefInEpoch(tab, epoch, parseInt(m[2], 10));
+    }
   }
 
   addSidebarEntry(id: string, entry: SidebarEntry) {

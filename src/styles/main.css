@@ -176,15 +176,20 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .skill-menu-desc { color: var(--text-muted); font-size: 11px; margin-top: 2px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 
 /* Notepad — a per-pane floating popover. Each TerminalView builds its own inside
-   its .terminal-wrapper, so the panel stays centered in (and its width tracks)
-   that pane. Opened via .terminal-notepad-fab, which sits just above the pane's
-   prompt/status area. */
+   its .terminal-wrapper, so the panel's width tracks that pane. Opened via
+   .terminal-notepad-fab, which sits just above the pane's prompt/status area.
+   Right-anchored on the same 16px gutter as that entry button, so the panel
+   opens flush under it instead of jumping to the pane's centre — and leaves the
+   left side of the terminal readable while the queue is open. */
 .terminal-notepad {
-  position: absolute; left: 50%; bottom: 148px; z-index: 20;
-  transform: translateX(-50%);
-  width: min(760px, calc(100% - 32px)); max-height: calc(100% - 180px);
-  background: var(--bg-secondary); border: 1px solid var(--border-color);
-  border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+  position: absolute; right: 16px; bottom: 148px; z-index: 20;
+  width: min(570px, calc(100% - 32px)); max-height: calc(100% - 180px);
+  /* One step above --bg-secondary so the panel reads as floating over the
+     terminal rather than as part of it. The hairline ring supplements the drop
+     shadow, which contributes nothing on a black background. */
+  background: var(--bg-tertiary); border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.05);
   display: flex; flex-direction: column; overflow: hidden;
 }
 .terminal-notepad.hidden { display: none; }
@@ -309,7 +314,17 @@ body.note-block-reordering * { cursor: grabbing !important; }
 .tips-panel { position: fixed; left: 8px; bottom: 36px; width: min(360px, calc(100vw - 16px)); background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 200; padding: 16px; max-height: 70vh; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent; }
 .tips-panel::-webkit-scrollbar { display: none; }
 .tips-panel { -ms-overflow-style: none; }
-.tips-panel.tips-panel-wide { width: calc(100vw - 16px); max-height: calc(100vh - 76px); overflow-y: auto; left: 8px; right: 8px; bottom: 36px; }
+/* Wide (Alt+K) variant: the content scrolls, so the title row is lifted out of
+   the scroll area into a fixed header — otherwise the close button scrolls out
+   of reach on the first flick. The body keeps the padding the flat panel used
+   to have so .tips-tabs' -20px still lands the AI tab row level with the title. */
+.tips-panel.tips-panel-wide { width: calc(100vw - 16px); max-height: calc(100vh - 76px); left: 8px; right: 8px; bottom: 36px; padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.tips-panel-wide .tips-header { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 0; }
+.tips-panel-wide .tips-header h3 { margin-bottom: 0; }
+.tips-panel-wide .tips-body { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 16px 16px; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent; }
+.tips-panel-wide .tips-body::-webkit-scrollbar { display: none; }
+.tips-close { flex-shrink: 0; width: 26px; height: 26px; padding: 0; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-secondary); border-radius: 6px; cursor: pointer; font-size: 12px; line-height: 1; display: flex; align-items: center; justify-content: center; transition: color 0.15s, border-color 0.15s, background 0.15s; }
+.tips-close:hover { color: var(--text-primary); border-color: var(--accent-red); background: var(--bg-hover); }
 .tips-columns { display: grid; grid-template-columns: 1fr 2fr; gap: 0 24px; }
 .tips-column { min-width: 0; }
 .tips-column-ai { position: relative; }

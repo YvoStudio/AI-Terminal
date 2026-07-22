@@ -103,19 +103,42 @@ export class TerminalView {
     return { text, charToCol };
   }
 
-  /** Open the image-preview carousel at ref M. The output rewriter turned the
-   * AI's N into our globally-unique M, so the number shown IS the pastedById
-   * key; carousel order = ascending M across this tab's lifetime. */
-  private openImagePreviewForRef(n: number) {
+  /** Anchor a new image-binding epoch at the TOP of the current viewport.
+   *
+   * Not the cursor line: anchors are taken before the chunk is written, and the
+   * AI repaints by moving the cursor up first, so refs in that same chunk can
+   * land above where the cursor is sitting now. The viewport top is above
+   * anything an inline redraw can reach while still being below everything the
+   * previous session drew.
+   *
+   * xterm's marker keeps the index correct as scrollback is trimmed and reports
+   * -1 once the line itself is gone — exactly when the epoch stops mattering. */
+  private markCurrentLine(): () => number {
+    const buf = this.terminal.buffer.active;
+    try {
+      const marker = this.terminal.registerMarker(-buf.cursorY);
+      if (marker) return () => marker.line;
+    } catch {}
+    const at = buf.baseY;
+    return () => at;
+  }
+
+  /** Open the image-preview carousel for the `[Image #N]` drawn at absolute
+   * buffer line `line`. N is the AI's own per-session number, so the line is
+   * what says which session it belongs to — appState maps the pair to our
+   * globally-unique M. Carousel order = ascending M across this tab's lifetime. */
+  private openImagePreviewForRef(n: number, line: number) {
     const tab = appState.tabs.get(this.tabId);
     if (!tab) return;
     const preview = (window as any).showImagePreview;
     if (typeof preview !== 'function') return;
+    const m = appState.resolveImageRefAt(this.tabId, line, n);
+    if (m === undefined) return;
     const byId = tab.pastedById;
-    if (byId && byId.has(n)) {
+    if (byId && byId.has(m)) {
       const ms = Array.from(byId.keys()).sort((a, b) => a - b);
       const paths = ms.map(k => convertFileSrc(byId.get(k)!));
-      preview(paths, ms.indexOf(n));
+      preview(paths, ms.indexOf(m));
     }
   }
 
@@ -534,7 +557,8 @@ export class TerminalView {
           || e.clientY < rect.top || e.clientY >= rect.bottom) return;
       const col = Math.floor((e.clientX - rect.left) / (rect.width / this.terminal.cols));
       const row = Math.floor((e.clientY - rect.top) / (rect.height / this.terminal.rows));
-      const info = this.lineTextWithCols(this.terminal.buffer.active.viewportY + row);
+      const line = this.terminal.buffer.active.viewportY + row;
+      const info = this.lineTextWithCols(line);
       if (!info) return;
       const re = /\[Image #(\d+)\]/g;
       let m: RegExpExecArray | null;
@@ -542,7 +566,7 @@ export class TerminalView {
         const startCol = info.charToCol[m.index] ?? 0;
         const endCol = info.charToCol[m.index + m[0].length - 1] ?? startCol;
         if (col >= startCol && col <= endCol) {
-          this.openImagePreviewForRef(parseInt(m[1], 10));
+          this.openImagePreviewForRef(parseInt(m[1], 10), line);
           return;
         }
       }
@@ -590,26 +614,30 @@ export class TerminalView {
     api.onTerminalOutput(tabId, (data) => {
       // The AI CLI restarts its [Image #N] counter every new session. A new
       // full-screen session re-enters the alt-screen buffer (CSI ?1049h / ?1047h
-      // / ?47h) — treat that as a hard session boundary and drop the stale N→M
-      // bindings so the next paste re-binds cleanly.
-      if (/\x1b\[\?(?:1049|1047|47)h/.test(data)) appState.resetAiSession(tabId);
-      // Rewrite the AI's resetting [Image #N] to our tab-monotonic [Image #M]
-      // (see app-state) so old references never collide with later pastes.
-      const rewritten = appState.rewriteImageRefsForOutput(tabId, data);
+      // / ?47h) — treat that as a hard session boundary and open a fresh binding
+      // epoch so the next paste re-binds cleanly.
+      if (/\x1b\[\?(?:1049|1047|47)h/.test(data)) {
+        appState.resetAiSession(tabId, () => this.markCurrentLine());
+      }
+      // Bind the AI's [Image #N] to our M without touching the bytes — the old
+      // substitution widened lines and corrupted the AI's repaint (see
+      // bindImageRefsFromOutput). Anchors are taken before the write so a new
+      // epoch starts at the line the new session is about to draw on.
+      appState.bindImageRefsFromOutput(tabId, data, () => this.markCurrentLine());
       // Hold destructive clears while a selection is alive (see heldOutput).
       // Once holding, everything after queues too — chunks must stay ordered.
       if (this.holdTimer !== null
-          || (/\x1b\[[23]J/.test(rewritten)
+          || (/\x1b\[[23]J/.test(data)
               && (this.mouseSelectionInProgress || this.terminal.hasSelection()))) {
-        this.heldOutput.push(rewritten);
-        this.heldBytes += rewritten.length;
+        this.heldOutput.push(data);
+        this.heldBytes += data.length;
         if (this.holdTimer === null) {
           this.holdTimer = setTimeout(() => this.flushHeldOutput(), 10_000);
         }
         if (this.heldBytes > 4_000_000) this.flushHeldOutput();
         return;
       }
-      this.terminal.write(rewritten);
+      this.terminal.write(data);
     });
 
     // Handle paste: intercept images, send bracketed paste for AI tools,
