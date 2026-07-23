@@ -576,7 +576,7 @@ impl OutputParser {
 
 /// Extract terminal title from OSC 0 or OSC 2 escape sequence
 /// Format: \x1b]0;title\x07  or  \x1b]2;title\x07
-fn extract_osc_title(raw: &str) -> Option<(String, bool)> {
+pub(crate) fn extract_osc_title(raw: &str) -> Option<(String, bool)> {
     // Try OSC 2 first (set window title), then OSC 0 (set icon name + title)
     for marker in &["\x1b]2;", "\x1b]0;"] {
         if let Some(start) = raw.find(marker) {

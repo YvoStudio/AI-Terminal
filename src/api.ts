@@ -36,6 +36,14 @@ export interface ClaudeSession {
   user_messages: string[];
 }
 
+export interface CodexSessionStats {
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  modelContextWindow: number;
+  planType?: string;
+}
+
 export interface HistoryEntry {
   name: string;
   cwd: string;
@@ -87,6 +95,11 @@ export const api = {
 
   async onTerminalOutput(tabId: string, cb: (data: string) => void): Promise<void> {
     const unlisten = await listen<string>(`terminal-output-${tabId}`, (e) => cb(e.payload));
+    addTabListener(tabId, unlisten);
+  },
+
+  async onTerminalTitle(tabId: string, cb: (title: string) => void): Promise<void> {
+    const unlisten = await listen<string>(`terminal-title-${tabId}`, (e) => cb(e.payload));
     addTabListener(tabId, unlisten);
   },
 
@@ -284,6 +297,10 @@ export const api = {
 
   async getClaudeSessionHistory(sessionId: string): Promise<string[]> {
     return invoke<string[]>('get_claude_session_history', { sessionId });
+  },
+
+  async getCodexSessionStats(sessionId: string): Promise<CodexSessionStats | null> {
+    return invoke<CodexSessionStats | null>('get_codex_session_stats', { sessionId });
   },
 
   notifyTaskDone(pendingCount: number, requestAttention = true): void {

@@ -2,9 +2,11 @@ use crate::output_parser::{OutputParser, SidebarEntry};
 use crate::pty_manager::PtyManager;
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -99,6 +101,11 @@ fn make_pty_callback(
 ) -> impl Fn(String) + Send + 'static {
     move |data: String| {
         let _ = app.emit(&format!("terminal-output-{}", tab_id), data.clone());
+        // Forward OSC titles separately as a reliable status-data channel. xterm
+        // also parses the raw sequence, but WebKit can suppress title callbacks.
+        if let Some((title, _)) = crate::output_parser::extract_osc_title(&data) {
+            let _ = app.emit(&format!("terminal-title-{}", tab_id), title);
+        }
         // OSC 9 / 777 (notifications) + OSC 9;4 (progress): emit events for frontend to surface.
         let (notifications, progress) = crate::output_parser::extract_notifications_and_progress(&data);
         if !notifications.is_empty() || !progress.is_empty() {
@@ -314,6 +321,115 @@ pub fn get_git_branch(cwd: String) -> Option<String> {
     } else {
         None
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSessionStats {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_input_tokens: u64,
+    pub model_context_window: u64,
+    pub plan_type: Option<String>,
+}
+
+static CODEX_SESSION_PATHS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+
+fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
+    let cache = CODEX_SESSION_PATHS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(path) = cache.lock().ok()?.get(session_id).cloned() {
+        if path.exists() { return Some(path); }
+    }
+
+    // Codex truncates thread IDs to 32 title characters. Accept either a full
+    // UUID or its long hexadecimal prefix; validation prevents arbitrary probes.
+    let search_id = session_id.strip_suffix("...").unwrap_or(session_id);
+    let valid_prefix = search_id.len() >= 20
+        && search_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
+    if !valid_prefix || (!session_id.ends_with("...") && Uuid::parse_str(session_id).is_err()) {
+        return None;
+    }
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|value| PathBuf::from(value).join(".codex"))
+        })?;
+    let root = home.join("sessions");
+    let mut pending = vec![root];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+                && path.file_name().and_then(|value| value.to_str())
+                    .is_some_and(|name| name.contains(search_id))
+            {
+                if let Ok(mut paths) = cache.lock() {
+                    paths.insert(session_id.to_string(), path.clone());
+                }
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Read only the tail of Codex's rollout JSONL and return the newest token event.
+/// This supplements fields its native status-line API does not expose (cache and
+/// subscription metadata); no conversation content leaves the backend.
+#[tauri::command]
+pub fn get_codex_session_stats(session_id: String) -> Option<CodexSessionStats> {
+    let path = find_codex_session_file(&session_id)?;
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    const TAIL_BYTES: u64 = 2 * 1024 * 1024;
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    if start > 0 {
+        text = text.split_once('\n').map(|(_, rest)| rest.to_string())?;
+    }
+
+    for line in text.lines().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Some(payload) = value.get("payload") else { continue };
+        if payload.get("type").and_then(|value| value.as_str()) != Some("token_count") {
+            continue;
+        }
+        let Some(info) = payload.get("info") else { continue };
+        let Some(usage) = info.get("total_token_usage") else { continue };
+        return Some(CodexSessionStats {
+            input_tokens: usage
+                .get("input_tokens")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            cached_input_tokens: usage
+                .get("cached_input_tokens")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            cache_write_input_tokens: usage
+                .get("cache_write_input_tokens")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            model_context_window: info
+                .get("model_context_window")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            plan_type: payload
+                .get("rate_limits")
+                .and_then(|value| value.get("plan_type"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        });
+    }
+    None
 }
 
 #[tauri::command]

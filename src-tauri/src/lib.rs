@@ -49,6 +49,263 @@ fn install_pi_task_duration_extension() {
     }
 }
 
+/// Install AI Terminal's managed Claude status line for every desktop user.
+/// Existing third-party status lines are left untouched; once our command owns
+/// the slot, future app versions can safely refresh the managed script.
+fn install_claude_status_line() {
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| std::path::PathBuf::from(home).join(".claude"))
+        });
+    let Some(config_dir) = config_dir else { return };
+
+    #[cfg(target_os = "windows")]
+    const SCRIPT_NAME: &str = "ai-terminal-statusline.ps1";
+    #[cfg(target_os = "windows")]
+    const SCRIPT_SOURCE: &str = include_str!("../resources/claude-statusline.ps1");
+    #[cfg(not(target_os = "windows"))]
+    const SCRIPT_NAME: &str = "ai-terminal-statusline.sh";
+    #[cfg(not(target_os = "windows"))]
+    const SCRIPT_SOURCE: &str = include_str!("../resources/claude-statusline.sh");
+
+    if let Err(err) = std::fs::create_dir_all(&config_dir) {
+        eprintln!("Failed to create Claude config directory: {}", err);
+        return;
+    }
+    let script_path = config_dir.join(SCRIPT_NAME);
+    if let Err(err) = std::fs::write(&script_path, SCRIPT_SOURCE) {
+        eprintln!("Failed to install Claude status-line script: {}", err);
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+    }
+
+    #[cfg(target_os = "windows")]
+    let command = format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+        script_path.to_string_lossy()
+    );
+    #[cfg(not(target_os = "windows"))]
+    let command = {
+        let quoted = script_path.to_string_lossy().replace('\'', "'\"'\"'");
+        format!("sh '{}'", quoted)
+    };
+
+    let settings_path = config_dir.join("settings.json");
+    let mut settings = if settings_path.exists() {
+        match std::fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        {
+            Some(value) => value,
+            None => {
+                eprintln!("Claude settings.json is invalid; status line was not configured");
+                return;
+            }
+        }
+    } else {
+        serde_json::json!({})
+    };
+    let Some(object) = settings.as_object_mut() else {
+        eprintln!("Claude settings.json is not an object; status line was not configured");
+        return;
+    };
+
+    let existing_command = object
+        .get("statusLine")
+        .and_then(|value| value.get("command"))
+        .and_then(|value| value.as_str());
+    let managed = existing_command
+        .map(|value| {
+            value.contains("ai-terminal-statusline.sh")
+                || value.contains("ai-terminal-statusline.ps1")
+        })
+        .unwrap_or(false);
+    if existing_command.is_some() && !managed {
+        eprintln!("Claude already has a custom status line; leaving it unchanged");
+        return;
+    }
+    if settings_path.exists() && !managed {
+        let backup_path = config_dir.join("settings.json.ai-terminal.bak");
+        if !backup_path.exists() {
+            let _ = std::fs::copy(&settings_path, backup_path);
+        }
+    }
+
+    object.insert(
+        "statusLine".into(),
+        serde_json::json!({ "type": "command", "command": command }),
+    );
+    match serde_json::to_string_pretty(&settings) {
+        Ok(text) => {
+            if let Err(err) = std::fs::write(&settings_path, text + "\n") {
+                eprintln!("Failed to configure Claude status line: {}", err);
+            }
+        }
+        Err(err) => eprintln!("Failed to serialize Claude settings: {}", err),
+    }
+}
+
+/// Configure Codex's native status line without replacing a user's existing
+/// custom selection. Codex does not expose arbitrary footer renderers, but its
+/// built-in items provide live model, effort, Fast, token and context data.
+fn install_codex_status_line() {
+    // Keep the native line useful when Codex runs outside AI Terminal. Inside
+    // AI Terminal these same values are rearranged into a split footer.
+    const ITEMS: &[&str] = &[
+        "total-input-tokens",
+        "total-output-tokens",
+        "context-window-size",
+        "context-used",
+        "five-hour-limit",
+        "weekly-limit",
+        "task-progress",
+        "model-with-reasoning",
+        "fast-mode",
+    ];
+    const PREVIOUS_ITEMS: &[&str] = &[
+        "model-with-reasoning",
+        "fast-mode",
+        "total-input-tokens",
+        "total-output-tokens",
+        "context-used",
+    ];
+    // OSC title is a machine-readable live-data channel for the frontend. The
+    // app-name marker prevents ordinary shell titles from activating the footer.
+    const TITLE_ITEMS: &[&str] = &[
+        "app-name",
+        "model-with-reasoning",
+        "fast-mode",
+        "total-input-tokens",
+        "total-output-tokens",
+        "context-used",
+        "five-hour-limit",
+        "weekly-limit",
+        "run-state",
+        "task-progress",
+        "thread-id",
+    ];
+    const PREVIOUS_TITLE_ITEMS: &[&str] = &[
+        "app-name",
+        "model-with-reasoning",
+        "fast-mode",
+        "total-input-tokens",
+        "total-output-tokens",
+        "context-used",
+        "five-hour-limit",
+        "weekly-limit",
+        "run-state",
+        "task-progress",
+    ];
+
+    let codex_dir = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| std::path::PathBuf::from(home).join(".codex"))
+        });
+    let Some(codex_dir) = codex_dir else { return };
+    if let Err(err) = std::fs::create_dir_all(&codex_dir) {
+        eprintln!("Failed to create Codex config directory: {}", err);
+        return;
+    }
+
+    let config_path = codex_dir.join("config.toml");
+    let source = if config_path.exists() {
+        match std::fs::read_to_string(&config_path) {
+            Ok(source) => source,
+            Err(err) => {
+                eprintln!("Failed to read Codex config: {}", err);
+                return;
+            }
+        }
+    } else {
+        String::new()
+    };
+    let mut document = match source.parse::<toml_edit::DocumentMut>() {
+        Ok(document) => document,
+        Err(err) => {
+            eprintln!("Codex config.toml is invalid; status line was not configured: {}", err);
+            return;
+        }
+    };
+
+    if !document.as_table().contains_key("tui") {
+        document["tui"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let existing_items = document["tui"]
+        .get("status_line")
+        .and_then(toml_edit::Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(toml_edit::Value::as_str)
+                .collect::<Vec<_>>()
+        });
+    let managed = existing_items
+        .as_ref()
+        .map(|items| items.as_slice() == ITEMS || items.as_slice() == PREVIOUS_ITEMS)
+        .unwrap_or(false);
+    if existing_items.is_some() && !managed {
+        eprintln!("Codex already has a custom status line; leaving it unchanged");
+        return;
+    }
+
+    if config_path.exists() && !managed {
+        let backup_path = codex_dir.join("config.toml.ai-terminal.bak");
+        if !backup_path.exists() {
+            let _ = std::fs::copy(&config_path, backup_path);
+        }
+    }
+
+    let Some(tui) = document["tui"].as_table_like_mut() else {
+        eprintln!("Codex [tui] config is not a table; status line was not configured");
+        return;
+    };
+    let mut items = toml_edit::Array::new();
+    for item in ITEMS {
+        items.push(*item);
+    }
+    tui.insert("status_line", toml_edit::value(items));
+    if !tui.contains_key("status_line_use_colors") {
+        tui.insert("status_line_use_colors", toml_edit::value(true));
+    }
+
+    let existing_title = tui
+        .get("terminal_title")
+        .and_then(toml_edit::Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(toml_edit::Value::as_str)
+                .collect::<Vec<_>>()
+        });
+    let managed_title = existing_title
+        .as_ref()
+        .map(|items| {
+            items.as_slice() == TITLE_ITEMS || items.as_slice() == PREVIOUS_TITLE_ITEMS
+        })
+        .unwrap_or(false);
+    if existing_title.is_none() || managed_title {
+        let mut title_items = toml_edit::Array::new();
+        for item in TITLE_ITEMS {
+            title_items.push(*item);
+        }
+        tui.insert("terminal_title", toml_edit::value(title_items));
+    }
+
+    if let Err(err) = std::fs::write(&config_path, document.to_string()) {
+        eprintln!("Failed to configure Codex status line: {}", err);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Create .lproj directories next to binary so macOS recognizes Chinese localization
@@ -73,6 +330,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             install_pi_task_duration_extension();
+            install_claude_status_line();
+            install_codex_status_line();
             app.manage(Arc::new(RwLock::new(PtyManager::new())));
             let parser = Arc::new(Mutex::new(OutputParser::new()));
             app.manage(parser.clone());
@@ -267,6 +526,7 @@ pub fn run() {
             commands::load_quick_commands,
             commands::save_quick_commands,
             commands::get_git_branch,
+            commands::get_codex_session_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Terminal");

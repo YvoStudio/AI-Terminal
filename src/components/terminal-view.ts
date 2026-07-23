@@ -5,7 +5,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { api } from '../api';
+import { api, type CodexSessionStats } from '../api';
 import { appState } from './app-state';
 import { themes } from './themes';
 import { isWindows, getDefaultFontSize, getPlatformFonts } from '../platform';
@@ -25,6 +25,17 @@ export class TerminalView {
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private scrollBtn: HTMLElement;
   private scrollCheckTimer: ReturnType<typeof setInterval> | null = null;
+  // Codex can publish live status values through OSC 0 terminal-title updates,
+  // but its native status line cannot split metrics left and identity right.
+  // AI Terminal paints those values over Codex's footer row for parity with
+  // the Claude and Pi footers while leaving Codex in full control of the TUI.
+  private codexStatusOverlay: HTMLElement;
+  private codexStatusTitle = '';
+  private codexContextWindow = '';
+  private codexStats: CodexSessionStats | null = null;
+  private codexStatsSession = '';
+  private codexStatsFetchedAt = 0;
+  private codexStatsLoading = false;
 
   // Per-pane note-block (文本块) entry + floating panel. Built inside the wrapper
   // like the scroll button so every visible terminal — including each split pane
@@ -41,6 +52,10 @@ export class TerminalView {
   private mouseSelectionInProgress = false;
   private userScrolledUp = false;
   private lastWheelAt = 0; // ms of the last wheel event — gates the resync backstop off active scrolling.
+  // Fractional rows accumulated from trackpad pixel deltas. Host-scrolled AI
+  // sessions consume wheel input themselves so xterm can never turn it into
+  // Up/Down input-history navigation.
+  private wheelLineRemainder = 0;
   // ms of the last handled image paste. macOS' webview occasionally dispatches
   // two `paste` events for a single Cmd+V; without this guard the second one
   // re-runs the whole save→clipboard→bracketed-paste flow, so Claude reads the
@@ -142,15 +157,20 @@ export class TerminalView {
     }
   }
 
-  /** AI TUIs are keyboard-driven; if one (or untrusted command output) leaves a
-   * DEC mouse-reporting mode enabled, xterm hands drag/wheel events to the PTY
-   * and disables normal selection/scrolling for that tab. Reset only the mouse
-   * modes, locally in xterm, so host mouse interaction remains available. */
-  private restoreHostMouse() {
+  /** Whether scrolling/selection should be owned by xterm rather than the TUI. */
+  private needsHostMouse(): boolean {
     const aiTool = appState.tabs.get(this.tabId)?.aiTool;
-    const keyboardDrivenAgent = aiTool === 'claude' || aiTool === 'codex'
-      || aiTool === 'aider' || aiTool === 'opencode' || aiTool === 'pi';
-    if (keyboardDrivenAgent && this.terminal.modes.mouseTrackingMode !== 'none') {
+    return aiTool === 'codex' || aiTool === 'aider'
+      || aiTool === 'opencode' || aiTool === 'pi';
+  }
+
+  /** Most AI TUIs are keyboard-driven; if one (or untrusted command output)
+   * leaves DEC mouse reporting enabled, xterm hands drag/wheel events to the PTY
+   * and disables normal selection/scrolling for that tab. Claude is the exception:
+   * it uses mouse reports to scroll its transcript. Disabling them makes xterm
+   * translate wheel movement into arrow keys, which browses Claude's input history. */
+  private restoreHostMouse() {
+    if (this.needsHostMouse() && this.terminal.modes.mouseTrackingMode !== 'none') {
       this.terminal.write(
         '\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l'
         + '\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l'
@@ -159,6 +179,16 @@ export class TerminalView {
   }
 
   private writeOutput(data: string) {
+    // Read Codex's OSC status payload directly from the same PTY chunk before
+    // xterm consumes it. This is more reliable than WebKit's title callback,
+    // which can be suppressed when the native window title is managed by Tauri.
+    const titlePattern = /\x1b\](?:0|2);([^\x07]*?)(?:\x07|\x1b\\)/g;
+    let titleMatch: RegExpExecArray | null;
+    while ((titleMatch = titlePattern.exec(data)) !== null) {
+      if (titleMatch[1].trim().toLowerCase().startsWith('codex |')) {
+        this.updateCodexStatus(titleMatch[1].trim());
+      }
+    }
     // Check after parsing each chunk: DEC modes take effect during write().
     this.terminal.write(data, () => this.restoreHostMouse());
   }
@@ -226,6 +256,50 @@ export class TerminalView {
     this.terminal.loadAddon(this.searchAddon);
     this.terminal.loadAddon(this.serializeAddon);
     this.terminal.open(this.wrapper);
+
+    this.codexStatusOverlay = document.createElement('div');
+    this.codexStatusOverlay.className = 'codex-status-overlay';
+    this.codexStatusOverlay.setAttribute('aria-hidden', 'true');
+    this.wrapper.appendChild(this.codexStatusOverlay);
+    this.terminal.onTitleChange((title) => this.updateCodexStatus(title));
+    api.onTerminalTitle(tabId, title => this.updateCodexStatus(title)).catch(() => {});
+
+    // Wheel input must never become synthetic Up/Down keypresses (shell/agent
+    // prompt history). For host-scrolled AI sessions, handle every wheel event
+    // ourselves so it can only move through xterm output; this also prevents a
+    // briefly re-enabled DEC mouse mode from forwarding the event to the TUI.
+    // Other sessions keep native viewport or mouse-protocol scrolling, but a
+    // wheel over an empty scrollback is consumed instead of becoming arrow keys.
+    // Claude therefore keeps receiving mouse reports to scroll its transcript.
+    this.terminal.attachCustomWheelEventHandler((e) => {
+      if (!this.needsHostMouse()) {
+        const tuiOwnsWheel = this.terminal.modes.mouseTrackingMode !== 'none';
+        const hasScrollback = this.terminal.buffer.active.baseY > 0;
+        if (tuiOwnsWheel || hasScrollback) return true;
+        e.preventDefault();
+        return false;
+      }
+
+      e.preventDefault();
+      if (e.deltaY === 0 || e.shiftKey) return false;
+
+      const lineHeight = Math.max(
+        1,
+        (this.terminal.options.fontSize ?? 14) * (this.terminal.options.lineHeight ?? 1),
+      );
+      const lines = e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? e.deltaY * this.terminal.rows
+        : e.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? e.deltaY
+          : e.deltaY / lineHeight;
+      this.wheelLineRemainder += lines;
+      const wholeLines = Math.trunc(this.wheelLineRemainder);
+      if (wholeLines !== 0) {
+        this.wheelLineRemainder -= wholeLines;
+        this.terminal.scrollLines(wholeLines);
+      }
+      return false;
+    });
 
     // Restore scrollback from previous session (skip in Quick Terminal mode — ephemeral)
     const isQuick = new URLSearchParams(location.search).get('quick') === '1';
@@ -407,6 +481,18 @@ export class TerminalView {
             api.writeTerminal(tabId, isAgent ? '\x03' : '\x15');
             appState.clearPromptDirty(tabId);
           }
+        }
+        e.preventDefault();
+        return false;
+      }
+
+      // Cmd/Ctrl+Delete: delete from the cursor through the end of the current
+      // line. Ctrl+K is the standard readline and AI-TUI binding for this action.
+      // Intercept before Kitty encoding so Cmd and Ctrl behave identically.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'Delete') {
+        if (e.type === 'keydown') {
+          api.markTerminalInput(tabId);
+          api.writeTerminal(tabId, '\x0b');
         }
         e.preventDefault();
         return false;
@@ -978,6 +1064,7 @@ export class TerminalView {
   applyTheme(index: number) {
     const t = themes[index];
     if (t) this.terminal.options.theme = t.theme;
+    this.layoutCodexStatus();
   }
 
   setFontSize(size: number) {
@@ -1018,6 +1105,181 @@ export class TerminalView {
     return fontMap[family] || `${fonts.mono}, ${cn}, monospace`;
   }
 
+  /** Render AI Terminal's Codex footer from the managed OSC title payload.
+   * Payload order is configured by install_codex_status_line in the backend;
+   * unavailable rate-limit/task fields are simply omitted by Codex. */
+  private updateCodexStatus(title: string) {
+    this.codexStatusTitle = title;
+    const parts = title.split(' | ').map(part => part.trim()).filter(Boolean);
+    if (parts[0]?.toLowerCase() !== 'codex' || parts.length < 2) {
+      this.codexStatusOverlay.classList.remove('visible');
+      return;
+    }
+
+    const model = parts[1];
+    const values = parts.slice(2);
+    const input = values.find(value => /^\S+ in$/i.test(value));
+    const output = values.find(value => /^\S+ out$/i.test(value));
+    const context = values.find(value => /^Context /i.test(value));
+    const fast = values.find(value => /^Fast (?:on|off)$/i.test(value));
+    const runState = values.find(value => /^(?:Ready|Starting|Working|Waiting|Thinking)$/i.test(value));
+    const limits = values.filter(value => /% left$/i.test(value));
+    const task = values.find(value => /(?:task|step|plan)|\d+\s*\/\s*\d+/i.test(value));
+    const sessionId = values.find(value =>
+      /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)
+      || /^[0-9a-f-]{20,32}\.\.\.$/i.test(value)
+    );
+    if (sessionId) this.refreshCodexSessionStats(sessionId);
+
+    const leftValues: Array<{ text: string; kind?: string }> = [];
+    if (input) leftValues.push({ text: `↑${input.replace(/ in$/i, '')}` });
+    if (output) leftValues.push({ text: `↓${output.replace(/ out$/i, '')}` });
+    if (this.codexStats) {
+      const stats = this.codexStats;
+      leftValues.push({ text: `R${this.formatCodexTokens(stats.cachedInputTokens)}`, kind: 'cache' });
+      if (stats.cacheWriteInputTokens > 0) {
+        leftValues.push({ text: `W${this.formatCodexTokens(stats.cacheWriteInputTokens)}`, kind: 'cache' });
+      }
+      const hitRate = stats.inputTokens > 0
+        ? (stats.cachedInputTokens / stats.inputTokens) * 100
+        : 0;
+      leftValues.push({ text: `CH${hitRate.toFixed(1)}%`, kind: 'cache' });
+      if (stats.planType) leftValues.push({ text: `(${stats.planType})`, kind: 'optional' });
+      if (stats.modelContextWindow > 0) {
+        this.codexContextWindow = this.formatCodexTokens(stats.modelContextWindow);
+      }
+    }
+    if (context) {
+      const compactContext = this.codexContextWindow
+        ? context.replace(/^Context (\d+)% used$/i, `Context $1%/${this.codexContextWindow}`)
+        : context;
+      leftValues.push({ text: compactContext, kind: 'context' });
+    }
+    for (const limit of limits) leftValues.push({ text: limit, kind: 'optional' });
+    if (task) leftValues.push({ text: task, kind: 'optional' });
+    if (runState) leftValues.push({ text: runState, kind: 'optional' });
+
+    const left = document.createElement('span');
+    left.className = 'codex-status-left';
+    leftValues.forEach((value, index) => {
+      if (index > 0) {
+        const separator = document.createElement('span');
+        separator.className = 'codex-status-separator';
+        separator.textContent = index === 1 ? ' ' : ' · ';
+        left.appendChild(separator);
+      }
+      const span = document.createElement('span');
+      span.className = `codex-status-value${value.kind ? ` ${value.kind}` : ''}`;
+      span.textContent = value.text;
+      left.appendChild(span);
+    });
+
+    const right = document.createElement('span');
+    right.className = 'codex-status-right';
+    const agent = document.createElement('span');
+    agent.className = 'codex-status-agent';
+    agent.textContent = 'Codex';
+    const separator = document.createElement('span');
+    separator.className = 'codex-status-separator';
+    separator.textContent = ' · ';
+    const modelEl = document.createElement('span');
+    modelEl.className = 'codex-status-model';
+    modelEl.textContent = model;
+    right.append(agent, separator, modelEl);
+    if (fast) {
+      const fastSeparator = document.createElement('span');
+      fastSeparator.className = 'codex-status-separator';
+      fastSeparator.textContent = ' · ';
+      const fastEl = document.createElement('span');
+      fastEl.className = `codex-status-fast${fast.endsWith('on') ? ' active' : ''}`;
+      fastEl.textContent = fast;
+      right.append(fastSeparator, fastEl);
+    }
+
+    this.codexStatusOverlay.replaceChildren(left, right);
+    this.codexStatusOverlay.classList.add('visible');
+    this.layoutCodexStatus();
+    this.captureCodexContextWindow();
+  }
+
+  private formatCodexTokens(value: number): string {
+    if (value >= 1_000_000) {
+      const scaled = value / 1_000_000;
+      return `${scaled < 10 ? scaled.toFixed(1) : Math.round(scaled)}M`;
+    }
+    if (value >= 1_000) {
+      const scaled = value / 1_000;
+      return `${scaled < 10 ? scaled.toFixed(1) : Math.round(scaled)}k`;
+    }
+    return String(value);
+  }
+
+  private refreshCodexSessionStats(sessionId: string) {
+    const now = Date.now();
+    if (this.codexStatsSession !== sessionId) {
+      this.codexStatsSession = sessionId;
+      this.codexStats = null;
+      this.codexStatsFetchedAt = 0;
+    }
+    if (this.codexStatsLoading || now - this.codexStatsFetchedAt < 1000) return;
+    this.codexStatsLoading = true;
+    this.codexStatsFetchedAt = now;
+    api.getCodexSessionStats(sessionId)
+      .then(stats => {
+        if (this.codexStatsSession !== sessionId || !stats) return;
+        this.codexStats = stats;
+        this.updateCodexStatus(this.codexStatusTitle);
+      })
+      .catch(() => {})
+      .finally(() => { this.codexStatsLoading = false; });
+  }
+
+  /** `context-window-size` exists only as a status-line item, not a terminal
+   * title item. Read it back from Codex's underlying (covered) footer row. */
+  private captureCodexContextWindow() {
+    setTimeout(() => {
+      const buffer = this.terminal.buffer.active;
+      const first = Math.max(0, buffer.viewportY + this.terminal.rows - 4);
+      const last = buffer.viewportY + this.terminal.rows;
+      let windowSize = '';
+      for (let row = first; row < last; row++) {
+        const text = buffer.getLine(row)?.translateToString(true) ?? '';
+        const match = /(?:^|[·| ]+)([\d.]+[kKmM]?) window(?:$|[·| ]+)/.exec(text);
+        if (match) { windowSize = match[1]; break; }
+      }
+      if (windowSize && windowSize !== this.codexContextWindow) {
+        this.codexContextWindow = windowSize;
+        this.updateCodexStatus(this.codexStatusTitle);
+      }
+    }, 0);
+  }
+
+  /** Align the overlay exactly to xterm's final cell row, including centered
+   * sub-cell width and split-pane layouts. */
+  private layoutCodexStatus() {
+    if (!this.codexStatusOverlay?.classList.contains('visible')) return;
+    const screen = this.terminal.element?.querySelector('.xterm-screen') as HTMLElement | null;
+    if (!screen || this.terminal.rows < 1) return;
+    const wrapperRect = this.wrapper.getBoundingClientRect();
+    const screenRect = screen.getBoundingClientRect();
+    const cellHeight = screenRect.height / this.terminal.rows;
+    const theme = this.terminal.options.theme;
+    Object.assign(this.codexStatusOverlay.style, {
+      left: `${screenRect.left - wrapperRect.left}px`,
+      top: `${screenRect.bottom - wrapperRect.top - cellHeight}px`,
+      width: `${screenRect.width}px`,
+      height: `${cellHeight}px`,
+      fontFamily: String(this.terminal.options.fontFamily ?? 'monospace'),
+      fontSize: `${this.terminal.options.fontSize ?? 14}px`,
+      background: theme?.background ?? '#ffffff',
+      color: theme?.foreground ?? '#333333',
+    });
+    // Re-render on resize so width-based optional-field hiding updates now,
+    // rather than waiting for Codex to publish another title.
+    if (this.codexStatusTitle) this.codexStatusOverlay.dataset.compact =
+      screenRect.width < 760 ? 'narrow' : screenRect.width < 1050 ? 'medium' : 'wide';
+  }
+
   fit() {
     try {
       const buf = this.terminal.buffer.active;
@@ -1025,6 +1287,7 @@ export class TerminalView {
 
       this.fitAddon.fit();
       this.centerScreen();
+      this.layoutCodexStatus();
       api.resizeTerminal(this.tabId, this.terminal.cols, this.terminal.rows);
 
       // If user hasn't scrolled up, always stay at bottom
