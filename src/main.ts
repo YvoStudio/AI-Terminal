@@ -1007,6 +1007,17 @@ function addNoteBlock(tabId: string, content = '') {
   tab.noteBlocks.push({ id: `b${++blockCounter}`, content });
   renderNoteBlocks(tabId, true);
   appState.persistTabs();
+
+  // The add button is pinned outside the scrolling list. Keep the newly added
+  // task visible instead of restoring the previous scroll position and leaving
+  // it hidden below the fold. Wait for textarea auto-sizing to finish first so
+  // scrollHeight reflects the final card heights.
+  const container = terminalViews.get(tabId)?.notepadBlocksEl;
+  if (container) {
+    requestAnimationFrame(() => {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    });
+  }
 }
 function removeNoteBlock(tabId: string, blockId: string) {
   const tab = appState.tabs.get(tabId);
@@ -2829,47 +2840,81 @@ document.addEventListener('mouseup', (e) => {
   }
 });
 
-// Keyboard shortcuts
+// Keyboard shortcuts. Listen in capture phase so xterm's hidden textarea (the
+// focused element during normal terminal use) cannot consume these first.
 document.addEventListener('keydown', (e) => {
-  const activeElement = document.activeElement;
-  const isInputElement = activeElement?.tagName === 'INPUT' || 
-                        activeElement?.tagName === 'TEXTAREA' ||
-                        (activeElement as HTMLElement)?.contentEditable === 'true';
-                        
-  // 如果是输入元素，则不要处理快捷键
-  if (isInputElement) {
+  const key = e.key.toLowerCase();
+  const isCtrl = e.ctrlKey || e.metaKey;
+  const consumeShortcut = () => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  // These panel shortcuts remain available even when a real form control has
+  // focus, so the panel can always be opened/closed again.
+  if (e.altKey && key === 'k') {
+    consumeShortcut();
+    toggleTipsPanel();
     return;
   }
-  
-  const isCtrl = e.ctrlKey || e.metaKey;
-  if (isCtrl && e.key === 't') { e.preventDefault(); createTab(); }
-  else if (isCtrl && e.key === 'w') { e.preventDefault(); if (appState.activeTabId) closeTab(appState.activeTabId); }
-  else if (isCtrl && e.key === 'f') { e.preventDefault(); if (appState.activeTabId) { const v = terminalViews.get(appState.activeTabId); if (v) v.toggleSearch(); } }
-  else if (e.altKey && e.key === 'k') { e.preventDefault(); toggleTipsPanel(); }
-  else if (e.key === 'Escape' && _tipsOpen) { e.preventDefault(); closeTipsPanel(); }
-  else if (isCtrl && e.key === 'Tab') { e.preventDefault(); if (e.shiftKey) appState.switchToPrev(); else appState.switchToNext(); if (appState.activeTabId) switchToTab(appState.activeTabId); }
-  else if (isCtrl && e.shiftKey && e.key === 'p') { e.preventDefault(); toggleCommandPalette(); }
-  // Cmd/Ctrl+Shift+ArrowUp: copy last command output to clipboard
-  else if (isCtrl && e.shiftKey && e.key === 'ArrowUp') {
-    e.preventDefault();
-    if (!appState.activeTabId) return;
-    const view = terminalViews.get(appState.activeTabId);
-    const text = view?.getLastBlockText();
-    if (text) navigator.clipboard.writeText(text).catch(() => {});
+  if (e.key === 'Escape' && _tipsOpen) {
+    consumeShortcut();
+    closeTipsPanel();
+    return;
   }
-  // Cmd/Ctrl+Shift+O: send last command output to Notepad
-  else if (isCtrl && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
-    e.preventDefault();
+
+  const activeElement = document.activeElement as HTMLElement | null;
+  const isXtermHelper = !!activeElement?.closest('.xterm');
+  const isInputElement = !isXtermHelper && (
+    activeElement?.tagName === 'INPUT'
+    || activeElement?.tagName === 'TEXTAREA'
+    || activeElement?.tagName === 'SELECT'
+    || activeElement?.contentEditable === 'true'
+  );
+  // Preserve normal editing shortcuts in task blocks, search fields, dialogs,
+  // etc. The xterm helper textarea is excluded because it is the terminal, not
+  // a user-visible text field.
+  if (isInputElement) return;
+
+  if (isCtrl && key === 't') {
+    consumeShortcut();
+    createTab();
+  } else if (isCtrl && key === 'w') {
+    consumeShortcut();
+    if (appState.activeTabId) closeTab(appState.activeTabId);
+  } else if (isCtrl && key === 'f') {
+    consumeShortcut();
+    if (appState.activeTabId) terminalViews.get(appState.activeTabId)?.toggleSearch();
+  } else if (isCtrl && e.key === 'Tab') {
+    consumeShortcut();
+    if (e.shiftKey) appState.switchToPrev(); else appState.switchToNext();
+    if (appState.activeTabId) switchToTab(appState.activeTabId);
+  } else if (isCtrl && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
+    // Advertised in the tips panel as Ctrl+[ / Ctrl+]. Use code so it also
+    // works when a keyboard layout changes the character produced by the key.
+    consumeShortcut();
+    if (e.code === 'BracketLeft') appState.switchToPrev(); else appState.switchToNext();
+    if (appState.activeTabId) switchToTab(appState.activeTabId);
+  } else if (isCtrl && e.shiftKey && key === 'p') {
+    consumeShortcut();
+    toggleCommandPalette();
+  // Cmd/Ctrl+Shift+ArrowUp: copy last command output to clipboard
+  } else if (isCtrl && e.shiftKey && e.key === 'ArrowUp') {
+    consumeShortcut();
     if (!appState.activeTabId) return;
-    const view = terminalViews.get(appState.activeTabId);
-    const text = view?.getLastBlockText();
+    const text = terminalViews.get(appState.activeTabId)?.getLastBlockText();
+    if (text) navigator.clipboard.writeText(text).catch(() => {});
+  // Cmd/Ctrl+Shift+O: send last command output to Notepad
+  } else if (isCtrl && e.shiftKey && key === 'o') {
+    consumeShortcut();
+    if (!appState.activeTabId) return;
+    const text = terminalViews.get(appState.activeTabId)?.getLastBlockText();
     if (!text) return;
     openActiveNotepad();
     addNoteBlock(appState.activeTabId, text);
-  }
   // Cmd/Ctrl+Shift+N: append current terminal selection as a new Notepad block
-  else if (isCtrl && e.shiftKey && (e.key === 'n' || e.key === 'N')) {
-    e.preventDefault();
+  } else if (isCtrl && e.shiftKey && key === 'n') {
+    consumeShortcut();
     if (!appState.activeTabId) return;
     const view = terminalViews.get(appState.activeTabId);
     const sel = view?.terminal.getSelection();
@@ -2877,15 +2922,13 @@ document.addEventListener('keydown', (e) => {
     openActiveNotepad();
     addNoteBlock(appState.activeTabId, sel);
     view?.terminal.clearSelection();
-  }
-  else if (isCtrl && e.key >= '1' && e.key <= '9') {
-    e.preventDefault();
-    const idx = parseInt(e.key) - 1;
+  } else if (isCtrl && key >= '1' && key <= '9') {
+    consumeShortcut();
+    const idx = parseInt(key) - 1;
     if (idx < appState.tabOrder.length) switchToTab(appState.tabOrder[idx]);
-  }
   // Split shortcuts
-  else if (isCtrl && e.key === '\\') {
-    e.preventDefault();
+  } else if (isCtrl && e.code === 'Backslash') {
+    consumeShortcut();
     if (appState.splitState) {
       exitSplitMode();
     } else if (appState.tabOrder.length >= 2 && appState.activeTabId) {
@@ -2893,15 +2936,14 @@ document.addEventListener('keydown', (e) => {
       const nextIdx = (idx + 1) % appState.tabOrder.length;
       splitWith(appState.tabOrder[nextIdx], e.shiftKey ? 'top-bottom' : 'left-right');
     }
-  }
-  else if (e.altKey && appState.splitState) {
+  } else if (e.altKey && appState.splitState) {
     // Alt+Arrow to move between panes
     const layout = appState.splitState.layout;
     const active = appState.splitState.activePaneIndex;
     const count = appState.splitState.panes.length;
     let target = -1;
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-      e.preventDefault();
+      consumeShortcut();
       if (layout === 'left-right') {
         if (e.key === 'ArrowLeft') target = 0;
         else if (e.key === 'ArrowRight') target = 1;
@@ -2920,7 +2962,7 @@ document.addEventListener('keydown', (e) => {
       }
     }
   }
-});
+}, true);
 
 // Command palette (Cmd+Shift+P)
 let paletteEl: HTMLElement | null = null;

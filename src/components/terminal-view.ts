@@ -264,25 +264,34 @@ export class TerminalView {
     this.terminal.onTitleChange((title) => this.updateCodexStatus(title));
     api.onTerminalTitle(tabId, title => this.updateCodexStatus(title)).catch(() => {});
 
-    // Wheel input must never become synthetic Up/Down keypresses (shell/agent
-    // prompt history). For host-scrolled AI sessions, handle every wheel event
-    // ourselves so it can only move through xterm output; this also prevents a
-    // briefly re-enabled DEC mouse mode from forwarding the event to the TUI.
-    // Other sessions keep native viewport or mouse-protocol scrolling, but a
-    // wheel over an empty scrollback is consumed instead of becoming arrow keys.
-    // Claude therefore keeps receiving mouse reports to scroll its transcript.
+    // Prefer xterm's scrollback whenever it contains context. Some AI TUIs
+    // (notably Claude) leave DEC mouse reporting enabled even though their
+    // conversation is already in xterm's normal-buffer history; forwarding the
+    // wheel to the PTY in that state makes the visible context appear frozen.
+    // Only let a TUI own the wheel when there is no host scrollback to browse.
+    // Otherwise use xterm's native viewport handler, or scroll it ourselves when
+    // active mouse reporting would bypass that handler. An empty host-owned
+    // buffer consumes the event so xterm cannot turn it into Up/Down prompt
+    // history keypresses.
     this.terminal.attachCustomWheelEventHandler((e) => {
-      if (!this.needsHostMouse()) {
-        const tuiOwnsWheel = this.terminal.modes.mouseTrackingMode !== 'none';
-        const hasScrollback = this.terminal.buffer.active.baseY > 0;
-        if (tuiOwnsWheel || hasScrollback) return true;
+      const tuiOwnsWheel = this.terminal.modes.mouseTrackingMode !== 'none';
+      const hasScrollback = this.terminal.buffer.active.baseY > 0;
+
+      if (!hasScrollback) {
+        if (tuiOwnsWheel && !this.needsHostMouse()) return true;
         e.preventDefault();
         return false;
       }
 
+      // With mouse reporting disabled, xterm's native wheel path is the most
+      // accurate one (including platform trackpad sensitivity and momentum).
+      if (!tuiOwnsWheel) return true;
+
+      // Mouse reporting is active, so xterm would send this wheel event to the
+      // child process instead of moving its viewport. Scroll the existing host
+      // history directly and block that report.
       e.preventDefault();
       if (e.deltaY === 0 || e.shiftKey) return false;
-
       const lineHeight = Math.max(
         1,
         (this.terminal.options.fontSize ?? 14) * (this.terminal.options.lineHeight ?? 1),
