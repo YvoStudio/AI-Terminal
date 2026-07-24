@@ -162,6 +162,24 @@ impl OutputParser {
         // scrollback), so cursor blinks and title repaints don't perturb it.
         state.screen.process(raw.as_bytes());
 
+        // A tab can return to its shell and launch a different agent. Managed
+        // terminal titles are a stronger identity signal than the tab's saved
+        // ai_tool, so switch classifiers as soon as the new TUI announces
+        // itself. This also clears stale Working state from the previous agent.
+        let osc_title = extract_osc_title(raw);
+        if let Some((title, _)) = &osc_title {
+            if let Some(ai) = ai_tool_from_managed_title(title) {
+                if state.ai_tool.as_deref() != Some(ai) {
+                    eprintln!("AI switched via title: {} in tab {}", ai, tab_id);
+                    state.ai_tool = Some(ai.to_string());
+                    state.ui_state = AiUiState::Unknown;
+                    state.pending_idle = None;
+                    state.was_executing = false;
+                    on_ai_detected(tab_id.to_string(), state.cwd.clone(), ai.to_string());
+                }
+            }
+        }
+
         // Output-side AI detection (first, so subsequent logic can use ai_tool).
         // Catches Claude / Aider sessions started outside our input tracking
         // (resume, scripts, history-launched tabs). Trigger on UI markers.
@@ -190,7 +208,21 @@ impl OutputParser {
             // otherwise cause Working ↔ IdleReady oscillation. AwaitingConfirm
             // commits immediately — its pattern ("Do you want…" + numbered
             // option) doesn't appear as transient flicker.
-            let new_ui = classify_ai_ui(state.screen.screen(), state.ai_tool.as_deref());
+            // AI Terminal's bundled Pi extension emits this only from
+            // `agent_settled`, after retries/compaction/queued continuations are
+            // truly finished. Pi's final differential redraw can leave the
+            // previous spinner in our vt100 tail and omit an unchanged footer,
+            // making screen-only classification stay Working/Unknown forever.
+            // Treat the fresh completion entry as a definitive idle signal.
+            // The ordering guard rejects a full redraw of an OLD completion
+            // entry while a newer `Working...` line is active.
+            let pi_settled = state.ai_tool.as_deref() == Some("pi")
+                && has_fresh_pi_completion(raw);
+            let new_ui = if pi_settled {
+                AiUiState::IdleReady
+            } else {
+                classify_ai_ui(state.screen.screen(), state.ai_tool.as_deref())
+            };
             match new_ui {
                 AiUiState::Working => {
                     state.pending_idle = None;
@@ -227,7 +259,28 @@ impl OutputParser {
                     }
                 }
                 AiUiState::IdleReady => {
-                    if state.ui_state == AiUiState::Working {
+                    if pi_settled {
+                        // `agent_settled` is stronger than the usual visual idle
+                        // heuristic, so commit immediately rather than waiting
+                        // for another redraw that Pi may never emit.
+                        state.pending_idle = None;
+                        if state.ui_state != AiUiState::IdleReady || state.was_executing {
+                            eprintln!(
+                                "[ui-state] tab={} {:?} → IdleReady (pi agent_settled)",
+                                tab_id, state.ui_state
+                            );
+                            state.ui_state = AiUiState::IdleReady;
+                            on_ui_state(tab_id.to_string(), "idle-ready");
+                            let next = if state.was_executing {
+                                state.was_executing = false;
+                                state.last_done_unseen_ms = now;
+                                TabStatus::DoneUnseen
+                            } else {
+                                TabStatus::Waiting
+                            };
+                            on_status(tab_id.to_string(), next);
+                        }
+                    } else if state.ui_state == AiUiState::Working {
                         // Defer — commit only after debounce in commit_pending_idle().
                         match state.pending_idle {
                             Some((AiUiState::IdleReady, _)) => {}
@@ -298,8 +351,55 @@ impl OutputParser {
 
         // Parse OSC 0/2 (terminal title) — Claude Code sets this to session name
         // Format: \x1b]0;title\x07  or  \x1b]2;title\x07
-        if let Some((title, has_status_prefix)) = extract_osc_title(raw) {
+        if let Some((title, has_status_prefix)) = osc_title {
             eprintln!("OSC title detected: '{}'", title);
+
+            // Codex publishes an authoritative live state in its managed OSC
+            // title (`... | Working | ...` / `... | Ready | ...`). Its input
+            // prompt uses `›` rather than Claude's `❯`, so the generic visual
+            // classifier can recognize Working but not the final idle frame.
+            // Commit these title transitions immediately so the pinned current
+            // task and auto-send queue both finish reliably.
+            if state.ai_tool.as_deref() == Some("codex") {
+                match codex_title_ui_state(&title) {
+                    Some(AiUiState::Working) => {
+                        state.pending_idle = None;
+                        if state.ui_state != AiUiState::Working {
+                            eprintln!(
+                                "[ui-state] tab={} {:?} → Working (codex title)",
+                                tab_id, state.ui_state
+                            );
+                            state.ui_state = AiUiState::Working;
+                            on_ui_state(tab_id.to_string(), "working");
+                            if !state.was_executing {
+                                state.was_executing = true;
+                                on_status(tab_id.to_string(), TabStatus::Executing);
+                            }
+                        }
+                    }
+                    Some(AiUiState::IdleReady) => {
+                        state.pending_idle = None;
+                        if state.ui_state != AiUiState::IdleReady || state.was_executing {
+                            eprintln!(
+                                "[ui-state] tab={} {:?} → IdleReady (codex title)",
+                                tab_id, state.ui_state
+                            );
+                            state.ui_state = AiUiState::IdleReady;
+                            on_ui_state(tab_id.to_string(), "idle-ready");
+                            let next = if state.was_executing {
+                                state.was_executing = false;
+                                state.last_done_unseen_ms = now;
+                                TabStatus::DoneUnseen
+                            } else {
+                                TabStatus::Waiting
+                            };
+                            on_status(tab_id.to_string(), next);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             if state.ai_tool.is_some() && !title.is_empty() {
                 // Rename is always useful. The title's status-prefix-driven "executing"
                 // flip is kept only for non-TUI AI; TUI tabs trust vt100 classification
@@ -413,10 +513,15 @@ impl OutputParser {
                     continue; // Skip adding to sidebar entries
                 }
 
-                // Detect AI launch
-                if state.ai_tool.is_none() {
-                    if let Some(ai) = is_ai_command(&content) {
+                // Detect AI launch or a switch to another agent in the same
+                // terminal tab. Standard command names are handled here;
+                // aliases are caught by each agent's managed title above.
+                if let Some(ai) = is_ai_command(&content) {
+                    if state.ai_tool.as_deref() != Some(ai) {
                         state.ai_tool = Some(ai.to_string());
+                        state.ui_state = AiUiState::Unknown;
+                        state.pending_idle = None;
+                        state.was_executing = false;
                         let cwd = state.cwd.clone();
                         eprintln!("AI detected: {} in tab {} (cwd: {})", ai, tab_id, cwd);
                         on_ai_detected(tab_id.to_string(), cwd, ai.to_string());
@@ -590,6 +695,41 @@ pub(crate) fn extract_osc_title(raw: &str) -> Option<(String, bool)> {
             if !title.is_empty() && title.len() < 200 && !title.contains('\n') {
                 return Some((title.to_string(), has_status_prefix));
             }
+        }
+    }
+    None
+}
+
+/// Identify managed agent titles when users launch different AI tools in the
+/// same terminal tab. Plain session titles intentionally return None.
+fn ai_tool_from_managed_title(title: &str) -> Option<&'static str> {
+    let trimmed = title.trim();
+    if trimmed.starts_with("codex |") || trimmed.eq_ignore_ascii_case("codex") {
+        return Some("codex");
+    }
+    if trimmed.eq_ignore_ascii_case("Claude Code") {
+        return Some("claude");
+    }
+    if trimmed.starts_with("π -") || trimmed.eq_ignore_ascii_case("pi") {
+        return Some("pi");
+    }
+    None
+}
+
+/// Extract the status field from AI Terminal's managed Codex title. Match
+/// complete pipe-delimited fields so model/session text containing "ready" or
+/// "working" cannot create a false transition.
+fn codex_title_ui_state(title: &str) -> Option<AiUiState> {
+    let mut parts = title.split('|').map(str::trim);
+    if !parts.next()?.eq_ignore_ascii_case("codex") {
+        return None;
+    }
+    for part in parts {
+        if part.eq_ignore_ascii_case("ready") {
+            return Some(AiUiState::IdleReady);
+        }
+        if part.eq_ignore_ascii_case("working") || part.eq_ignore_ascii_case("starting") {
+            return Some(AiUiState::Working);
         }
     }
     None
@@ -943,6 +1083,14 @@ fn classify_pi_ui(tail: &[&str]) -> AiUiState {
         return AiUiState::IdleReady;
     }
     AiUiState::Unknown
+}
+
+/// True when this output chunk contains the bundled duration extension's NEW
+/// `agent_settled` entry. During a full redraw, an older completion can coexist
+/// with a newer active task; in that case `Working...` occurs later and wins.
+fn has_fresh_pi_completion(raw: &str) -> bool {
+    let Some(completed_at) = raw.rfind("Agent completed in") else { return false };
+    raw.rfind("Working...").map_or(true, |working_at| completed_at > working_at)
 }
 
 /// True if the line carries one of pi-tui's spinner frames (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`).
@@ -1561,6 +1709,35 @@ mod tests {
         assert!(has_pi_context_meter("?/272k (auto)")); // post-compaction
         assert!(!has_pi_context_meter("~/src/foo (main)"));
         assert!(!has_pi_context_meter("see docs/faq.md ? / maybe"));
+    }
+
+    #[test]
+    fn codex_managed_title_reports_working_and_ready() {
+        assert_eq!(ai_tool_from_managed_title("Claude Code"), Some("claude"));
+        assert_eq!(ai_tool_from_managed_title("π - hxjs"), Some("pi"));
+        assert_eq!(
+            ai_tool_from_managed_title("codex | gpt-5.6-sol max | Ready | abc"),
+            Some("codex")
+        );
+        assert_eq!(ai_tool_from_managed_title("my project"), None);
+        assert_eq!(
+            codex_title_ui_state("codex | gpt-5.6-sol max | Fast off | Working | abc"),
+            Some(AiUiState::Working)
+        );
+        assert_eq!(
+            codex_title_ui_state("codex | gpt-5.6-sol max | Context 3% used | Ready | abc"),
+            Some(AiUiState::IdleReady)
+        );
+        assert_eq!(codex_title_ui_state("unrelated | Ready"), None);
+    }
+
+    #[test]
+    fn pi_completion_is_fresh_only_when_it_follows_working() {
+        assert!(has_fresh_pi_completion("⠦ Working... (5.3s)\r\n⏱ Agent completed in 5.4s"));
+        assert!(has_fresh_pi_completion("⏱ Agent completed in 5.4s"));
+        // Full redraw while a later task is active: do not mistake the old
+        // transcript entry for completion of the current run.
+        assert!(!has_fresh_pi_completion("⏱ Agent completed in 5.4s\r\n⠋ Working... (1.2s)"));
     }
 
     #[test]

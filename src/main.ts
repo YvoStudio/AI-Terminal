@@ -1075,6 +1075,9 @@ async function sendNoteBlock(tabId: string, blockId: string) {
     // Without this the image falls through to writeTerminal(path) and lands as
     // unclickable literal text in Claude's prompt.
     const isAI = !!tab.aiTool || (terminalViews.get(tabId)?.isAiMode() ?? false);
+    // Keep a compact copy of the submitted queue item visible while AI output is
+    // streaming; sendNoteBlock removes the original card from the backlog below.
+    if (tab.aiTool) terminalViews.get(tabId)?.setCurrentTask(block.content, block.images?.length ?? 0);
     // Send images first, then text content.
     if (hasImages) {
       for (const imgPath of block.images!) {
@@ -2601,6 +2604,9 @@ const lastQueueSendAt = new Map<string, number>();
 // the explicit intent signal, so it fires even when the panel is collapsed.
 api.onTabAiUiStateChanged((tabId, state) => {
   if (state !== 'idle-ready') return;
+  // The turn has finished. Remove its pinned summary before auto-send possibly
+  // replaces it with the next queued task a moment later.
+  terminalViews.get(tabId)?.clearCurrentTask();
   // The user is composing their own prompt in this tab — don't paste a note
   // block on top of their unsubmitted text, or both get submitted together.
   if (appState.isPromptDirty(tabId)) return;
@@ -2640,6 +2646,10 @@ api.onAiDetected((tabId, cwd, aiTool) => {
   console.log('AI detected event:', tabId, aiTool, cwd);
   const tab = appState.tabs.get(tabId);
   if (tab) {
+    // The same shell tab may launch a different agent. Remove a stale pinned
+    // task (often the launch command itself, e.g. "claude") before tracking
+    // prompts for the newly detected TUI.
+    if (tab.aiTool !== aiTool) terminalViews.get(tabId)?.resetTaskTracking();
     appState.setAiTool(tabId, aiTool);
     // 保存历史时使用当前实际的 cwd（从 appState 获取，因为会实时更新）
     const currentCwd = tab.cwd || cwd || '';

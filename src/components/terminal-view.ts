@@ -45,6 +45,15 @@ export class TerminalView {
   private notepadEl!: HTMLElement;
   private notepadFab!: HTMLElement;
   private notepadFabCount!: HTMLElement;
+  private notepadFabCurrent!: HTMLElement;
+  private currentTaskEl!: HTMLElement;
+  private currentTaskTextEl!: HTMLElement;
+  private currentTaskText = '';
+  // Best-effort mirror of the text currently being composed in an AI prompt.
+  // xterm normally exposes only keystrokes, not the editor's final value, so we
+  // track printable input/paste and publish it when Enter is submitted.
+  private pendingPromptText = '';
+  private pendingPromptImages = 0;
   private notepadVisible = false;
   onNotepadRender: ((tabId: string) => void) | null = null;
   onNotepadAddBlock: ((tabId: string) => void) | null = null;
@@ -97,6 +106,49 @@ export class TerminalView {
    * themselves on this key — the way they attach images. */
   sendCtrlV() {
     api.writeTerminal(this.tabId, this.kittyFlags ? '\x1b[118;5u' : '\x16');
+  }
+
+  private stagePromptText(text: string) {
+    if (!appState.tabs.get(this.tabId)?.aiTool || !text) return;
+    this.pendingPromptText += text;
+  }
+
+  private stagePromptImage() {
+    if (!appState.tabs.get(this.tabId)?.aiTool) return;
+    this.pendingPromptImages += 1;
+  }
+
+  private resetPendingPrompt() {
+    this.pendingPromptText = '';
+    this.pendingPromptImages = 0;
+  }
+
+  /** Mirror enough prompt editing to identify a directly submitted AI task.
+   * This intentionally ignores cursor navigation/control sequences; normal
+   * typing, IME commits, paste, backspace and readline clear/delete-word cover
+   * the common paths without ever forwarding extra bytes to the child. */
+  private trackPromptInput(data: string) {
+    if (!appState.tabs.get(this.tabId)?.aiTool || !data) return;
+    const plain = data
+      .replace(/\x1b\[200~/g, '')
+      .replace(/\x1b\[201~/g, '')
+      .replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|O.)/g, '');
+    for (const ch of plain) {
+      if (ch === '\r') {
+        const text = this.pendingPromptText.trim();
+        const images = this.pendingPromptImages;
+        this.resetPendingPrompt();
+        if (text || images > 0) this.setCurrentTask(text, images);
+      } else if (ch === '\x7f' || ch === '\b') {
+        this.pendingPromptText = Array.from(this.pendingPromptText).slice(0, -1).join('');
+      } else if (ch === '\x17') {
+        this.pendingPromptText = this.pendingPromptText.replace(/\s*\S+\s*$/, '');
+      } else if (ch === '\x03' || ch === '\x15') {
+        this.resetPendingPrompt();
+      } else if (ch === '\n' || ch >= ' ') {
+        this.pendingPromptText += ch;
+      }
+    }
   }
 
   /** Build a buffer line's plain text plus a char-index → cell-column map.
@@ -430,6 +482,7 @@ export class TerminalView {
           e.preventDefault();
           api.markTerminalInput(tabId);
           appState.markPromptDirty(tabId);
+          this.stagePromptText(e.key);
           api.writeTerminal(tabId, e.key);
           suppressChar = e.key;
           suppressUntil = Date.now() + 300;
@@ -488,6 +541,7 @@ export class TerminalView {
           if (!isAgent || appState.isPromptDirty(tabId)) {
             api.markTerminalInput(tabId);
             api.writeTerminal(tabId, isAgent ? '\x03' : '\x15');
+            this.resetPendingPrompt();
             appState.clearPromptDirty(tabId);
           }
         }
@@ -592,6 +646,7 @@ export class TerminalView {
           const tab = appState.tabs.get(tabId);
           if (tab?.aiTool) {
             // AI tools support kitty protocol for multiline
+            this.stagePromptText('\n');
             api.writeTerminal(tabId, '\x1b[13;2u');
           } else {
             // Regular shell: send \r\n for proper line break
@@ -745,6 +800,7 @@ export class TerminalView {
           appState.markPromptDirty(tabId);
         }
       }
+      this.trackPromptInput(fixed);
       api.writeTerminal(tabId, fixed);
     });
 
@@ -812,6 +868,7 @@ export class TerminalView {
                 if (filePath) {
                   appState.addPastedImage(tabId, filePath);
                   api.markTerminalInput(tabId);
+                  this.stagePromptImage();
                   appState.markPromptDirty(tabId);
                   const t = appState.tabs.get(tabId);
                   const ai = !!(t?.aiTool) || bufType === 'alternate';
@@ -853,6 +910,7 @@ export class TerminalView {
         if (text) {
           api.markTerminalInput(tabId);
           appState.markPromptDirty(tabId);
+          this.stagePromptText(text);
           api.writeTerminal(tabId, '\x1b[200~' + text + '\x1b[201~');
         }
       }
@@ -966,11 +1024,15 @@ export class TerminalView {
     fab.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13 1H3a1 1 0 00-1 1v12a1 1 0 001 1h10a1 1 0 001-1V2a1 1 0 00-1-1zM4 4h8v1H4zm0 3h8v1H4zm0 3h5v1H4z"/></svg>';
     const count = document.createElement('span');
     count.className = 'notepad-fab-count hidden';
+    const fabCurrent = document.createElement('span');
+    fabCurrent.className = 'notepad-fab-current hidden';
     fab.appendChild(count);
+    fab.appendChild(fabCurrent);
     fab.addEventListener('click', () => this.setNotepadVisible(!this.notepadVisible));
     this.wrapper.appendChild(fab);
     this.notepadFab = fab;
     this.notepadFabCount = count;
+    this.notepadFabCurrent = fabCurrent;
 
     const panel = document.createElement('div');
     panel.className = 'terminal-notepad hidden';
@@ -1009,6 +1071,35 @@ export class TerminalView {
     collapse.addEventListener('click', () => this.setNotepadVisible(false));
     header.appendChild(title);
     header.appendChild(collapse);
+
+    // Keep the submitted queue item pinned above the scrolling list while the
+    // AI is working. The original prompt can otherwise be thousands of output
+    // lines above the viewport by the time the user wants to check it.
+    const currentTask = document.createElement('div');
+    currentTask.className = 'terminal-current-task hidden';
+    const currentTaskHead = document.createElement('div');
+    currentTaskHead.className = 'terminal-current-task-head';
+    const currentTaskLabel = document.createElement('span');
+    currentTaskLabel.className = 'terminal-current-task-label';
+    currentTaskLabel.innerHTML = '<span class="terminal-current-task-dot"></span>正在执行';
+    const currentTaskCopy = document.createElement('button');
+    currentTaskCopy.className = 'terminal-current-task-copy';
+    currentTaskCopy.type = 'button';
+    currentTaskCopy.textContent = '复制';
+    currentTaskCopy.title = '复制当前任务';
+    currentTaskCopy.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (this.currentTaskText) navigator.clipboard.writeText(this.currentTaskText).catch(() => {});
+    });
+    currentTaskHead.append(currentTaskLabel, currentTaskCopy);
+    const currentTaskText = document.createElement('div');
+    currentTaskText.className = 'terminal-current-task-text';
+    currentTaskText.title = '点击展开/收起';
+    currentTask.addEventListener('click', () => currentTask.classList.toggle('expanded'));
+    currentTask.append(currentTaskHead, currentTaskText);
+    this.currentTaskEl = currentTask;
+    this.currentTaskTextEl = currentTaskText;
+
     const blocks = document.createElement('div');
     blocks.className = 'terminal-notepad-blocks';
 
@@ -1025,6 +1116,7 @@ export class TerminalView {
     footer.appendChild(addBtn);
 
     panel.appendChild(header);
+    panel.appendChild(currentTask);
     panel.appendChild(blocks);
     panel.appendChild(footer);
     this.wrapper.appendChild(panel);
@@ -1056,6 +1148,41 @@ export class TerminalView {
   setNotepadCount(n: number) {
     this.notepadFabCount.textContent = n > 0 ? String(n) : '';
     this.notepadFabCount.classList.toggle('hidden', n === 0);
+  }
+
+  /** Pin a queue item while the AI is processing it. The compact summary stays
+   * visible on the queue entry button even when the full panel is collapsed. */
+  setCurrentTask(content: string, imageCount = 0) {
+    const text = content.trim();
+    if (!text && imageCount === 0) { this.clearCurrentTask(); return; }
+    const imageSuffix = imageCount > 0 ? `${text ? '\n' : ''}[${imageCount} 张图片]` : '';
+    this.currentTaskText = text + imageSuffix;
+    this.currentTaskTextEl.textContent = this.currentTaskText;
+    this.currentTaskEl.classList.remove('hidden', 'expanded');
+
+    const summary = (text || `${imageCount} 张图片`).replace(/\s+/g, ' ');
+    this.notepadFabCurrent.textContent = `执行中 · ${summary}`;
+    this.notepadFabCurrent.classList.remove('hidden');
+    this.notepadFab.classList.add('has-current-task');
+    this.notepadFab.title = `当前任务：${summary}`;
+  }
+
+  clearCurrentTask() {
+    this.currentTaskText = '';
+    this.currentTaskTextEl.textContent = '';
+    this.currentTaskEl.classList.add('hidden');
+    this.currentTaskEl.classList.remove('expanded');
+    this.notepadFabCurrent.textContent = '';
+    this.notepadFabCurrent.classList.add('hidden');
+    this.notepadFab.classList.remove('has-current-task');
+    this.notepadFab.title = '任务队列';
+  }
+
+  /** Drop text/status inherited from a previous agent when the same shell tab
+   * launches another TUI (for example Pi → Codex → Claude). */
+  resetTaskTracking() {
+    this.resetPendingPrompt();
+    this.clearCurrentTask();
   }
 
   /** Force xterm's viewport to resize its scroll area to the current buffer
