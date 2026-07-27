@@ -102,7 +102,7 @@ export class TerminalView {
   }
 
   /** Send the running app its own paste keybinding (Ctrl+V), kitty-encoded when
-   * the app negotiated the protocol. Tools like pi read the OS clipboard
+   * the app negotiated the protocol. Pi and Codex read the OS clipboard
    * themselves on this key — the way they attach images. */
   sendCtrlV() {
     api.writeTerminal(this.tabId, this.kittyFlags ? '\x1b[118;5u' : '\x16');
@@ -872,11 +872,11 @@ export class TerminalView {
                   appState.markPromptDirty(tabId);
                   const t = appState.tabs.get(tabId);
                   const ai = !!(t?.aiTool) || bufType === 'alternate';
-                  if (t?.aiTool === 'pi') {
-                    // pi attaches clipboard images itself on its paste key
-                    // (Ctrl+V): reads the OS clipboard, saves the image,
-                    // attaches by path. The empty-bracketed-paste trick below
-                    // is Claude-specific — pi ignores it.
+                  if (t?.aiTool === 'pi' || t?.aiTool === 'codex') {
+                    // Pi and Codex attach clipboard images on their own paste
+                    // key (Ctrl+V): both read the OS clipboard and create a
+                    // local image attachment. The empty bracketed-paste trick
+                    // below is Claude-specific and does nothing in Codex.
                     try { await api.writeClipboardImageFromPath(filePath); } catch {}
                     this.sendCtrlV();
                   } else if (ai) {

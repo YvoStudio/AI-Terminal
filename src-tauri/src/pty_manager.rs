@@ -4,6 +4,32 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[cfg(not(target_os = "windows"))]
+const BASH_PROMPT_COMMAND: &str = concat!(
+    r#"__ait_ec=$?; "#,
+    // Finder provides GUI apps with a minimal PATH. Run macOS path_helper once
+    // so Intel/Bash installations in /usr/local/bin are available immediately.
+    r#"if [ -z "${__ait_path_ready:-}" ]; then __ait_path_ready=1; [ ! -x /usr/libexec/path_helper ] || eval "$(/usr/libexec/path_helper -s)"; fi; "#,
+    r#"printf '\e]133;D;%s\a' "$__ait_ec"; printf '\e]7;file://%s%s\a' "$(hostname)" "$(pwd)"; printf '\e]133;A\a'"#,
+);
+
+#[cfg(not(target_os = "windows"))]
+fn bash_prompt_command(existing: Option<&str>) -> String {
+    match existing
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+    {
+        // Do not carry a prompt hook inherited from another AI Terminal shell.
+        // In particular, older releases embedded `${PROMPT_COMMAND:-:}` in the
+        // value itself, which expands recursively on Bash 3.2 and is then
+        // treated as a command name.
+        Some(command) if !command.contains("__ait_ec") => {
+            format!("{};{}", BASH_PROMPT_COMMAND, command)
+        }
+        _ => BASH_PROMPT_COMMAND.to_string(),
+    }
+}
+
 pub struct PtyInstance {
     writer: Box<dyn Write + Send>,
     pair: PtyPair,
@@ -153,9 +179,11 @@ ZDOTDIR="{home}"
                 let _ = std::fs::write(tmp_dir.join(".zshenv"), &zshenv_content);
                 cmd.env("ZDOTDIR", tmp_dir.to_str().unwrap_or("/tmp"));
             } else if is_bash {
-                // bash: PROMPT_COMMAND runs before prompt (captures $?), DEBUG trap runs before command.
-                let bash_pc = r#"__ait_ec=$?; printf '\e]133;D;%s\a' "$__ait_ec"; printf '\e]7;file://%s%s\a' "$(hostname)" "$(pwd)"; printf '\e]133;A\a'"#;
-                cmd.env("PROMPT_COMMAND", format!("{};{}", bash_pc, "${PROMPT_COMMAND:-:}"));
+                // Bash 3.2 (the system Bash on older/Intel Macs) evaluates
+                // PROMPT_COMMAND as shell source. Compose the inherited value
+                // here instead of putting a self-reference in that value.
+                let inherited = std::env::var("PROMPT_COMMAND").ok();
+                cmd.env("PROMPT_COMMAND", bash_prompt_command(inherited.as_deref()));
                 // Prepend OSC 133 B to PS1 via BASH_ENV-like approach: set through env is messy,
                 // so rely on consumers treating prompt-end as implicit before user input.
             }
@@ -322,5 +350,30 @@ fn dirs_next_home() -> Option<String> {
         None
     } else {
         Some(h)
+    }
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod tests {
+    use super::{bash_prompt_command, BASH_PROMPT_COMMAND};
+
+    #[test]
+    fn bash_prompt_command_has_no_recursive_self_reference() {
+        let command = bash_prompt_command(None);
+        assert_eq!(command, BASH_PROMPT_COMMAND);
+        assert!(!command.contains("PROMPT_COMMAND"));
+        assert!(command.contains("/usr/libexec/path_helper"));
+    }
+
+    #[test]
+    fn bash_prompt_command_preserves_an_inherited_hook() {
+        let command = bash_prompt_command(Some("history -a"));
+        assert_eq!(command, format!("{};history -a", BASH_PROMPT_COMMAND));
+    }
+
+    #[test]
+    fn bash_prompt_command_replaces_an_old_ai_terminal_hook() {
+        let old = "__ait_ec=$?; ${PROMPT_COMMAND:-:}";
+        assert_eq!(bash_prompt_command(Some(old)), BASH_PROMPT_COMMAND);
     }
 }

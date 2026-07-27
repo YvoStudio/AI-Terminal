@@ -1093,10 +1093,9 @@ async function sendNoteBlock(tabId: string, blockId: string) {
             // image to the raw-path fallback below (the unclickable-path bug).
             await api.writeClipboardImageFromPath(imgPath);
             appState.addPastedImage(tabId, imgPath);
-            if (tab.aiTool === 'pi') {
-              // pi reads the clipboard itself on its paste key (Ctrl+V) and
-              // attaches the image by path; the empty bracketed paste is
-              // Claude-specific and pi ignores it.
+            if (tab.aiTool === 'pi' || tab.aiTool === 'codex') {
+              // Pi and Codex read the clipboard themselves on Ctrl+V and attach
+              // the image. The empty bracketed paste is Claude-specific.
               terminalViews.get(tabId)?.sendCtrlV();
             } else {
               api.writeTerminal(tabId, '\x1b[200~\x1b[201~');
