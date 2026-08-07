@@ -100,6 +100,7 @@ function maybeShowSystemNotification(tabId: string): void {
 async function createTab(name?: string, noteBlocks?: Array<{ id: string; content: string; images?: string[] }>, cwd?: string, shell?: 'cmd' | 'powershell' | 'wsl', aiTool?: string, userRenamed?: boolean, preferredId?: string, autoSend?: boolean): Promise<string> {
   const tabId = await api.createTerminal(cwd, preferredId);
   const tab = appState.addTab(tabId);
+  if (cwd) tab.cwd = cwd; // 恢复/历史标签：先展示已知路径，OSC 7 到达后会自动校正
   if (typeof name === 'string') tab.title = name;
   if (aiTool) tab.aiTool = aiTool;
   if (userRenamed) tab.userRenamed = true;
@@ -127,21 +128,10 @@ async function createTab(name?: string, noteBlocks?: Array<{ id: string; content
   // 监听终端输出，每次有输出时立即更新 cwd
   api.onTerminalOutput(tabId, () => {
     if (appState.activeTabId === tabId) {
-      // 直接调用 updateCwdDisplay，使用后端事件保存的 cwd
+      // 直接调用 applyCwdDisplay，使用后端事件保存的 cwd
       const tab = appState.tabs.get(tabId);
       if (tab && tab.cwd) {
-        const cwdEl = document.getElementById('status-cwd');
-        if (cwdEl) {
-          let shortCwd = tab.cwd;
-          // Unix-style: /Users/xxx -> ~
-          shortCwd = shortCwd.replace(/^\/Users\/[^/]+/, '~');
-          // Windows-style: C:\Users\xxx -> ~\xxx
-          shortCwd = shortCwd.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/i, '$1:\\~');
-          // Windows-style: 保留盘符，移除末尾反斜杠
-          shortCwd = shortCwd.replace(/^([A-Za-z]):\\$/i, '$1:');
-          cwdEl.textContent = shortCwd || '';
-          cwdEl.title = tab.cwd || '';
-        }
+        applyCwdDisplay(tab.cwd);
         updateBranchDisplay(tab.cwd);
       }
     }
@@ -180,15 +170,7 @@ async function createTabInPane(paneIndex: number) {
     if (appState.activeTabId === tabId) {
       const tab = appState.tabs.get(tabId);
       if (tab && tab.cwd) {
-        const cwdEl = document.getElementById('status-cwd');
-        if (cwdEl) {
-          let shortCwd = tab.cwd;
-          shortCwd = shortCwd.replace(/^\/Users\/[^/]+/, '~');
-          shortCwd = shortCwd.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/i, '$1:\\~');
-          shortCwd = shortCwd.replace(/^([A-Za-z]):\\$/i, '$1:');
-          cwdEl.textContent = shortCwd || '';
-          cwdEl.title = tab.cwd || '';
-        }
+        applyCwdDisplay(tab.cwd);
         updateBranchDisplay(tab.cwd);
       }
     }
@@ -747,9 +729,33 @@ function isValidCwd(cwd: string): boolean {
   return true;
 }
 
-async function updateCwdDisplay(tabId: string, newCwd?: string) {
+// 防串台：任何 cwd 写入都会 ++_cwdReqSeq；异步的后端查询只有在仍是「最新一次
+// 请求」时才允许落地。快速切换标签时，旧标签迟到的 getTerminalCwd 响应不会
+// 覆盖新标签的显示（之前正是它导致“切换后目录没跟着变”）。
+let _cwdReqSeq = 0;
+
+function shortCwd(cwd: string): string {
+  // Unix-style: /Users/xxx -> ~
+  let sc = cwd.replace(/^\/Users\/[^/]+/, '~');
+  // Windows-style: C:\Users\xxx -> ~\xxx
+  sc = sc.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/i, '$1:\\~');
+  // Windows-style: 保留盘符，移除末尾反斜杠
+  sc = sc.replace(/^([A-Za-z]):\\$/i, '$1:');
+  return sc || '';
+}
+
+/** 把 cwd 立即写到底栏，并使任何在途的后端 cwd 查询失效。 */
+function applyCwdDisplay(cwd: string) {
+  _cwdReqSeq++;
   const cwdEl = document.getElementById('status-cwd');
   if (!cwdEl) return;
+  cwdEl.textContent = shortCwd(cwd);
+  cwdEl.title = cwd;
+}
+
+async function updateCwdDisplay(tabId: string, newCwd?: string) {
+  if (!document.getElementById('status-cwd')) return;
+  const seq = ++_cwdReqSeq;
 
   let cwd: string;
   if (newCwd) {
@@ -759,34 +765,38 @@ async function updateCwdDisplay(tabId: string, newCwd?: string) {
     }
     cwd = newCwd;
   } else {
-    try {
-      cwd = await api.getTerminalCwd(tabId);
-    } catch {
-      cwd = '';
-    }
-    // Backend cwd can be polluted by prompt-heuristic misparses (e.g. grep-style
-    // `8:<script …>` output once landed here) — validate before showing, same as
-    // the newCwd branch. Keep the last good display instead.
-    if (cwd && !isValidCwd(cwd)) {
-      return;
+    // 优先用 onCwdChanged 已实时维护的 tab.cwd：切标签时无需等后端往返就能
+    // 显示正确路径（这也消除了往返期间被旧标签迟到响应覆盖的窗口）。
+    const known = appState.tabs.get(tabId)?.cwd;
+    if (known && isValidCwd(known)) {
+      cwd = known;
+    } else {
+      try {
+        cwd = await api.getTerminalCwd(tabId);
+      } catch {
+        cwd = '';
+      }
+      // Backend cwd can be polluted by prompt-heuristic misparses (e.g. grep-style
+      // `8:<script …>` output once landed here) — validate before showing, same as
+      // the newCwd branch. Keep the last good display instead.
+      if (cwd && !isValidCwd(cwd)) {
+        return;
+      }
     }
   }
+
+  // 期间已有更新的请求/事件落地（切标签、onCwdChanged、输出监听都 bump 过
+  // seq）→ 丢弃本次结果，避免旧标签覆盖新标签。
+  if (seq !== _cwdReqSeq) return;
 
   console.log('updateCwdDisplay: cwd =', cwd);
   // 更新 appState 中的 cwd
   appState.setCwd(tabId, cwd);
-  // 缩短显示：将长路径缩写为 ~ 开头
-  let shortCwd = cwd;
-  // Unix-style: /Users/xxx -> ~
-  shortCwd = shortCwd.replace(/^\/Users\/[^/]+/, '~');
-  // Windows-style: C:\Users\xxx -> ~\xxx
-  shortCwd = shortCwd.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/i, '$1:\\~');
-  // Windows-style: 保留盘符，移除末尾反斜杠
-  shortCwd = shortCwd.replace(/^([A-Za-z]):\\$/i, '$1:');
-  console.log('updateCwdDisplay: short =', shortCwd);
-  cwdEl.textContent = shortCwd || '';
-  cwdEl.title = cwd || '';
-
+  const cwdEl = document.getElementById('status-cwd');
+  if (cwdEl) {
+    cwdEl.textContent = shortCwd(cwd);
+    cwdEl.title = cwd;
+  }
   updateBranchDisplay(cwd, /*force*/ true);
 }
 
@@ -1077,7 +1087,7 @@ async function sendNoteBlock(tabId: string, blockId: string) {
     const isAI = !!tab.aiTool || (terminalViews.get(tabId)?.isAiMode() ?? false);
     // Keep a compact copy of the submitted queue item visible while AI output is
     // streaming; sendNoteBlock removes the original card from the backlog below.
-    if (tab.aiTool) terminalViews.get(tabId)?.setCurrentTask(block.content, block.images?.length ?? 0);
+    if (tab.aiTool) terminalViews.get(tabId)?.setCurrentTask(block.content, block.images?.length ?? 0, block.images);
     // Send images first, then text content.
     if (hasImages) {
       for (const imgPath of block.images!) {
@@ -2601,8 +2611,27 @@ const lastQueueSendAt = new Map<string, number>();
 // header), defaulting to OFF. When on, the head of that tab's queue is sent each
 // time the AI goes idle-ready. We don't gate on panel visibility — the toggle is
 // the explicit intent signal, so it fires even when the panel is collapsed.
+// When the backend emits idle-ready we hide the pinned "正在执行" summary. If
+// that idle-ready was a mid-turn misdetection (e.g. pi re-emitting a previous
+// turn's completion entry during a redraw — chunk splitting defeats the
+// ordering guard), the agent never stopped and the very next Working chunk
+// re-transitions. Track the clear time so a working transition arriving
+// immediately after can restore the pin instead of leaving the task invisible
+// for the rest of a long turn.
+const lastPinClearedAt = new Map<string, number>();
+const PIN_RESTORE_WINDOW_MS = 5000;
+
 api.onTabAiUiStateChanged((tabId, state) => {
+  if (state === 'working') {
+    const clearedAt = lastPinClearedAt.get(tabId) ?? 0;
+    if (Date.now() - clearedAt < PIN_RESTORE_WINDOW_MS) {
+      terminalViews.get(tabId)?.resumeCurrentTask();
+    }
+    lastPinClearedAt.delete(tabId);
+    return;
+  }
   if (state !== 'idle-ready') return;
+  lastPinClearedAt.set(tabId, Date.now());
   // The turn has finished. Remove its pinned summary before auto-send possibly
   // replaces it with the next queued task a moment later.
   terminalViews.get(tabId)?.clearCurrentTask();
@@ -2774,17 +2803,11 @@ api.onCwdChanged((tabId, cwd) => {
   // Ignore invalid cwd (garbage from terminal output)
   if (!isValidCwd(cwd)) return;
   appState.setCwd(tabId, cwd);
-  // 立即更新底栏
+  // 立即更新底栏（applyCwdDisplay 会使在途的后端 cwd 查询失效，防止迟到覆盖）
   if (tabId === appState.activeTabId) {
-    const el = document.getElementById('status-cwd');
-    if (el) {
-      let sc = cwd.replace(/^\/Users\/[^/]+/, '~');
-      sc = sc.replace(/^([A-Za-z]):\\Users\\[^\\]+\\/i, '$1:\\~');
-      sc = sc.replace(/^([A-Za-z]):\\$/i, '$1:');
-      console.log('>>> Set to:', sc);
-      el.textContent = sc;
-      el.title = cwd;
-    }
+    console.log('>>> Set to:', shortCwd(cwd));
+    applyCwdDisplay(cwd);
+    updateBranchDisplay(cwd);
   }
 });
 

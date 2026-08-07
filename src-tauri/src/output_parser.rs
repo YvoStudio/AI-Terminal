@@ -71,6 +71,13 @@ struct TabState {
     /// spinner box momentarily disappears between frame redraws during streaming
     /// and a single observation isn't enough to call "done".
     pending_idle: Option<(AiUiState, u64)>,
+    /// Last consumed pi "⏱ Agent completed in …" entry text. pi's differential
+    /// redraws (resize, editor height change, session reload) re-emit previous
+    /// turns' completion entries byte-identically while the agent is still
+    /// working; the chunk-order guard in has_fresh_pi_completion can't tell
+    /// those apart from a fresh agent_settled when "Working..." lands in a
+    /// different chunk. A byte-identical re-emission is never a fresh settle.
+    last_pi_completion: Option<String>,
 }
 
 impl TabState {
@@ -91,6 +98,7 @@ impl TabState {
             screen: VtParser::new(30, 120, 0),
             ui_state: AiUiState::Unknown,
             pending_idle: None,
+            last_pi_completion: None,
         }
     }
 
@@ -217,7 +225,7 @@ impl OutputParser {
             // The ordering guard rejects a full redraw of an OLD completion
             // entry while a newer `Working...` line is active.
             let pi_settled = state.ai_tool.as_deref() == Some("pi")
-                && has_fresh_pi_completion(raw);
+                && has_fresh_pi_completion(raw, &mut state.last_pi_completion);
             let new_ui = if pi_settled {
                 AiUiState::IdleReady
             } else {
@@ -1088,9 +1096,30 @@ fn classify_pi_ui(tail: &[&str]) -> AiUiState {
 /// True when this output chunk contains the bundled duration extension's NEW
 /// `agent_settled` entry. During a full redraw, an older completion can coexist
 /// with a newer active task; in that case `Working...` occurs later and wins.
-fn has_fresh_pi_completion(raw: &str) -> bool {
+///
+/// The ordering guard alone is not enough: pi-tui's differential redraws
+/// (resize, editor height change, session reload) re-emit a PREVIOUS turn's
+/// completion entry byte-identically while the agent is still working, and the
+/// `Working...` tick lands in a different chunk. Dedupe on the entry text so a
+/// re-emission is never treated as a fresh settle — a real agent_settled always
+/// appends a brand-new entry with a new duration.
+fn has_fresh_pi_completion(raw: &str, last_consumed: &mut Option<String>) -> bool {
     let Some(completed_at) = raw.rfind("Agent completed in") else { return false };
-    raw.rfind("Working...").map_or(true, |working_at| completed_at > working_at)
+    if raw.rfind("Working...").map_or(false, |working_at| working_at > completed_at) {
+        return false;
+    }
+    let line_end = raw[completed_at..]
+        .find(['\n', '\r'])
+        .map(|i| completed_at + i)
+        .unwrap_or(raw.len());
+    // Strip ANSI so byte-identical rows still dedupe even if a redraw wraps
+    // the entry in a slightly different escape sequence.
+    let entry = strip_ansi(&raw[completed_at..line_end]);
+    if last_consumed.as_deref() == Some(entry.as_str()) {
+        return false;
+    }
+    *last_consumed = Some(entry);
+    true
 }
 
 /// True if the line carries one of pi-tui's spinner frames (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`).
@@ -1733,11 +1762,21 @@ mod tests {
 
     #[test]
     fn pi_completion_is_fresh_only_when_it_follows_working() {
-        assert!(has_fresh_pi_completion("⠦ Working... (5.3s)\r\n⏱ Agent completed in 5.4s"));
-        assert!(has_fresh_pi_completion("⏱ Agent completed in 5.4s"));
+        let mut seen = None;
+        // Fresh settle: entry appears after/without Working in the same chunk.
+        assert!(has_fresh_pi_completion("⠦ Working... (5.3s)\r\n⏱ Agent completed in 5.4s", &mut seen));
         // Full redraw while a later task is active: do not mistake the old
         // transcript entry for completion of the current run.
-        assert!(!has_fresh_pi_completion("⏱ Agent completed in 5.4s\r\n⠋ Working... (1.2s)"));
+        assert!(!has_fresh_pi_completion("⏱ Agent completed in 5.4s\r\n⠋ Working... (1.2s)", &mut seen));
+        // A byte-identical re-emission of the same entry (pi differential
+        // redraw: resize, editor height change, session reload) is not a fresh
+        // settle — the agent is still working.
+        assert!(!has_fresh_pi_completion("⏱ Agent completed in 5.4s", &mut seen));
+        assert!(!has_fresh_pi_completion("⏱ Agent completed in 5.4s\r\n", &mut seen));
+        // ANSI-wrapped re-emission still dedupes (escape sequences stripped).
+        assert!(!has_fresh_pi_completion("\x1b[0m⏱ Agent completed in 5.4s\x1b[0m", &mut seen));
+        // A genuinely new completion with a different duration is fresh again.
+        assert!(has_fresh_pi_completion("⏱ Agent completed in 12s", &mut seen));
     }
 
     #[test]

@@ -49,6 +49,13 @@ export class TerminalView {
   private currentTaskEl!: HTMLElement;
   private currentTaskTextEl!: HTMLElement;
   private currentTaskText = '';
+  // Last pinned task, kept across clearCurrentTask() so a spurious idle-ready
+  // mid-turn (misdetected as done) can restore the summary when the very next
+  // working transition proves the agent is still running.
+  private lastTaskText = '';
+  private lastTaskImages = 0;
+  private lastTaskImagePaths: string[] = [];
+  private currentTaskImagePaths: string[] = [];
   // Best-effort mirror of the text currently being composed in an AI prompt.
   // xterm normally exposes only keystrokes, not the editor's final value, so we
   // track printable input/paste and publish it when Enter is submitted.
@@ -82,6 +89,10 @@ export class TerminalView {
   private heldOutput: string[] = [];
   private heldBytes = 0;
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
+  // Tail of the previous output chunk when it ended mid-CSI. PTY reads can
+  // split \x1b[3J at any byte; the tail lets stripScrollbackClear() catch the
+  // sequence across the boundary instead of leaking a scrollback wipe through.
+  private csiTail = '';
 
   /** AI/TUI mode for input purposes: either AI auto-detection fired for this tab,
    * or the program is driving the alternate screen buffer (Claude, vim, etc.).
@@ -231,6 +242,16 @@ export class TerminalView {
   }
 
   private writeOutput(data: string) {
+    // pi-tui's TuiMainScreen renders into the MAIN buffer and full-redraws with
+    // \x1b[2J\x1b[H\x1b[3J on every resize / content shrink / re-wrap. CSI 3 J
+    // clears the terminal's scrollback: while the user is scrolled up it yanks
+    // the viewport to the top (baseY→0 clamps ydisp→0) and destroys the history
+    // they are reading; at the bottom it silently wipes the ability to scroll
+    // up at all. Real terminals keep scrollback across redraws, so strip the
+    // scrollback-clear and keep the screen clear (CSI 2 J) that the re-render
+    // actually needs. The renderer's own state is unaffected — 3 J only touches
+    // the scrollback region.
+    data = this.stripScrollbackClear(data);
     // Read Codex's OSC status payload directly from the same PTY chunk before
     // xterm consumes it. This is more reliable than WebKit's title callback,
     // which can be suppressed when the native window title is managed by Tauri.
@@ -243,6 +264,26 @@ export class TerminalView {
     }
     // Check after parsing each chunk: DEC modes take effect during write().
     this.terminal.write(data, () => this.restoreHostMouse());
+  }
+
+  /** Remove CSI 3 J (erase scrollback) from an output chunk. A chunk that ends
+   * inside a CSI parameter string defers those bytes to the next chunk so the
+   * strip works across PTY read boundaries.
+   *
+   * Only \x1b[ (ESC + bracket) starts a CSI; a lone ESC at chunk end could be
+   * anything — a non-CSI escape (ESC 7, ESC 8, ESC M, …), garbage, or even
+   * real text. Prepending a spurious ESC to the next chunk turns "[" into a
+   * CSI introducer, which corrupts text like `[Image #N]` into `\x1b[Image #N]`
+   * → terminal eats `[I` as CSI I (CHT) → rendered as `mage #N]` → unclickable. */
+  private stripScrollbackClear(data: string): string {
+    const joined = this.csiTail + data;
+    // Only defer a partial CSI (ESC [ + optional digits/semicolons). A lone ESC
+    // without [ is not a CSI and must NOT be carried across chunks.
+    const csiPartialAtEnd = /(\x1b\[\d*(?:;\d+)*)?$/.exec(joined);
+    this.csiTail = csiPartialAtEnd ? (csiPartialAtEnd[1] || '') : '';
+    const safeLen = joined.length - this.csiTail.length;
+    const stripped = joined.slice(0, safeLen);
+    return stripped.replace(/\x1b\[\d*(?:;\d+)*3J/g, '');
   }
 
   private flushHeldOutput() {
@@ -1152,12 +1193,37 @@ export class TerminalView {
 
   /** Pin a queue item while the AI is processing it. The compact summary stays
    * visible on the queue entry button even when the full panel is collapsed. */
-  setCurrentTask(content: string, imageCount = 0) {
+  setCurrentTask(content: string, imageCount = 0, imagePaths?: string[]) {
     const text = content.trim();
     if (!text && imageCount === 0) { this.clearCurrentTask(); return; }
+    // Remember across clears so resumeCurrentTask() can restore the pin after
+    // a spurious idle-ready (see lastTaskText field doc).
+    this.lastTaskText = text;
+    this.lastTaskImages = imageCount;
+    this.lastTaskImagePaths = imagePaths || [];
+    this.currentTaskImagePaths = imagePaths || [];
     const imageSuffix = imageCount > 0 ? `${text ? '\n' : ''}[${imageCount} 张图片]` : '';
     this.currentTaskText = text + imageSuffix;
-    this.currentTaskTextEl.textContent = this.currentTaskText;
+    // Render image count as a clickable link so the user can open the preview
+    // directly from the pinned task bar (same as clicking [Image #N] in the
+    // terminal output).
+    if (imageCount > 0 && imagePaths && imagePaths.length > 0) {
+      const textSpan = document.createElement('span');
+      textSpan.textContent = text ? text + '\n' : '';
+      const imgLink = document.createElement('span');
+      imgLink.className = 'terminal-current-task-img-link';
+      imgLink.textContent = `[${imageCount} 张图片]`;
+      imgLink.title = '点击预览图片';
+      imgLink.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const all = imagePaths.map(p => convertFileSrc(p));
+        const preview = (window as any).showImagePreview;
+        if (typeof preview === 'function') preview(all, 0);
+      });
+      this.currentTaskTextEl.replaceChildren(textSpan, imgLink);
+    } else {
+      this.currentTaskTextEl.textContent = this.currentTaskText;
+    }
     this.currentTaskEl.classList.remove('hidden', 'expanded');
 
     const summary = (text || `${imageCount} 张图片`).replace(/\s+/g, ' ');
@@ -1167,8 +1233,21 @@ export class TerminalView {
     this.notepadFab.title = `当前任务：${summary}`;
   }
 
+  /** Re-pin the last submitted task if a working transition follows an
+   * idle-ready too closely to be a real turn end — the backend can emit a
+   * spurious idle-ready mid-turn (e.g. pi re-emitting a previous turn's
+   * completion entry during a redraw), and the next Working chunk proves the
+   * agent never stopped. No-op when nothing is remembered or the pin is
+   * already visible. */
+  resumeCurrentTask() {
+    if (!this.lastTaskText && this.lastTaskImages === 0) return;
+    if (!this.currentTaskEl.classList.contains('hidden')) return;
+    this.setCurrentTask(this.lastTaskText, this.lastTaskImages, this.lastTaskImagePaths);
+  }
+
   clearCurrentTask() {
     this.currentTaskText = '';
+    this.currentTaskImagePaths = [];
     this.currentTaskTextEl.textContent = '';
     this.currentTaskEl.classList.add('hidden');
     this.currentTaskEl.classList.remove('expanded');
@@ -1182,6 +1261,9 @@ export class TerminalView {
    * launches another TUI (for example Pi → Codex → Claude). */
   resetTaskTracking() {
     this.resetPendingPrompt();
+    this.lastTaskText = '';
+    this.lastTaskImages = 0;
+    this.lastTaskImagePaths = [];
     this.clearCurrentTask();
   }
 
