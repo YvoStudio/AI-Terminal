@@ -181,6 +181,88 @@ export class TerminalView {
     return { text, charToCol };
   }
 
+  /** Find absolute image file paths in a buffer line's text — e.g. pi/Codex
+   *  attach pasted clipboard images as bare paths (`/var/folders/.../
+   *  pi-clipboard-*.png`) which render as plain text because xterm.js has no
+   *  Kitty graphics protocol and pi-tui disables OSC 8 hyperlinks here.
+   *  Returns char-index spans (inclusive end) so callers can hit-test a click
+   *  column and draw a hover underline, mirroring the [Image #N] refs. */
+  private imagePathSpans(text: string): Array<{ start: number; end: number; path: string }> {
+    const out: Array<{ start: number; end: number; path: string }> = [];
+    // Absolute Unix paths (/...), Windows drive paths (C:\... / C:/...), or
+    // ~-home paths. Run of non-whitespace path chars, ended at an image ext.
+    const re = /(?:~|\/|(?:[A-Za-z]:[\\/]))[^\s"'<>]+?\.(?:png|jpe?g|webp|gif|bmp|heic|avif|svg|tiff?|ico)\b/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      // The char-run match can swallow trailing punctuation (closing parens,
+      // markdown emphasis, list markers, quotes) — strip it so the click span
+      // and preview path stay clean.
+      const path = m[0].replace(/[),;:}\]'"`]+$/g, '');
+      if (!path) continue;
+      const start = m.index;
+      const end = start + path.length - 1;
+      if (end >= start) out.push({ start, end, path });
+    }
+    return out;
+  }
+
+  /** Join a wrapped logical line (multiple physical rows) into one text plus a
+   *  char→absolute-logical-column map. pi/Codex paste long absolute image paths
+   *  which wrap across rows in the transcript; a wrapped fragment alone never
+   *  matches the full-path regex (no leading `/` or no image extension), so
+   *  clicks on it silently died. `startRow` is the first physical row of the
+   *  logical line. */
+  private logicalLineText(line: number): { text: string; charToCol: number[]; startRow: number } | null {
+    const buf = this.terminal.buffer.active;
+    if (line < 0 || line >= buf.length) return null;
+    let startRow = line;
+    while (startRow > 0 && buf.getLine(startRow)?.isWrapped) startRow--;
+    let endRow = line;
+    while (endRow < buf.length - 1 && buf.getLine(endRow + 1)?.isWrapped) endRow++;
+    let text = '';
+    const charToCol: number[] = [];
+    const cols = this.terminal.cols || 80;
+    for (let r = startRow; r <= endRow; r++) {
+      const row = buf.getLine(r);
+      if (!row) continue;
+      const offset = (r - startRow) * cols;
+      // BufferLine.length can exceed cols after a resize; the visible cell
+      // range is 0..cols-1, so clamp to keep the offset math per-row exact.
+      for (let c = 0; c < Math.min(row.length, cols); c++) {
+        const cell = row.getCell(c);
+        if (!cell) continue;
+        const chars = cell.getChars();
+        if (chars.length === 0) continue; // wide-char 的尾格
+        for (let k = 0; k < chars.length; k++) charToCol.push(offset + c);
+        text += chars;
+      }
+    }
+    return { text, charToCol, startRow };
+  }
+
+  /** Per-row clickable segments for absolute image paths in a logical line.
+   *  A path that wraps across rows yields one segment per physical row (with
+   *  1-indexed xterm columns), so both the hover underline and the click
+   *  hit-test can address each fragment of the same path. */
+  private imagePathSegments(info: { text: string; charToCol: number[]; startRow: number }):
+    Array<{ row: number; x1: number; x2: number; path: string }> {
+    const segs: Array<{ row: number; x1: number; x2: number; path: string }> = [];
+    const cols = this.terminal.cols || 80;
+    for (const span of this.imagePathSpans(info.text)) {
+      const c0 = info.charToCol[span.start] ?? span.start;
+      const c1 = info.charToCol[span.end] ?? span.end;
+      const rowStart = info.startRow + Math.floor(c0 / cols);
+      const rowEnd = info.startRow + Math.floor(c1 / cols);
+      for (let row = rowStart; row <= rowEnd; row++) {
+        const base = (row - info.startRow) * cols;
+        const x1 = Math.max(c0, base) - base + 1;
+        const x2 = Math.min(c1, base + cols - 1) - base + 1;
+        segs.push({ row, x1, x2, path: span.path });
+      }
+    }
+    return segs;
+  }
+
   /** Anchor a new image-binding epoch at the TOP of the current viewport.
    *
    * Not the cursor line: anchors are taken before the chunk is written, and the
@@ -205,6 +287,14 @@ export class TerminalView {
    * buffer line `line`. N is the AI's own per-session number, so the line is
    * what says which session it belongs to — appState maps the pair to our
    * globally-unique M. Carousel order = ascending M across this tab's lifetime. */
+  private homeDirPromise: Promise<string> | null = null;
+  private getHomeDir(): Promise<string> {
+    if (!this.homeDirPromise) {
+      this.homeDirPromise = api.getHomeDir().catch(() => '');
+    }
+    return this.homeDirPromise;
+  }
+
   private openImagePreviewForRef(n: number, line: number) {
     const tab = appState.tabs.get(this.tabId);
     if (!tab) return;
@@ -760,7 +850,10 @@ export class TerminalView {
       provideLinks: (lineNumber, callback) => {
         const info = this.lineTextWithCols(lineNumber - 1);
         if (!info) { callback(undefined); return; }
-        const re = /\[Image #(\d+)\]/g;
+        // Claude renders [Image #N] refs with a CHA absolute-column move
+        // ([Image\x1b[13G#N]), which lands in the buffer as `[Image#N]` with no
+        // space — the skipped blank cells never join the text. Match both.
+        const re = /\[Image[  ]*#(\d+)\]/g;
         const links: any[] = [];
         let m: RegExpExecArray | null;
         while ((m = re.exec(info.text)) !== null) {
@@ -776,13 +869,30 @@ export class TerminalView {
             activate: () => {}, // see click listener below
           });
         }
+        // Bare pasted-image paths (pi/Codex pi-clipboard-* etc.) — hover
+        // underline per physical row (a wrapped path spans several rows, and
+        // xterm links are single-row ranges); activation via the click
+        // listener below.
+        const linfo = this.logicalLineText(lineNumber - 1);
+        if (linfo) {
+          for (const seg of this.imagePathSegments(linfo)) {
+            links.push({
+              range: {
+                start: { x: seg.x1, y: seg.row + 1 },
+                end: { x: seg.x2, y: seg.row + 1 },
+              },
+              text: seg.path,
+              activate: () => {},
+            });
+          }
+        }
         callback(links.length ? links : undefined);
       },
     });
 
     // Open [Image #N] previews from a direct click hit-test against the live
     // buffer — immune to the hover/repaint race described above.
-    this.wrapper.addEventListener('click', (e) => {
+    this.wrapper.addEventListener('click', async (e) => {
       if (this.terminal.hasSelection()) return;
       const screen = this.wrapper.querySelector('.xterm-screen');
       if (!screen) return;
@@ -792,16 +902,40 @@ export class TerminalView {
       const col = Math.floor((e.clientX - rect.left) / (rect.width / this.terminal.cols));
       const row = Math.floor((e.clientY - rect.top) / (rect.height / this.terminal.rows));
       const line = this.terminal.buffer.active.viewportY + row;
-      const info = this.lineTextWithCols(line);
+      // Use the joined logical line so a long image path that wraps across
+      // physical rows still resolves as one token (see logicalLineText).
+      const info = this.logicalLineText(line);
       if (!info) return;
-      const re = /\[Image #(\d+)\]/g;
+      const absCol = (line - info.startRow) * (this.terminal.cols || 80) + col;
+      // See registerLinkProvider above: Claude's CHA-split refs join as
+      // `[Image#N]` (no space), so both spellings must hit here.
+      const re = /\[Image[  ]*#(\d+)\]/g;
       let m: RegExpExecArray | null;
       while ((m = re.exec(info.text)) !== null) {
         const startCol = info.charToCol[m.index] ?? 0;
         const endCol = info.charToCol[m.index + m[0].length - 1] ?? startCol;
-        if (col >= startCol && col <= endCol) {
+        if (absCol >= startCol && absCol <= endCol) {
           this.openImagePreviewForRef(parseInt(m[1], 10), line);
           return;
+        }
+      }
+      // pi/Codex pasted images render as bare absolute paths (pi-clipboard-*),
+      // Claude renders its cache paths as `~/...` — hit-test image file paths
+      // the same way and open the in-app preview, expanding `~` to HOME.
+      // No OSC 8 is emitted for these in this terminal, so there's no
+      // linkHandler to race with.
+      const preview = (window as any).showImagePreview;
+      if (typeof preview === 'function') {
+        for (const seg of this.imagePathSegments(info)) {
+          if (seg.row === line && col >= seg.x1 - 1 && col <= seg.x2 - 1) {
+            if (seg.path.startsWith('~/')) {
+              const home = await this.getHomeDir();
+              if (home) preview([convertFileSrc(home + seg.path.slice(1))]);
+            } else {
+              preview([convertFileSrc(seg.path)]);
+            }
+            return;
+          }
         }
       }
     });
@@ -1196,6 +1330,12 @@ export class TerminalView {
   setCurrentTask(content: string, imageCount = 0, imagePaths?: string[]) {
     const text = content.trim();
     if (!text && imageCount === 0) { this.clearCurrentTask(); return; }
+    // Callers that tracked the paste inside the terminal (paste + Enter) know
+    // only the count, not the paths — fall back to the most recent pasted
+    // images so the pin's [N 张图片] link still opens the preview.
+    if (imageCount > 0 && !(imagePaths && imagePaths.length > 0)) {
+      imagePaths = appState.recentPastedImagePaths(this.tabId, imageCount);
+    }
     // Remember across clears so resumeCurrentTask() can restore the pin after
     // a spurious idle-ready (see lastTaskText field doc).
     this.lastTaskText = text;

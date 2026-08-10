@@ -1241,3 +1241,14 @@ pub fn force_close_window(app: AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Resolve the user's home directory. Frontend needs it to expand `~/` image
+/// paths that Claude Code renders in its transcript (e.g.
+/// `~/.claude/image-cache/<session>/1.png`) so clicking them can open a
+/// preview — the webview has no direct HOME access.
+#[tauri::command]
+pub fn get_home_dir() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default()
+}

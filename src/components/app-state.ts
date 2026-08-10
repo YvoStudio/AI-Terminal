@@ -197,6 +197,17 @@ class AppState {
     this.persistTabs();
   }
 
+  /** The `count` most recently pasted image paths (highest M first) for a tab.
+   * Used by the pinned-task bar when a task was submitted without the caller
+   * passing explicit paths (terminal paste + Enter path) so its
+   * `[N 张图片]` link can still open the preview. */
+  recentPastedImagePaths(id: string, count: number): string[] {
+    const tab = this.tabs.get(id);
+    if (!tab?.pastedById?.size || count <= 0) return [];
+    const ms = Array.from(tab.pastedById.keys()).sort((a, b) => b - a).slice(0, count);
+    return ms.map(m => tab.pastedById.get(m)!);
+  }
+
   /**
    * App-restart restore: re-seed the tab-lifetime image numbering saved in
    * SavedTab so numbering stays monotonic across app restarts and the
@@ -258,7 +269,13 @@ class AppState {
    *  resolveImageRefAt return nothing. */
   private beginImageEpoch(tab: TabState, makeAnchor: () => LineAnchor): ImageEpoch {
     if (!tab.imageEpochs) tab.imageEpochs = [];
-    tab.imageEpochs = tab.imageEpochs.filter(e => e.startLine() >= 0);
+    // Drop only epochs that are BOTH anchor-less AND binding-less. A disposed
+    // anchor (marker.line → -1, which Claude Code's constant line delete/redraw
+    // causes) must NOT take the epoch's N→M bindings with it — dropping it here
+    // orphans every ref and leaves resolveImageRefAt with an empty map. The
+    // anchor's only job is session disambiguation; resolve falls back to the
+    // newest epoch when no anchor covers the clicked line.
+    tab.imageEpochs = tab.imageEpochs.filter(e => e.startLine() >= 0 || e.map.size > 0);
     const newest = tab.imageEpochs[tab.imageEpochs.length - 1];
     if (newest && newest.map.size === 0) {
       newest.startLine = makeAnchor();
@@ -287,11 +304,20 @@ class AppState {
   resolveImageRefAt(id: string, line: number, n: number): number | undefined {
     const tab = this.tabs.get(id);
     if (!tab?.imageEpochs?.length) return undefined;
+    // 1. Newest epoch whose anchor is alive and at/above the clicked line.
     for (let i = tab.imageEpochs.length - 1; i >= 0; i--) {
       const start = tab.imageEpochs[i].startLine();
-      if (start < 0) continue; // anchor trimmed away
+      if (start < 0) continue; // anchor trimmed away / disposed
       if (start <= line) return tab.imageEpochs[i].map.get(n);
     }
+    // 2. Fallback: no epoch's anchor is usable for this line. Claude Code's
+    //    repaints constantly delete/insert lines, and a marker sitting at the
+    //    viewport top can get disposed (line → -1) before the user clicks. In
+    //    the live-session case the newest epoch's N→M binding is the right
+    //    answer anyway; the only ambiguity is a stale ref from an older
+    //    session whose anchors are gone too (rare, low impact).
+    const newest = tab.imageEpochs[tab.imageEpochs.length - 1];
+    if (newest) return newest.map.get(n);
     return undefined;
   }
 

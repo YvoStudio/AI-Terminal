@@ -527,6 +527,7 @@ pub fn run() {
             commands::save_quick_commands,
             commands::get_git_branch,
             commands::get_codex_session_stats,
+            commands::get_home_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Terminal");

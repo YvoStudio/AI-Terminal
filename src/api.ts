@@ -271,6 +271,12 @@ export const api = {
     return invoke<string>('convert_image_path', { filePath });
   },
 
+  /** Resolve the user's home directory (for expanding `~/` paths shown by
+   *  Claude Code's image-cache attachment lines). */
+  async getHomeDir(): Promise<string> {
+    return invoke<string>('get_home_dir');
+  },
+
   async loadQuickCommands(): Promise<string> {
     return invoke<string>('load_quick_commands');
   },
