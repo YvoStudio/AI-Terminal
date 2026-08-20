@@ -25,6 +25,8 @@ export class TerminalView {
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private scrollBtn: HTMLElement;
   private scrollCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private scrollUiFrame: number | null = null;
+  private viewportResyncPending = false;
   // Codex can publish live status values through OSC 0 terminal-title updates,
   // but its native status line cannot split metrics left and identity right.
   // AI Terminal paints those values over Codex's footer row for parity with
@@ -611,10 +613,9 @@ export class TerminalView {
         if (e.shiftKey && shiftHeld && !e.ctrlKey && !e.metaKey && !e.altKey
             && e.key.length === 1 && !/^[a-zA-Z]$/.test(e.key)) {
           e.preventDefault();
-          api.markTerminalInput(tabId);
           appState.markPromptDirty(tabId);
           this.stagePromptText(e.key);
-          api.writeTerminal(tabId, e.key);
+          api.writeTerminalUserInput(tabId, e.key);
           suppressChar = e.key;
           suppressUntil = Date.now() + 300;
         }
@@ -670,8 +671,7 @@ export class TerminalView {
           const isAgent = aiTool === 'claude' || aiTool === 'codex' || aiTool === 'aider'
             || aiTool === 'opencode' || aiTool === 'pi';
           if (!isAgent || appState.isPromptDirty(tabId)) {
-            api.markTerminalInput(tabId);
-            api.writeTerminal(tabId, isAgent ? '\x03' : '\x15');
+            api.writeTerminalUserInput(tabId, isAgent ? '\x03' : '\x15');
             this.resetPendingPrompt();
             appState.clearPromptDirty(tabId);
           }
@@ -685,8 +685,7 @@ export class TerminalView {
       // Intercept before Kitty encoding so Cmd and Ctrl behave identically.
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'Delete') {
         if (e.type === 'keydown') {
-          api.markTerminalInput(tabId);
-          api.writeTerminal(tabId, '\x0b');
+          api.writeTerminalUserInput(tabId, '\x0b');
         }
         e.preventDefault();
         return false;
@@ -715,7 +714,7 @@ export class TerminalView {
           // Only emit CSI u form when there are real modifiers beyond base 1
           // (avoid intercepting bare Enter, which TUIs still expect as \r).
           if (mods > 1 || (e.key === 'Enter' && (e.ctrlKey || e.shiftKey))) {
-            api.writeTerminal(this.tabId, `\x1b[${cp};${mods}u`);
+            api.writeTerminalUserInput(this.tabId, `\x1b[${cp};${mods}u`);
             e.preventDefault();
             return false;
           }
@@ -778,11 +777,11 @@ export class TerminalView {
           if (tab?.aiTool) {
             // AI tools support kitty protocol for multiline
             this.stagePromptText('\n');
-            api.writeTerminal(tabId, '\x1b[13;2u');
+            api.writeTerminalUserInput(tabId, '\x1b[13;2u');
           } else {
             // Regular shell: send \r\n for proper line break
             // Some shells need both CR and LF for proper newline
-            api.writeTerminal(tabId, '\r\n');
+            api.writeTerminalUserInput(tabId, '\r\n');
           }
         }
         return false;
@@ -964,7 +963,6 @@ export class TerminalView {
       // otherwise reopen the executing-rearm gate and re-light the red dot.
       const isAutoSequence = fixed === '\x1b[I' || fixed === '\x1b[O';
       if (!isAutoSequence) {
-        api.markTerminalInput(tabId);
         // Track unsubmitted prompt text so queue auto-send won't inject a note
         // block on top of what the user is typing. Enter (\r) submits; Ctrl+C
         // (\x03) / Ctrl+U (\x15) clear the line; bare escape/cursor sequences
@@ -976,7 +974,8 @@ export class TerminalView {
         }
       }
       this.trackPromptInput(fixed);
-      api.writeTerminal(tabId, fixed);
+      if (isAutoSequence) api.writeTerminal(tabId, fixed);
+      else api.writeTerminalUserInput(tabId, fixed);
     });
 
     // Listen for output from Rust backend
@@ -1083,10 +1082,9 @@ export class TerminalView {
         e.stopPropagation();
         const text = e.clipboardData?.getData('text/plain');
         if (text) {
-          api.markTerminalInput(tabId);
           appState.markPromptDirty(tabId);
           this.stagePromptText(text);
-          api.writeTerminal(tabId, '\x1b[200~' + text + '\x1b[201~');
+          api.writeTerminalUserInput(tabId, '\x1b[200~' + text + '\x1b[201~');
         }
       }
       // Non-AI, no image: let default paste reach xterm
@@ -1145,11 +1143,8 @@ export class TerminalView {
       this.updateScrollBtn();
     });
     this.terminal.onWriteParsed(() => {
-      // If new content arrives and user hasn't scrolled up, stay at bottom
-      if (!this.userScrolledUp) {
-        this.terminal.scrollToBottom();
-      }
-      this.updateScrollBtn();
+      this.viewportResyncPending = true;
+      this.scheduleScrollUiUpdate();
     });
     // Periodic check for scroll position (catches mouse wheel and other scroll
     // events). Also resync the viewport scroll area as a self-healing backstop so
@@ -1158,8 +1153,10 @@ export class TerminalView {
       // Only resync when the user isn't actively wheeling — syncScrollArea snaps
       // scrollTop back to the buffer position, which would fight an in-progress
       // gesture. After they stop, this heals any stale scroll range within 500ms.
-      if (Date.now() - this.lastWheelAt > 400) this.resyncViewport();
-      this.updateScrollBtn();
+      if (this.viewportResyncPending && Date.now() - this.lastWheelAt > 400) {
+        this.resyncViewport();
+        this.viewportResyncPending = false;
+      }
     }, 500);
 
     this.resizeObserver = new ResizeObserver(() => {
@@ -1174,6 +1171,15 @@ export class TerminalView {
     const atBottom = buf.baseY - buf.viewportY <= 3;
     if (atBottom) this.userScrolledUp = false;
     this.scrollBtn.classList.toggle('visible', !atBottom);
+  }
+
+  private scheduleScrollUiUpdate() {
+    if (this.scrollUiFrame !== null) return;
+    this.scrollUiFrame = requestAnimationFrame(() => {
+      this.scrollUiFrame = null;
+      if (!this.userScrolledUp) this.terminal.scrollToBottom();
+      this.updateScrollBtn();
+    });
   }
 
   /** FitAddon must round the available width down to a whole number of cells.
@@ -1730,6 +1736,7 @@ export class TerminalView {
     this.resizeObserver.disconnect();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     if (this.scrollCheckTimer) clearInterval(this.scrollCheckTimer);
+    if (this.scrollUiFrame !== null) cancelAnimationFrame(this.scrollUiFrame);
     if (this.holdTimer !== null) clearTimeout(this.holdTimer);
     if (this.scrollbackSaveTimer) clearInterval(this.scrollbackSaveTimer);
     // Best-effort final save so the next launch restores the freshest state.

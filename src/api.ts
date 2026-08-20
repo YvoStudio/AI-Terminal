@@ -71,6 +71,14 @@ export const api = {
     });
   },
 
+  /** Real keyboard/IME input. The backend records the input timestamp and writes
+   *  to the PTY in one IPC request, avoiding a second round-trip per keystroke. */
+  writeTerminalUserInput(tabId: string, data: string): void {
+    invoke('write_terminal_user_input', { tabId, data }).catch(err => {
+      console.warn('[writeTerminalUserInput] failed:', err);
+    });
+  },
+
   /** Tell the backend the user actually typed into this tab — only call from
    *  xterm's onData (real keystrokes), NOT from programmatic write_terminal
    *  callers (paste injection, Kitty protocol replies, etc.) */

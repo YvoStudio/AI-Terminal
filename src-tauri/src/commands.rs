@@ -251,6 +251,23 @@ pub fn write_terminal(
     mgr.write(&tab_id, &data)
 }
 
+/// Write real keyboard/IME input. Keeping the status-gate update in this same
+/// command halves the frontend-to-backend IPC work on every keystroke.
+#[tauri::command]
+pub fn write_terminal_user_input(
+    state: State<'_, Arc<RwLock<PtyManager>>>,
+    parser_state: State<'_, Arc<Mutex<OutputParser>>>,
+    tab_id: String,
+    data: String,
+) -> Result<(), String> {
+    {
+        let mut parser = parser_state.lock().map_err(|e| e.to_string())?;
+        parser.mark_input(&tab_id);
+    }
+    let mgr = state.read().map_err(|e| e.to_string())?;
+    mgr.write(&tab_id, &data)
+}
+
 /// Called by the frontend when the user actually types into xterm (the onData
 /// stream). Distinguishes real keystrokes from programmatic write_terminal
 /// callers (Kitty protocol responses, paste injection, history launch, etc.)

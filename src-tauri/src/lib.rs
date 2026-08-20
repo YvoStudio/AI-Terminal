@@ -488,6 +488,7 @@ pub fn run() {
             commands::create_terminal,
             commands::switch_shell,
             commands::write_terminal,
+            commands::write_terminal_user_input,
             commands::mark_terminal_input,
             commands::resize_terminal,
             commands::close_terminal,

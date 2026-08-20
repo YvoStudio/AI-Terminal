@@ -310,10 +310,6 @@ impl OutputParser {
             // Non-TUI AI (e.g., the auto-detected "shell" pseudo-tool): keep the
             // legacy chunk-arrival path with the input-gate against idle redraws.
             let allow = state.last_input_ms >= state.last_done_unseen_ms;
-            eprintln!(
-                "[exec-gate] tab={} last_input={} last_done={} allow={}",
-                tab_id, state.last_input_ms, state.last_done_unseen_ms, allow
-            );
             if allow {
                 state.was_executing = true;
                 on_status(tab_id.to_string(), TabStatus::Executing);
@@ -360,8 +356,6 @@ impl OutputParser {
         // Parse OSC 0/2 (terminal title) — Claude Code sets this to session name
         // Format: \x1b]0;title\x07  or  \x1b]2;title\x07
         if let Some((title, has_status_prefix)) = osc_title {
-            eprintln!("OSC title detected: '{}'", title);
-
             // Codex publishes an authoritative live state in its managed OSC
             // title (`... | Working | ...` / `... | Ready | ...`). Its input
             // prompt uses `›` rather than Claude's `❯`, so the generic visual
@@ -458,13 +452,17 @@ impl OutputParser {
             return;
         }
 
-        let cleaned = strip_ansi(raw);
-        state.buffer.push_str(&cleaned);
+        // Full-screen AI clients redraw mostly with carriage returns and escape
+        // sequences, not newline-delimited shell output. Their state is already
+        // derived from the virtual screen above; retaining that stream here made
+        // the text buffer grow without bound and repeatedly clone its full size.
+        if tui_ai {
+            state.buffer.clear();
+            return;
+        }
 
-        let mut lines: Vec<String> = state.buffer.split('\n').map(|s| s.to_string()).collect();
-        state.buffer = lines.pop().unwrap_or_default();
-
-        for line in lines {
+        let completed = take_completed_output_lines(&mut state.buffer, &strip_ansi(raw));
+        for line in completed.split('\n') {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -683,7 +681,6 @@ impl OutputParser {
     pub fn mark_input(&mut self, tab_id: &str) {
         let state = self.states.entry(tab_id.to_string()).or_insert_with(TabState::new);
         state.last_input_ms = now_ms();
-        eprintln!("[mark_input] tab={} now={}", tab_id, state.last_input_ms);
     }
 }
 
@@ -969,6 +966,33 @@ fn strip_ansi(s: &str) -> String {
     strip_ansi_escapes::strip_str(s)
 }
 
+const MAX_PENDING_OUTPUT_LINE_BYTES: usize = 16 * 1024;
+
+/// Append plain terminal text and return only complete newline-delimited lines.
+/// Shell progress renderers may never emit a newline, so retain just a bounded
+/// suffix until a later line boundary arrives.
+fn take_completed_output_lines(buffer: &mut String, incoming: &str) -> String {
+    buffer.push_str(incoming);
+    let Some(last_newline) = buffer.rfind('\n') else {
+        trim_pending_output_line(buffer);
+        return String::new();
+    };
+
+    let remainder = buffer.split_off(last_newline + 1);
+    std::mem::replace(buffer, remainder)
+}
+
+fn trim_pending_output_line(buffer: &mut String) {
+    if buffer.len() <= MAX_PENDING_OUTPUT_LINE_BYTES {
+        return;
+    }
+    let mut start = buffer.len() - MAX_PENDING_OUTPUT_LINE_BYTES;
+    while !buffer.is_char_boundary(start) {
+        start += 1;
+    }
+    buffer.drain(..start);
+}
+
 /// True for AI tools whose UI is a full-screen TUI we can introspect via vt100.
 /// "shell" (the auto-detected pseudo-tool for plain shells after 3 inputs) is
 /// not a TUI and is handled by the legacy OSC 133 / BEL path.
@@ -1209,9 +1233,6 @@ fn match_prompt(line: &str) -> Option<String> {
         return None;
     }
 
-    // Debug: log all lines being checked
-    eprintln!("match_prompt checking: '{}'", trimmed);
-
     // Skip noise lines
     if trimmed.contains("Copyright") || trimmed.contains("版本") || trimmed.starts_with('(') || trimmed.starts_with('[') {
         return None;
@@ -1233,9 +1254,7 @@ fn match_prompt(line: &str) -> Option<String> {
     let first_char = content.chars().next()?;
     if !first_char.is_alphabetic() {
         // For Windows-style prompts like "C:\path>" or "PS C:\path>", extract the path
-        eprintln!("Trying extract_windows_cwd for: '{}'", trimmed);
         if let Some(cwd) = extract_windows_cwd(trimmed) {
-            eprintln!("Extracted cwd from prompt: '{}'", cwd);
             return Some(format!("cd {}", cwd));
         }
         return None;
@@ -1248,7 +1267,6 @@ fn match_prompt(line: &str) -> Option<String> {
        content.starts_with("Opencode") || content.starts_with("Codex") || content.starts_with("Claude") ||
        content.starts_with("Git") || content.starts_with("Cd") || content.starts_with("Ls") ||
        content.starts_with("Npm") || content.starts_with("Npx") || content.starts_with("Yarn") {
-        eprintln!("Command detected: '{}'", content);
         return Some(content.to_string());
     }
 
@@ -1256,7 +1274,6 @@ fn match_prompt(line: &str) -> Option<String> {
     // ping/pip/pipenv echoes as commands.
     let lower = content.to_lowercase();
     if lower == "pi" || lower.starts_with("pi ") {
-        eprintln!("Command detected: '{}'", content);
         return Some(content.to_string());
     }
 
@@ -1303,7 +1320,6 @@ fn extract_windows_cwd(prompt: &str) -> Option<String> {
                 && before_gt.chars().next().map_or(false, |c| c.is_ascii_alphabetic())
                 && before_gt.chars().nth(1) == Some(':')
             {
-                eprintln!("Extracted PS cwd: '{}'", before_gt);
                 return Some(before_gt.to_string());
             }
         }
@@ -1328,7 +1344,6 @@ fn extract_windows_cwd(prompt: &str) -> Option<String> {
             if (first_is_alpha && second_char == Some(':')) || before_gt.starts_with('\\') {
                 // This is a Windows path like C:\path
                 let path = before_gt.to_string();
-                eprintln!("Extracted Windows cwd: '{}'", path);
                 return Some(path);
             }
         }
@@ -1339,27 +1354,20 @@ fn extract_windows_cwd(prompt: &str) -> Option<String> {
 
 fn is_ai_command(cmd: &str) -> Option<&'static str> {
     let lower = cmd.to_lowercase();
-    eprintln!("Checking AI command: '{}'", lower);
-
     // Direct command match (e.g., "opencode", "opencode .", "opencode -r")
     if lower == "claude" || lower.starts_with("claude ") {
-        eprintln!("Detected: claude");
         return Some("claude");
     }
     if lower == "opencode" || lower.starts_with("opencode ") {
-        eprintln!("Detected: opencode");
         return Some("opencode");
     }
     if lower == "codex" || lower.starts_with("codex ") {
-        eprintln!("Detected: codex");
         return Some("codex");
     }
     if lower == "aider" || lower.starts_with("aider ") {
-        eprintln!("Detected: aider");
         return Some("aider");
     }
     if lower == "pi" || lower.starts_with("pi ") {
-        eprintln!("Detected: pi");
         return Some("pi");
     }
 
@@ -1370,7 +1378,6 @@ fn is_ai_command(cmd: &str) -> Option<&'static str> {
             || lower.starts_with("pnpm")
             || lower.starts_with("npm"))
     {
-        eprintln!("Detected: opencode (via package manager)");
         return Some("opencode");
     }
     if lower.contains("codex")
@@ -1379,7 +1386,6 @@ fn is_ai_command(cmd: &str) -> Option<&'static str> {
             || lower.starts_with("pnpm")
             || lower.starts_with("npm"))
     {
-        eprintln!("Detected: codex (via package manager)");
         return Some("codex");
     }
     if lower.contains("claude")
@@ -1388,7 +1394,6 @@ fn is_ai_command(cmd: &str) -> Option<&'static str> {
             || lower.starts_with("pnpm")
             || lower.starts_with("npm"))
     {
-        eprintln!("Detected: claude (via package manager)");
         return Some("claude");
     }
 
@@ -1547,6 +1552,24 @@ fn dirs_next_home() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_output_without_newline_stays_bounded() {
+        let mut buffer = String::new();
+        let chunk = "你".repeat(MAX_PENDING_OUTPUT_LINE_BYTES);
+        assert!(take_completed_output_lines(&mut buffer, &chunk).is_empty());
+        assert!(buffer.len() <= MAX_PENDING_OUTPUT_LINE_BYTES);
+        assert_eq!(buffer.len(), MAX_PENDING_OUTPUT_LINE_BYTES - 1);
+        assert!(buffer.chars().all(|ch| ch == '你'));
+    }
+
+    #[test]
+    fn completed_output_leaves_only_the_partial_tail() {
+        let mut buffer = String::from("partial");
+        let completed = take_completed_output_lines(&mut buffer, " line\nnext");
+        assert_eq!(completed, "partial line\n");
+        assert_eq!(buffer, "next");
+    }
 
     /// Render `lines` into a fresh 80x24 virtual screen and classify it.
     fn classify_lines(lines: &[&str]) -> AiUiState {
