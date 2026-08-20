@@ -493,6 +493,7 @@ pub fn run() {
             commands::resize_terminal,
             commands::close_terminal,
             commands::get_terminal_cwd,
+            commands::get_updater_install_status,
             commands::get_sidebar_entries,
             commands::save_tabs,
             commands::load_tabs,

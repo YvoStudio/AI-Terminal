@@ -44,6 +44,11 @@ export interface CodexSessionStats {
   planType?: string;
 }
 
+export interface UpdaterInstallStatus {
+  canInstall: boolean;
+  reason?: string;
+}
+
 export interface HistoryEntry {
   name: string;
   cwd: string;
@@ -88,6 +93,10 @@ export const api = {
 
   resizeTerminal(tabId: string, cols: number, rows: number): void {
     invoke('resize_terminal', { tabId, cols, rows }).catch(() => {});
+  },
+
+  async getUpdaterInstallStatus(): Promise<UpdaterInstallStatus> {
+    return invoke<UpdaterInstallStatus>('get_updater_install_status');
   },
 
   async switchShell(tabId: string, shell: 'cmd' | 'powershell' | 'wsl'): Promise<void> {

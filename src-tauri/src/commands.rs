@@ -325,6 +325,40 @@ pub fn get_terminal_cwd(
     Ok(mgr.get_cwd(&tab_id))
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdaterInstallStatus {
+    pub can_install: bool,
+    pub reason: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+fn is_running_from_macos_dmg(executable: &std::path::Path) -> bool {
+    executable.starts_with("/Volumes")
+}
+
+#[tauri::command]
+pub fn get_updater_install_status() -> UpdaterInstallStatus {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(executable) = std::env::current_exe() {
+            if is_running_from_macos_dmg(&executable) {
+                return UpdaterInstallStatus {
+                    can_install: false,
+                    reason: Some(
+                        "当前 AI Terminal 正在从只读安装磁盘运行，不能自动更新。请退出应用，将 DMG 中的 AI Terminal.app 拖到“应用程序”文件夹后，再从“应用程序”打开。".to_string(),
+                    ),
+                };
+            }
+        }
+    }
+
+    UpdaterInstallStatus {
+        can_install: true,
+        reason: None,
+    }
+}
+
 #[tauri::command]
 pub fn get_git_branch(cwd: String) -> Option<String> {
     let output = std::process::Command::new("git")
@@ -1268,4 +1302,20 @@ pub fn get_home_dir() -> String {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::is_running_from_macos_dmg;
+    use std::path::Path;
+
+    #[test]
+    fn updater_rejects_app_running_from_dmg() {
+        assert!(is_running_from_macos_dmg(Path::new(
+            "/Volumes/AI Terminal/AI Terminal.app/Contents/MacOS/ai-terminal"
+        )));
+        assert!(!is_running_from_macos_dmg(Path::new(
+            "/Applications/AI Terminal.app/Contents/MacOS/ai-terminal"
+        )));
+    }
 }

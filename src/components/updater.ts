@@ -1,5 +1,6 @@
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { api, type UpdaterInstallStatus } from '../api';
 
 const DISMISS_KEY = 'updater:dismissed-version';
 
@@ -56,6 +57,15 @@ function showUpdateDialog(update: Update): void {
   const progressEl = overlay.querySelector<HTMLElement>('.updater-progress')!;
   const fillEl = overlay.querySelector<HTMLElement>('.updater-progress-fill')!;
   const textEl = overlay.querySelector<HTMLElement>('.updater-progress-text')!;
+  let installBlockReason: string | null = null;
+
+  const applyInstallStatus = (status: UpdaterInstallStatus) => {
+    if (status.canInstall) return;
+    installBlockReason = status.reason || '当前安装位置不可写，不能自动更新。';
+    installBtn.textContent = '需先安装到应用程序';
+    installBtn.title = installBlockReason;
+  };
+  void api.getUpdaterInstallStatus().then(applyInstallStatus).catch(() => {});
 
   skipBtn.addEventListener('click', () => {
     localStorage.setItem(DISMISS_KEY, update.version);
@@ -64,6 +74,17 @@ function showUpdateDialog(update: Update): void {
   laterBtn.addEventListener('click', close);
 
   installBtn.addEventListener('click', async () => {
+    if (!installBlockReason) {
+      try {
+        applyInstallStatus(await api.getUpdaterInstallStatus());
+      } catch {}
+    }
+    if (installBlockReason) {
+      progressEl.classList.remove('hidden');
+      textEl.textContent = installBlockReason;
+      return;
+    }
+
     skipBtn.disabled = true;
     laterBtn.disabled = true;
     installBtn.disabled = true;
@@ -97,12 +118,19 @@ function showUpdateDialog(update: Update): void {
       textEl.textContent = '安装完成，即将重启...';
       await relaunch();
     } catch (err) {
-      textEl.textContent = `更新失败: ${err instanceof Error ? err.message : String(err)}`;
+      const message = err instanceof Error ? err.message : String(err);
+      textEl.textContent = isReadOnlyInstallError(message)
+        ? '更新失败：当前安装位置不可写。请退出应用，将 DMG 中的 AI Terminal.app 拖到“应用程序”文件夹后，再从“应用程序”打开。'
+        : `更新失败: ${message}`;
       skipBtn.disabled = false;
       laterBtn.disabled = false;
       installBtn.disabled = false;
     }
   });
+}
+
+function isReadOnlyInstallError(message: string): boolean {
+  return /read-only file system|os error 30|permission denied|os error 13/i.test(message);
 }
 
 function escapeHtml(s: string): string {
