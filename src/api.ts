@@ -14,10 +14,18 @@ export interface SidebarEntry {
   content: string;
 }
 
+export interface TaskHistoryEntry {
+  content: string;
+  images?: string[];
+  submittedAt: number;
+  completedAt?: number;
+}
+
 export interface SavedTab {
   id?: string;
   name: string;
   noteBlocks?: Array<{ id: string; content: string; images?: string[] }>;
+  taskHistory?: TaskHistoryEntry[];
   autoSend?: boolean;
   shell?: 'cmd' | 'powershell' | 'wsl';
   cwd?: string;

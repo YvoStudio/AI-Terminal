@@ -48,11 +48,16 @@ export class TerminalView {
   private notepadFab!: HTMLElement;
   private notepadFabCount!: HTMLElement;
   private notepadFabCurrent!: HTMLElement;
+  private notepadTitleEl!: HTMLElement;
+  private notepadHistoryToggle!: HTMLButtonElement;
+  private taskHistoryEl!: HTMLElement;
+  private taskHistoryVisible = false;
   private currentTaskEl!: HTMLElement;
   private currentTaskLabelEl!: HTMLElement;
   private currentTaskTextEl!: HTMLElement;
   private currentTaskText = '';
   private currentTaskSummary = '';
+  private currentTaskSubmittedAt: number | null = null;
   // Best-effort mirror of the text currently being composed in an AI prompt.
   // xterm normally exposes only keystrokes, not the editor's final value, so we
   // track printable input/paste and publish it when Enter is submitted.
@@ -61,9 +66,16 @@ export class TerminalView {
   private notepadVisible = false;
   onNotepadRender: ((tabId: string) => void) | null = null;
   onNotepadAddBlock: ((tabId: string) => void) | null = null;
+  // Lets main.ts cancel a pending queue auto-send as soon as any manual or
+  // queued prompt crosses the real submission boundary.
+  onAiTaskSubmitted: ((tabId: string) => void) | null = null;
 
   private mouseSelectionInProgress = false;
   private userScrolledUp = false;
+  // Fullscreen Pi owns its transcript viewport inside the alternate buffer, so
+  // xterm's baseY/viewportY stay at zero even when Pi has scrolled far upward.
+  // Mirror upward wheel intent so our shared "回到底部" button still works.
+  private appOwnedScrolledUp = false;
   private lastWheelAt = 0; // ms of the last wheel event — gates the resync backstop off active scrolling.
   // Fractional rows accumulated from trackpad pixel deltas. Host-scrolled AI
   // sessions consume wheel input themselves so xterm can never turn it into
@@ -307,18 +319,27 @@ export class TerminalView {
     }
   }
 
+  /** Fullscreen Pi renders a scrollable, application-owned transcript in the
+   * alternate buffer. Its baseY is always zero; wheel reports must reach Pi. */
+  private hasAppOwnedScroll(): boolean {
+    return appState.tabs.get(this.tabId)?.aiTool === 'pi'
+      && this.terminal.buffer.active.type === 'alternate';
+  }
+
   /** Whether scrolling/selection should be owned by xterm rather than the TUI. */
   private needsHostMouse(): boolean {
+    // Alternate-screen apps own their viewport. Disabling DEC mouse reporting
+    // here breaks fullscreen Pi's wheel handling and makes its history immovable.
+    if (this.terminal.buffer.active.type === 'alternate') return false;
     const aiTool = appState.tabs.get(this.tabId)?.aiTool;
     return aiTool === 'codex' || aiTool === 'aider'
       || aiTool === 'opencode' || aiTool === 'pi';
   }
 
-  /** Most AI TUIs are keyboard-driven; if one (or untrusted command output)
-   * leaves DEC mouse reporting enabled, xterm hands drag/wheel events to the PTY
-   * and disables normal selection/scrolling for that tab. Claude is the exception:
-   * it uses mouse reports to scroll its transcript. Disabling them makes xterm
-   * translate wheel movement into arrow keys, which browses Claude's input history. */
+  /** Most main-buffer AI TUIs are keyboard-driven; if one (or untrusted command
+   * output) leaves DEC mouse reporting enabled, xterm hands drag/wheel events to
+   * the PTY and disables normal selection/scrolling. Alternate-screen apps are
+   * excluded because they own their scrollable viewport and need mouse reports. */
   private restoreHostMouse() {
     if (this.needsHostMouse() && this.terminal.modes.mouseTrackingMode !== 'none') {
       this.terminal.write(
@@ -456,6 +477,23 @@ export class TerminalView {
     this.terminal.attachCustomWheelEventHandler((e) => {
       const tuiOwnsWheel = this.terminal.modes.mouseTrackingMode !== 'none';
       const hasScrollback = this.terminal.buffer.active.baseY > 0;
+      const appOwnedScroll = this.hasAppOwnedScroll();
+
+      // Fullscreen Pi keeps the transcript in its own ScrollView. xterm cannot
+      // observe Pi's scrollTop, so remember upward intent for our bottom button
+      // while forwarding the original mouse report unchanged.
+      if (appOwnedScroll && tuiOwnsWheel) {
+        if (e.deltaY < 0) {
+          this.appOwnedScrolledUp = true;
+          requestAnimationFrame(() => this.updateScrollBtn());
+        }
+        return true;
+      }
+
+      // At the start of a fresh host-scroll gesture, repair xterm's DOM range
+      // before its native wheel handler runs. This lets the very first gesture
+      // work instead of requiring the user to wait and try a second time.
+      if (hasScrollback && Date.now() - this.lastWheelAt > 400) this.resyncViewport();
 
       if (!hasScrollback) {
         if (tuiOwnsWheel && !this.needsHostMouse()) return true;
@@ -1112,29 +1150,46 @@ export class TerminalView {
     this.scrollBtn.title = '回到底部';
     this.scrollBtn.addEventListener('click', () => {
       this.userScrolledUp = false;
-      this.terminal.scrollToBottom();
+      if (this.hasAppOwnedScroll()) {
+        // Pi fullscreen binds End to tui.altScreen.bottom. Write directly so
+        // this navigation action is not mistaken for a new user task.
+        this.appOwnedScrolledUp = false;
+        api.writeTerminal(this.tabId, '\x1b[F');
+      } else {
+        // Heal a stale DOM scroll range before jumping, then sync it again after
+        // xterm updates viewportY so the next upward gesture works immediately.
+        this.resyncViewport();
+        this.terminal.scrollToBottom();
+        requestAnimationFrame(() => {
+          this.resyncViewport();
+          this.updateScrollBtn();
+        });
+      }
+      this.updateScrollBtn();
       this.terminal.focus();
     });
     this.wrapper.appendChild(this.scrollBtn);
 
     this.createNotepad();
 
-    // Track user scroll: mouse wheel means user is scrolling manually
-    this.wrapper.addEventListener('wheel', () => {
+    // Track user scroll: mouse wheel means user is scrolling manually.
+    this.wrapper.addEventListener('wheel', (e) => {
       this.lastWheelAt = Date.now();
-      const buf = this.terminal.buffer.active;
-      // After wheel, check if user scrolled away from bottom
+      this.viewportResyncPending = true;
+      if (this.hasAppOwnedScroll() && e.deltaY < 0) this.appOwnedScrolledUp = true;
+      // After wheel, check if user scrolled away from bottom and refresh the
+      // button even if xterm failed to emit onScroll because its DOM range was
+      // stale. The pending resync below makes the following gesture scrollable.
       requestAnimationFrame(() => {
-        this.userScrolledUp = buf.viewportY < buf.baseY - 3;
+        if (!this.hasAppOwnedScroll()) this.userScrolledUp = !this.isHostAtBottom();
+        this.updateScrollBtn();
       });
     });
 
     this.terminal.onScroll(() => {
-      // Update userScrolledUp on any scroll event (wheel, keyboard, mouse drag selection, etc.)
-      const buf = this.terminal.buffer.active;
-      const atBottom = buf.baseY - buf.viewportY <= 3;
-      if (!atBottom) this.userScrolledUp = true;
-      else this.userScrolledUp = false;
+      // Update userScrolledUp on any host scroll event (wheel, keyboard, mouse
+      // drag selection, scrollbar). Include DOM position for stale-range cases.
+      if (!this.hasAppOwnedScroll()) this.userScrolledUp = !this.isHostAtBottom();
       this.updateScrollBtn();
     });
     this.terminal.onWriteParsed(() => {
@@ -1152,6 +1207,10 @@ export class TerminalView {
         this.resyncViewport();
         this.viewportResyncPending = false;
       }
+      // Cheap position refresh is kept periodic even when no output is being
+      // parsed. This catches native viewport scrolls that missed onScroll and
+      // fixes the button disappearing permanently after one bottom jump.
+      this.updateScrollBtn();
     }, 500);
 
     this.resizeObserver = new ResizeObserver(() => {
@@ -1161,9 +1220,23 @@ export class TerminalView {
     this.resizeObserver.observe(this.wrapper);
   }
 
-  private updateScrollBtn() {
+  private isHostAtBottom(): boolean {
     const buf = this.terminal.buffer.active;
-    const atBottom = buf.baseY - buf.viewportY <= 3;
+    const bufferAtBottom = buf.baseY - buf.viewportY <= 3;
+    const viewport = this.terminal.element?.querySelector('.xterm-viewport') as HTMLElement | null;
+    if (!viewport || viewport.scrollHeight <= viewport.clientHeight + 1) return bufferAtBottom;
+    const lineHeight = Math.max(1, viewport.scrollHeight / Math.max(1, buf.baseY + this.terminal.rows));
+    const domAtBottom = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= lineHeight * 3;
+    return bufferAtBottom && domAtBottom;
+  }
+
+  private updateScrollBtn() {
+    if (this.hasAppOwnedScroll()) {
+      this.scrollBtn.classList.toggle('visible', this.appOwnedScrolledUp);
+      return;
+    }
+    this.appOwnedScrolledUp = false;
+    const atBottom = this.isHostAtBottom();
     if (atBottom) this.userScrolledUp = false;
     this.scrollBtn.classList.toggle('visible', !atBottom);
   }
@@ -1217,6 +1290,15 @@ export class TerminalView {
     const title = document.createElement('span');
     title.className = 'terminal-notepad-title';
     title.textContent = '任务队列';
+    this.notepadTitleEl = title;
+
+    const historyToggle = document.createElement('button');
+    historyToggle.className = 'terminal-notepad-history-toggle';
+    historyToggle.type = 'button';
+    historyToggle.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a6 6 0 11-5.65 4H.5l2.6-2.6L5.7 6H3.4A4.5 4.5 0 108 3.5V2zm-.75 3h1.5v3.3l2.4 1.4-.75 1.3-3.15-1.85V5z"/></svg><span>历史记录</span>';
+    historyToggle.title = '查看当前标签最近 20 个任务';
+    historyToggle.addEventListener('click', () => this.setTaskHistoryVisible(!this.taskHistoryVisible));
+    this.notepadHistoryToggle = historyToggle;
 
     // Per-session auto-send toggle — one per tab/pane (not per task). When on, the
     // head of this tab's queue is auto-sent each time the AI goes idle.
@@ -1246,6 +1328,7 @@ export class TerminalView {
     collapse.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11.5l-5-5h10z"/></svg>';
     collapse.addEventListener('click', () => this.setNotepadVisible(false));
     header.appendChild(title);
+    header.appendChild(historyToggle);
     header.appendChild(collapse);
 
     // Keep the latest submitted item pinned above the scrolling list. Its
@@ -1280,6 +1363,10 @@ export class TerminalView {
     const blocks = document.createElement('div');
     blocks.className = 'terminal-notepad-blocks';
 
+    const taskHistory = document.createElement('div');
+    taskHistory.className = 'terminal-task-history';
+    this.taskHistoryEl = taskHistory;
+
     // Footer pinned at the bottom: auto-send toggle on the left, add-task on the
     // right. The add button lives here (not in the scrolling list) so it's always
     // reachable, and main.ts owns the actual add via onNotepadAddBlock.
@@ -1295,6 +1382,7 @@ export class TerminalView {
     panel.appendChild(header);
     panel.appendChild(currentTask);
     panel.appendChild(blocks);
+    panel.appendChild(taskHistory);
     panel.appendChild(footer);
     this.wrapper.appendChild(panel);
     this.notepadEl = panel;
@@ -1321,6 +1409,114 @@ export class TerminalView {
   toggleNotepad() { this.setNotepadVisible(!this.notepadVisible); }
   isNotepadVisible() { return this.notepadVisible; }
 
+  private setTaskHistoryVisible(visible: boolean) {
+    this.taskHistoryVisible = visible;
+    this.notepadEl.classList.toggle('history-mode', visible);
+    this.notepadTitleEl.textContent = visible ? '历史记录 · 最近20条' : '任务队列';
+    this.notepadHistoryToggle.classList.toggle('active', visible);
+    const label = this.notepadHistoryToggle.querySelector('span');
+    if (label) label.textContent = visible ? '任务队列' : '历史记录';
+    this.notepadHistoryToggle.title = visible ? '返回任务队列' : '查看当前标签最近 20 个任务';
+    if (visible) this.renderTaskHistory();
+  }
+
+  private formatTaskHistoryTime(value: number): string {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '--';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
+
+  private formatTaskDuration(ms: number): string {
+    if (ms < 1000) return '<1秒';
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) return `${hours}小时 ${minutes}分 ${seconds}秒`;
+    if (minutes > 0) return `${minutes}分 ${seconds}秒`;
+    return `${seconds}秒`;
+  }
+
+  private renderTaskHistory() {
+    const entries = appState.tabs.get(this.tabId)?.taskHistory || [];
+    this.taskHistoryEl.replaceChildren();
+    if (entries.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'notepad-empty';
+      empty.textContent = '暂无历史任务';
+      this.taskHistoryEl.appendChild(empty);
+      return;
+    }
+
+    for (const entry of entries.slice(0, 20)) {
+      const item = document.createElement('div');
+      item.className = 'terminal-task-history-item';
+
+      const head = document.createElement('div');
+      head.className = 'terminal-task-history-head';
+      const times = document.createElement('div');
+      times.className = 'terminal-task-history-times';
+      const submitted = document.createElement('span');
+      submitted.textContent = `提交：${this.formatTaskHistoryTime(entry.submittedAt)}`;
+      times.appendChild(submitted);
+      const completed = document.createElement('span');
+      if (entry.completedAt) {
+        completed.textContent = `完成：${this.formatTaskHistoryTime(entry.completedAt)}`;
+        const duration = document.createElement('span');
+        duration.className = 'terminal-task-history-duration';
+        duration.textContent = `执行：${this.formatTaskDuration(Math.max(0, entry.completedAt - entry.submittedAt))}`;
+        times.append(completed, duration);
+      } else {
+        completed.className = 'terminal-task-history-running';
+        completed.textContent = '完成：执行中';
+        times.appendChild(completed);
+      }
+      const copy = document.createElement('button');
+      copy.className = 'terminal-task-history-copy';
+      copy.type = 'button';
+      copy.textContent = '复制';
+      copy.title = '复制任务提示词';
+      copy.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (entry.content) navigator.clipboard.writeText(entry.content).catch(() => {});
+      });
+      head.appendChild(times);
+      if (entry.content) head.appendChild(copy);
+      item.appendChild(head);
+
+      if (entry.content) {
+        const content = document.createElement('div');
+        content.className = 'terminal-task-history-content';
+        content.textContent = entry.content;
+        content.title = '点击展开/收起';
+        content.addEventListener('click', () => item.classList.toggle('expanded'));
+        item.appendChild(content);
+      }
+
+      if (entry.images && entry.images.length > 0) {
+        const images = document.createElement('div');
+        images.className = 'terminal-task-history-images';
+        const all = entry.images.map(path => convertFileSrc(path));
+        entry.images.forEach((path, index) => {
+          const image = document.createElement('img');
+          image.src = all[index];
+          image.alt = `任务图片 ${index + 1}`;
+          image.title = path;
+          image.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const preview = (window as any).showImagePreview;
+            if (typeof preview === 'function') preview(all, index);
+          });
+          images.appendChild(image);
+        });
+        item.appendChild(images);
+      }
+
+      this.taskHistoryEl.appendChild(item);
+    }
+  }
+
   /** Update the entry button's queued-block count badge. */
   setNotepadCount(n: number) {
     this.notepadFabCount.textContent = n > 0 ? String(n) : '';
@@ -1332,12 +1528,15 @@ export class TerminalView {
   setCurrentTask(content: string, imageCount = 0, imagePaths?: string[]) {
     const text = content.trim();
     if (!text && imageCount === 0) { this.clearCurrentTask(); return; }
+    this.onAiTaskSubmitted?.(this.tabId);
     // Callers that tracked the paste inside the terminal (paste + Enter) know
     // only the count, not the paths — fall back to the most recent pasted
     // images so the pin's [N 张图片] link still opens the preview.
     if (imageCount > 0 && !(imagePaths && imagePaths.length > 0)) {
       imagePaths = appState.recentPastedImagePaths(this.tabId, imageCount);
     }
+    this.currentTaskSubmittedAt = appState.addTaskHistory(this.tabId, text, imagePaths);
+    if (this.taskHistoryVisible) this.renderTaskHistory();
     const imageSuffix = imageCount > 0 ? `${text ? '\n' : ''}[${imageCount} 张图片]` : '';
     this.currentTaskText = text + imageSuffix;
     // Render image count as a clickable link so the user can open the preview
@@ -1373,8 +1572,11 @@ export class TerminalView {
 
   /** Mark the submitted instruction as finished but keep it pinned for review.
    * The next real submission replaces it through setCurrentTask(). */
-  completeCurrentTask() {
-    if (!this.currentTaskText || this.currentTaskEl.classList.contains('hidden')) return;
+  completeCurrentTask(completedAt = Date.now()) {
+    if (!this.currentTaskText || this.currentTaskEl.classList.contains('hidden')
+        || this.currentTaskEl.classList.contains('completed')) return;
+    appState.completeTaskHistory(this.tabId, this.currentTaskSubmittedAt, completedAt);
+    if (this.taskHistoryVisible) this.renderTaskHistory();
     this.currentTaskEl.classList.add('completed');
     this.currentTaskLabelEl.innerHTML = '<span class="terminal-current-task-dot"></span>已完成';
     this.notepadFabCurrent.textContent = `已完成 · ${this.currentTaskSummary}`;
@@ -1385,6 +1587,7 @@ export class TerminalView {
   clearCurrentTask() {
     this.currentTaskText = '';
     this.currentTaskSummary = '';
+    this.currentTaskSubmittedAt = null;
     this.currentTaskTextEl.textContent = '';
     this.currentTaskLabelEl.innerHTML = '<span class="terminal-current-task-dot"></span>正在执行';
     this.currentTaskEl.classList.add('hidden');

@@ -1,4 +1,4 @@
-import { api, type TabStatus, type SidebarEntry, type SavedTab } from '../api';
+import { api, type TabStatus, type SidebarEntry, type SavedTab, type TaskHistoryEntry } from '../api';
 
 export interface NoteBlock {
   id: string;
@@ -31,6 +31,9 @@ export interface TabState {
   aiTool: string;
   sidebarEntries: SidebarEntry[];
   noteBlocks: NoteBlock[];
+  // The latest submitted AI prompts for this tab, newest first. Kept to 20
+  // entries and persisted with the tab so image-backed tasks remain reviewable.
+  taskHistory: TaskHistoryEntry[];
   // Per-session auto-send: when true, the head of this tab's task queue is sent
   // automatically each time the AI goes idle-ready.
   autoSend: boolean;
@@ -92,7 +95,7 @@ class AppState {
     this.tabCounter++;
     const tab: TabState = {
       id, title: `Terminal ${this.tabCounter}`, status: 'active', shell: 'cmd',
-      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], autoSend: false, cwd: '', userRenamed: false,
+      color: '', aiTool: '', sidebarEntries: [], noteBlocks: [], taskHistory: [], autoSend: false, cwd: '', userRenamed: false,
       pastedTotal: 0,
       pastedById: new Map(),
       pendingPasteIds: [],
@@ -206,6 +209,52 @@ class AppState {
     if (!tab?.pastedById?.size || count <= 0) return [];
     const ms = Array.from(tab.pastedById.keys()).sort((a, b) => b - a).slice(0, count);
     return ms.map(m => tab.pastedById.get(m)!);
+  }
+
+  /** Save one submitted task in this tab's bounded, newest-first history.
+   * Returns its submission timestamp, which the view uses to attach completion. */
+  addTaskHistory(id: string, content: string, images?: string[]): number | null {
+    const tab = this.tabs.get(id);
+    const text = content.trim();
+    const paths = (images || []).filter(Boolean);
+    if (!tab || (!text && paths.length === 0)) return null;
+    // Keep the timestamp unique even if two submissions land in one millisecond.
+    const submittedAt = Math.max(Date.now(), (tab.taskHistory[0]?.submittedAt || 0) + 1);
+    tab.taskHistory.unshift({
+      content: text,
+      images: paths.length > 0 ? [...paths] : undefined,
+      submittedAt,
+    });
+    tab.taskHistory = tab.taskHistory.slice(0, 20);
+    this.persistTabs();
+    return submittedAt;
+  }
+
+  /** Attach the backend's idle-ready time to the matching submitted task. */
+  completeTaskHistory(id: string, submittedAt: number | null, completedAt = Date.now()) {
+    const tab = this.tabs.get(id);
+    if (!tab || submittedAt === null) return;
+    const entry = tab.taskHistory.find(item => item.submittedAt === submittedAt);
+    if (!entry || entry.completedAt) return;
+    entry.completedAt = Math.max(completedAt, entry.submittedAt);
+    this.persistTabs();
+  }
+
+  /** Restore persisted history defensively and enforce the same 20-item cap. */
+  restoreTaskHistory(id: string, entries?: TaskHistoryEntry[]) {
+    const tab = this.tabs.get(id);
+    if (!tab || !Array.isArray(entries)) return;
+    tab.taskHistory = entries
+      .filter(entry => entry && typeof entry.content === 'string'
+        && Number.isFinite(entry.submittedAt)
+        && (entry.content.trim().length > 0 || (Array.isArray(entry.images) && entry.images.length > 0)))
+      .slice(0, 20)
+      .map(entry => ({
+        content: entry.content,
+        images: Array.isArray(entry.images) ? entry.images.filter(path => typeof path === 'string') : undefined,
+        submittedAt: entry.submittedAt,
+        completedAt: Number.isFinite(entry.completedAt) ? entry.completedAt : undefined,
+      }));
   }
 
   /**
@@ -579,6 +628,12 @@ class AppState {
           id: b.id,
           content: b.content,
           images: b.images ? [...b.images] : undefined,
+        })),
+        taskHistory: tab.taskHistory.map(entry => ({
+          content: entry.content,
+          images: entry.images ? [...entry.images] : undefined,
+          submittedAt: entry.submittedAt,
+          completedAt: entry.completedAt,
         })),
         autoSend: tab.autoSend || undefined,
         cwd: validCwd,

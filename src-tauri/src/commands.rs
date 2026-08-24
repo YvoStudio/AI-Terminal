@@ -19,12 +19,25 @@ pub struct SavedNoteBlock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedTaskHistoryEntry {
+    pub content: String,
+    #[serde(default)]
+    pub images: Vec<String>,
+    #[serde(default, rename = "submittedAt", alias = "submitted_at")]
+    pub submitted_at: u64,
+    #[serde(default, rename = "completedAt", alias = "completed_at")]
+    pub completed_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedTab {
     #[serde(default)]
     pub id: Option<String>,
     pub name: String,
     #[serde(default, rename = "noteBlocks", alias = "note_blocks")]
     pub note_blocks: Vec<SavedNoteBlock>,
+    #[serde(default, rename = "taskHistory", alias = "task_history")]
+    pub task_history: Vec<SavedTaskHistoryEntry>,
     #[serde(default = "default_shell_str")]
     pub shell: String,
     #[serde(default)]

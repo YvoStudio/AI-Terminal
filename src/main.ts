@@ -118,6 +118,7 @@ async function createTab(name?: string, noteBlocks?: Array<{ id: string; content
   terminalViews.set(tabId, view);
   view.onNotepadRender = (id) => renderNoteBlocks(id, true);
   view.onNotepadAddBlock = (id) => addNoteBlock(id);
+  view.onAiTaskSubmitted = (id) => markAiTaskSubmitted(id);
   renderNoteBlocks(tabId, true);
 
   // Regex triggers: fire on any output, even when tab is not active.
@@ -164,6 +165,7 @@ async function createTabInPane(paneIndex: number) {
   terminalViews.set(tabId, view);
   view.onNotepadRender = (id) => renderNoteBlocks(id, true);
   view.onNotepadAddBlock = (id) => addNoteBlock(id);
+  view.onAiTaskSubmitted = (id) => markAiTaskSubmitted(id);
   renderNoteBlocks(tabId, true);
 
   api.onTerminalOutput(tabId, () => {
@@ -1068,16 +1070,17 @@ const sendingBlocks = new Set<string>();
 // and press Enter. The button used to only stage the text in the prompt for
 // review, which meant every queued task still needed a manual Enter in the
 // terminal; "send" now means sent.
-async function sendNoteBlock(tabId: string, blockId: string) {
+async function sendNoteBlock(tabId: string, blockId: string): Promise<boolean> {
   const tab = appState.tabs.get(tabId);
-  if (!tab) return;
+  if (!tab) return false;
   const block = tab.noteBlocks.find(b => b.id === blockId);
-  if (!block) return;
+  if (!block) return false;
   const hasText = block.content.trim().length > 0;
   const hasImages = block.images && block.images.length > 0;
-  if (!hasText && !hasImages) return;
-  if (sendingBlocks.has(blockId)) return; // a send for this block is already in flight
+  if (!hasText && !hasImages) return false;
+  if (sendingBlocks.has(blockId)) return false; // a send for this block is already in flight
   sendingBlocks.add(blockId);
+  let submitted = false;
   try {
     // Match the terminal's own paste detection: AI auto-detection may not have
     // fired (restored session, heuristic miss), but a program on the alternate
@@ -1140,9 +1143,11 @@ async function sendNoteBlock(tabId: string, blockId: string) {
     api.writeTerminal(tabId, '\r');
     appState.clearPromptDirty(tabId); // submitted — prompt is empty again
     removeNoteBlock(tabId, blockId);
+    submitted = true;
   } finally {
     sendingBlocks.delete(blockId);
   }
+  return submitted;
 }
 
 function showImagePreview(srcOrList: string | string[], startIndex = 0) {
@@ -2598,46 +2603,89 @@ api.onTabStatusChanged((tabId, status) => {
 
 });
 
-// Queue auto-send: when Claude transitions to idle-ready (true end of a turn,
-// debounced server-side), push the next non-empty note block as if the user
-// had typed it and pressed Enter. AwaitingConfirm is intentionally not a
-// trigger — the user must answer Y/N first, so we don't auto-send over it.
-//
-// Re-entry guard: the per-tab cooldown blocks a rapid second fire if the
-// backend emits two idle-ready events in close succession (e.g. resize redraw
-// after commit). Without it, two blocks could be sent into the same prompt.
+// Queue auto-send is intentionally more conservative than the backend's visual
+// idle classifier. A TUI can briefly redraw an idle-looking input box between
+// streaming/tool frames; sending on that first frame injects the next task into
+// a turn that is still running. Require idle-ready to remain unchanged for a
+// second frontend settle window, and cancel immediately on Working/confirmation
+// or on any real prompt submission.
 const lastQueueSendAt = new Map<string, number>();
+const latestAiUiState = new Map<string, 'working' | 'idle-ready' | 'awaiting-confirm' | 'unknown'>();
+const stableIdleTimers = new Map<string, number>();
+// After any submission, ignore stale idle redraws until the backend has
+// positively observed Working for the newly submitted turn.
+const taskAwaitingWorking = new Set<string>();
+const AUTO_SEND_IDLE_SETTLE_MS = 3000;
 
-// Auto-send is a per-session toggle (the "自动发送" switch in each pane's task-queue
-// header), defaulting to OFF. When on, the head of that tab's queue is sent each
-// time the AI goes idle-ready. We don't gate on panel visibility — the toggle is
-// the explicit intent signal, so it fires even when the panel is collapsed.
+function clearStableIdleTimer(tabId: string): void {
+  const timer = stableIdleTimers.get(tabId);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    stableIdleTimers.delete(tabId);
+  }
+}
+
+function markAiTaskSubmitted(tabId: string): void {
+  clearStableIdleTimer(tabId);
+  taskAwaitingWorking.add(tabId);
+  // The previous idle event no longer describes this tab once Enter is sent.
+  latestAiUiState.set(tabId, 'unknown');
+}
+
+// Auto-send is a per-session toggle. AwaitingConfirm is never a trigger — the
+// user must answer the agent first. Panel visibility does not affect the toggle.
 api.onTabAiUiStateChanged((tabId, state) => {
-  if (state !== 'idle-ready') return;
-  // Keep the completed instruction available for review. Auto-send (below) or
-  // the user's next submission replaces it and switches the label back to
-  // "正在执行" through setCurrentTask().
-  terminalViews.get(tabId)?.completeCurrentTask();
-  // The user is composing their own prompt in this tab — don't paste a note
-  // block on top of their unsubmitted text, or both get submitted together.
-  if (appState.isPromptDirty(tabId)) return;
-  const tab = appState.tabs.get(tabId);
-  if (!tab || !tab.aiTool) return;
-  if (!tab.autoSend) return; // per-session toggle
-  const next = headOfQueueBlock(tab);
-  if (!next) return;
-  const lastSent = lastQueueSendAt.get(tabId) ?? 0;
-  if (Date.now() - lastSent < 1500) return;
-  // Small delay so Claude's input box is fully ready to receive paste.
-  setTimeout(() => {
-    const live = appState.tabs.get(tabId);
-    const stillThere = live?.noteBlocks.find(b => b.id === next.id);
-    if (!stillThere) return;
-    // Re-check: the user may have started typing during the delay window.
+  latestAiUiState.set(tabId, state);
+
+  if (state !== 'idle-ready') {
+    clearStableIdleTimer(tabId);
+    if (state === 'working') taskAwaitingWorking.delete(tabId);
+    return;
+  }
+
+  // An idle-looking redraw can arrive while a newly submitted task is still
+  // being staged, before its first Working frame. Never use that stale event to
+  // finalize the task or drain another queue item.
+  if (taskAwaitingWorking.has(tabId)) return;
+
+  clearStableIdleTimer(tabId);
+  const idleObservedAt = Date.now();
+  const timer = window.setTimeout(async () => {
+    stableIdleTimers.delete(tabId);
+    if (latestAiUiState.get(tabId) !== 'idle-ready') return;
+
+    // Only now is the completion stable enough to finalize. Use the original
+    // idle observation for timing so the safety window does not inflate duration.
+    terminalViews.get(tabId)?.completeCurrentTask(idleObservedAt);
+
+    // The user may have started composing during the settle window. Never paste
+    // a queued task over their prompt.
     if (appState.isPromptDirty(tabId)) return;
+    const tab = appState.tabs.get(tabId);
+    if (!tab?.aiTool || !tab.autoSend) return;
+    const next = headOfQueueBlock(tab);
+    if (!next) return;
+    const lastSent = lastQueueSendAt.get(tabId) ?? 0;
+    if (Date.now() - lastSent < 1500) return;
+
+    // Re-check all mutable conditions at the exact submission boundary.
+    if (latestAiUiState.get(tabId) !== 'idle-ready') return;
+    const live = appState.tabs.get(tabId);
+    const stillThere = live?.noteBlocks.find(block => block.id === next.id);
+    if (!live?.autoSend || !stillThere || appState.isPromptDirty(tabId)) return;
+
+    taskAwaitingWorking.add(tabId);
+    latestAiUiState.set(tabId, 'unknown');
     lastQueueSendAt.set(tabId, Date.now());
-    sendNoteBlock(tabId, next.id);
-  }, 300);
+    try {
+      const submitted = await sendNoteBlock(tabId, next.id);
+      if (!submitted) taskAwaitingWorking.delete(tabId);
+    } catch (error) {
+      taskAwaitingWorking.delete(tabId);
+      console.error('Failed to auto-send queued task:', error);
+    }
+  }, AUTO_SEND_IDLE_SETTLE_MS);
+  stableIdleTimers.set(tabId, timer);
 });
 
 api.onTabAutoRenamed((tabId, name) => {
@@ -3214,9 +3262,13 @@ async function init() {
     const isCustomName = saved.name && !saved.name.startsWith('Terminal ') && !saved.name.startsWith('↻ ');
     try {
       const tabId = await createTab(saved.name, saved.noteBlocks, cwd, shell, saved.aiTool, saved.userRenamed || isCustomName, saved.id, saved.autoSend);
+      appState.restoreTaskHistory(tabId, saved.taskHistory);
       if (saved.pastedTotal || saved.pastedImages) {
         appState.restorePastedImages(tabId, saved.pastedTotal, saved.pastedImages);
       }
+      // createTab persists before the restored history/image maps are applied;
+      // write once more so a one-tab restore cannot erase those fields on disk.
+      appState.persistTabs();
       restoredCount++;
     } catch (e) {
       console.warn('Failed to restore tab, skipping:', e);
