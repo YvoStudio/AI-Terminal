@@ -1085,9 +1085,6 @@ async function sendNoteBlock(tabId: string, blockId: string) {
     // Without this the image falls through to writeTerminal(path) and lands as
     // unclickable literal text in Claude's prompt.
     const isAI = !!tab.aiTool || (terminalViews.get(tabId)?.isAiMode() ?? false);
-    // Keep a compact copy of the submitted queue item visible while AI output is
-    // streaming; sendNoteBlock removes the original card from the backlog below.
-    if (tab.aiTool) terminalViews.get(tabId)?.setCurrentTask(block.content, block.images?.length ?? 0, block.images);
     // Send images first, then text content.
     if (hasImages) {
       for (const imgPath of block.images!) {
@@ -1136,6 +1133,10 @@ async function sendNoteBlock(tabId: string, blockId: string) {
     // an empty prompt — submitting nothing — and the block is left sitting in
     // the input (the "last block won't send" bug).
     if (hasText || hasImages) await new Promise(r => setTimeout(r, 120));
+    // Pin the task at the actual submission boundary, not while its images are
+    // still being pasted. Idle redraws during clipboard staging otherwise mark
+    // the new task completed before Enter reaches the agent.
+    if (tab.aiTool) terminalViews.get(tabId)?.setCurrentTask(block.content, block.images?.length ?? 0, block.images);
     api.writeTerminal(tabId, '\r');
     appState.clearPromptDirty(tabId); // submitted — prompt is empty again
     removeNoteBlock(tabId, blockId);
@@ -2611,30 +2612,12 @@ const lastQueueSendAt = new Map<string, number>();
 // header), defaulting to OFF. When on, the head of that tab's queue is sent each
 // time the AI goes idle-ready. We don't gate on panel visibility — the toggle is
 // the explicit intent signal, so it fires even when the panel is collapsed.
-// When the backend emits idle-ready we hide the pinned "正在执行" summary. If
-// that idle-ready was a mid-turn misdetection (e.g. pi re-emitting a previous
-// turn's completion entry during a redraw — chunk splitting defeats the
-// ordering guard), the agent never stopped and the very next Working chunk
-// re-transitions. Track the clear time so a working transition arriving
-// immediately after can restore the pin instead of leaving the task invisible
-// for the rest of a long turn.
-const lastPinClearedAt = new Map<string, number>();
-const PIN_RESTORE_WINDOW_MS = 5000;
-
 api.onTabAiUiStateChanged((tabId, state) => {
-  if (state === 'working') {
-    const clearedAt = lastPinClearedAt.get(tabId) ?? 0;
-    if (Date.now() - clearedAt < PIN_RESTORE_WINDOW_MS) {
-      terminalViews.get(tabId)?.resumeCurrentTask();
-    }
-    lastPinClearedAt.delete(tabId);
-    return;
-  }
   if (state !== 'idle-ready') return;
-  lastPinClearedAt.set(tabId, Date.now());
-  // The turn has finished. Remove its pinned summary before auto-send possibly
-  // replaces it with the next queued task a moment later.
-  terminalViews.get(tabId)?.clearCurrentTask();
+  // Keep the completed instruction available for review. Auto-send (below) or
+  // the user's next submission replaces it and switches the label back to
+  // "正在执行" through setCurrentTask().
+  terminalViews.get(tabId)?.completeCurrentTask();
   // The user is composing their own prompt in this tab — don't paste a note
   // block on top of their unsubmitted text, or both get submitted together.
   if (appState.isPromptDirty(tabId)) return;

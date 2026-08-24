@@ -49,15 +49,10 @@ export class TerminalView {
   private notepadFabCount!: HTMLElement;
   private notepadFabCurrent!: HTMLElement;
   private currentTaskEl!: HTMLElement;
+  private currentTaskLabelEl!: HTMLElement;
   private currentTaskTextEl!: HTMLElement;
   private currentTaskText = '';
-  // Last pinned task, kept across clearCurrentTask() so a spurious idle-ready
-  // mid-turn (misdetected as done) can restore the summary when the very next
-  // working transition proves the agent is still running.
-  private lastTaskText = '';
-  private lastTaskImages = 0;
-  private lastTaskImagePaths: string[] = [];
-  private currentTaskImagePaths: string[] = [];
+  private currentTaskSummary = '';
   // Best-effort mirror of the text currently being composed in an AI prompt.
   // xterm normally exposes only keystrokes, not the editor's final value, so we
   // track printable input/paste and publish it when Enter is submitted.
@@ -1253,9 +1248,9 @@ export class TerminalView {
     header.appendChild(title);
     header.appendChild(collapse);
 
-    // Keep the submitted queue item pinned above the scrolling list while the
-    // AI is working. The original prompt can otherwise be thousands of output
-    // lines above the viewport by the time the user wants to check it.
+    // Keep the latest submitted item pinned above the scrolling list. Its
+    // status changes to completed when the turn ends, and the instruction stays
+    // available until the next submission replaces it.
     const currentTask = document.createElement('div');
     currentTask.className = 'terminal-current-task hidden';
     const currentTaskHead = document.createElement('div');
@@ -1279,6 +1274,7 @@ export class TerminalView {
     currentTask.addEventListener('click', () => currentTask.classList.toggle('expanded'));
     currentTask.append(currentTaskHead, currentTaskText);
     this.currentTaskEl = currentTask;
+    this.currentTaskLabelEl = currentTaskLabel;
     this.currentTaskTextEl = currentTaskText;
 
     const blocks = document.createElement('div');
@@ -1331,7 +1327,7 @@ export class TerminalView {
     this.notepadFabCount.classList.toggle('hidden', n === 0);
   }
 
-  /** Pin a queue item while the AI is processing it. The compact summary stays
+  /** Pin a newly submitted item as executing. The compact summary stays
    * visible on the queue entry button even when the full panel is collapsed. */
   setCurrentTask(content: string, imageCount = 0, imagePaths?: string[]) {
     const text = content.trim();
@@ -1342,12 +1338,6 @@ export class TerminalView {
     if (imageCount > 0 && !(imagePaths && imagePaths.length > 0)) {
       imagePaths = appState.recentPastedImagePaths(this.tabId, imageCount);
     }
-    // Remember across clears so resumeCurrentTask() can restore the pin after
-    // a spurious idle-ready (see lastTaskText field doc).
-    this.lastTaskText = text;
-    this.lastTaskImages = imageCount;
-    this.lastTaskImagePaths = imagePaths || [];
-    this.currentTaskImagePaths = imagePaths || [];
     const imageSuffix = imageCount > 0 ? `${text ? '\n' : ''}[${imageCount} 张图片]` : '';
     this.currentTaskText = text + imageSuffix;
     // Render image count as a clickable link so the user can open the preview
@@ -1370,36 +1360,38 @@ export class TerminalView {
     } else {
       this.currentTaskTextEl.textContent = this.currentTaskText;
     }
-    this.currentTaskEl.classList.remove('hidden', 'expanded');
+    this.currentTaskEl.classList.remove('hidden', 'expanded', 'completed');
+    this.currentTaskLabelEl.innerHTML = '<span class="terminal-current-task-dot"></span>正在执行';
 
-    const summary = (text || `${imageCount} 张图片`).replace(/\s+/g, ' ');
-    this.notepadFabCurrent.textContent = `执行中 · ${summary}`;
+    this.currentTaskSummary = (text || `${imageCount} 张图片`).replace(/\s+/g, ' ');
+    this.notepadFabCurrent.textContent = `执行中 · ${this.currentTaskSummary}`;
     this.notepadFabCurrent.classList.remove('hidden');
     this.notepadFab.classList.add('has-current-task');
-    this.notepadFab.title = `当前任务：${summary}`;
+    this.notepadFab.classList.remove('completed-task');
+    this.notepadFab.title = `当前任务：${this.currentTaskSummary}`;
   }
 
-  /** Re-pin the last submitted task if a working transition follows an
-   * idle-ready too closely to be a real turn end — the backend can emit a
-   * spurious idle-ready mid-turn (e.g. pi re-emitting a previous turn's
-   * completion entry during a redraw), and the next Working chunk proves the
-   * agent never stopped. No-op when nothing is remembered or the pin is
-   * already visible. */
-  resumeCurrentTask() {
-    if (!this.lastTaskText && this.lastTaskImages === 0) return;
-    if (!this.currentTaskEl.classList.contains('hidden')) return;
-    this.setCurrentTask(this.lastTaskText, this.lastTaskImages, this.lastTaskImagePaths);
+  /** Mark the submitted instruction as finished but keep it pinned for review.
+   * The next real submission replaces it through setCurrentTask(). */
+  completeCurrentTask() {
+    if (!this.currentTaskText || this.currentTaskEl.classList.contains('hidden')) return;
+    this.currentTaskEl.classList.add('completed');
+    this.currentTaskLabelEl.innerHTML = '<span class="terminal-current-task-dot"></span>已完成';
+    this.notepadFabCurrent.textContent = `已完成 · ${this.currentTaskSummary}`;
+    this.notepadFab.classList.add('completed-task');
+    this.notepadFab.title = `已完成任务：${this.currentTaskSummary}`;
   }
 
   clearCurrentTask() {
     this.currentTaskText = '';
-    this.currentTaskImagePaths = [];
+    this.currentTaskSummary = '';
     this.currentTaskTextEl.textContent = '';
+    this.currentTaskLabelEl.innerHTML = '<span class="terminal-current-task-dot"></span>正在执行';
     this.currentTaskEl.classList.add('hidden');
-    this.currentTaskEl.classList.remove('expanded');
+    this.currentTaskEl.classList.remove('expanded', 'completed');
     this.notepadFabCurrent.textContent = '';
     this.notepadFabCurrent.classList.add('hidden');
-    this.notepadFab.classList.remove('has-current-task');
+    this.notepadFab.classList.remove('has-current-task', 'completed-task');
     this.notepadFab.title = '任务队列';
   }
 
@@ -1407,9 +1399,6 @@ export class TerminalView {
    * launches another TUI (for example Pi → Codex → Claude). */
   resetTaskTracking() {
     this.resetPendingPrompt();
-    this.lastTaskText = '';
-    this.lastTaskImages = 0;
-    this.lastTaskImagePaths = [];
     this.clearCurrentTask();
   }
 

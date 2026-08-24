@@ -227,13 +227,15 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .terminal-notepad-autosend { text-transform: none; letter-spacing: 0; font-weight: 500; }
 .terminal-notepad-collapse { width: 22px; height: 22px; border: none; background: none; color: var(--text-secondary); cursor: pointer; border-radius: 4px; display: flex; align-items: center; justify-content: center; }
 .terminal-notepad-collapse:hover { background: var(--bg-hover); color: var(--text-primary); }
-/* The queue item currently being processed stays pinned above the scrollable
-   backlog, so long AI output never makes the original request hard to find. */
+/* The latest submitted task stays pinned above the scrollable backlog while it
+   runs and after completion, until the next submission replaces it. */
 .terminal-current-task { padding: 8px 12px 9px; border-bottom: 1px solid var(--border-color); background: rgba(78, 201, 176, 0.07); cursor: pointer; flex-shrink: 0; }
 .terminal-current-task.hidden { display: none; }
 .terminal-current-task-head { display: flex; align-items: center; min-height: 20px; margin-bottom: 3px; }
 .terminal-current-task-label { display: inline-flex; align-items: center; gap: 6px; color: var(--accent-green); font-size: 11px; font-weight: 600; }
 .terminal-current-task-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-green); box-shadow: 0 0 6px rgba(78, 201, 176, 0.65); animation: pulse-thinking 6s linear infinite; }
+.terminal-current-task.completed { background: rgba(78, 201, 176, 0.035); }
+.terminal-current-task.completed .terminal-current-task-dot { box-shadow: none; animation: none; opacity: 0.75; }
 .terminal-current-task-copy { margin-left: auto; border: none; background: none; color: var(--text-muted); cursor: pointer; font-size: 10px; padding: 2px 6px; border-radius: 3px; }
 .terminal-current-task-copy:hover { color: var(--text-primary); background: var(--bg-hover); }
 .terminal-current-task-text { color: var(--text-primary); font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
@@ -254,6 +256,7 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .terminal-notepad-fab:hover { opacity: 1; color: var(--text-primary); background: var(--bg-hover); }
 .terminal-notepad-fab.active { color: var(--accent-blue); border-color: var(--accent-blue); opacity: 1; }
 .terminal-notepad-fab.has-current-task { max-width: min(360px, calc(100% - 32px)); border-color: var(--accent-green); color: var(--accent-green); opacity: 1; }
+.terminal-notepad-fab.has-current-task.completed-task { border-color: var(--border-color); color: var(--accent-green); }
 .notepad-fab-count { font-size: 11px; font-weight: 600; min-width: 12px; text-align: center; }
 .notepad-fab-count.hidden { display: none; }
 .notepad-fab-current { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: 11px; }
