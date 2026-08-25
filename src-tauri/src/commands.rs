@@ -27,6 +27,8 @@ pub struct SavedTaskHistoryEntry {
     pub submitted_at: u64,
     #[serde(default, rename = "completedAt", alias = "completed_at")]
     pub completed_at: Option<u64>,
+    #[serde(default, rename = "interruptedAt", alias = "interrupted_at")]
+    pub interrupted_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

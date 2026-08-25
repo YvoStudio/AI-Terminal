@@ -1460,17 +1460,28 @@ export class TerminalView {
       const submitted = document.createElement('span');
       submitted.textContent = `提交：${this.formatTaskHistoryTime(entry.submittedAt)}`;
       times.appendChild(submitted);
-      const completed = document.createElement('span');
       if (entry.completedAt) {
+        const completed = document.createElement('span');
         completed.textContent = `完成：${this.formatTaskHistoryTime(entry.completedAt)}`;
         const duration = document.createElement('span');
         duration.className = 'terminal-task-history-duration';
         duration.textContent = `执行：${this.formatTaskDuration(Math.max(0, entry.completedAt - entry.submittedAt))}`;
         times.append(completed, duration);
+      } else if (entry.interruptedAt) {
+        const status = document.createElement('span');
+        status.className = 'terminal-task-history-interrupted';
+        status.textContent = '状态：被中断';
+        const interrupted = document.createElement('span');
+        interrupted.textContent = `中断：${this.formatTaskHistoryTime(entry.interruptedAt)}`;
+        const duration = document.createElement('span');
+        duration.className = 'terminal-task-history-duration';
+        duration.textContent = `执行：${this.formatTaskDuration(Math.max(0, entry.interruptedAt - entry.submittedAt))}`;
+        times.append(status, interrupted, duration);
       } else {
-        completed.className = 'terminal-task-history-running';
-        completed.textContent = '完成：执行中';
-        times.appendChild(completed);
+        const running = document.createElement('span');
+        running.className = 'terminal-task-history-running';
+        running.textContent = '状态：执行中';
+        times.appendChild(running);
       }
       const copy = document.createElement('button');
       copy.className = 'terminal-task-history-copy';

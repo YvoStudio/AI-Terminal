@@ -19,6 +19,8 @@ export interface TaskHistoryEntry {
   images?: string[];
   submittedAt: number;
   completedAt?: number;
+  // Set when another instruction is submitted before this task completes.
+  interruptedAt?: number;
 }
 
 export interface SavedTab {

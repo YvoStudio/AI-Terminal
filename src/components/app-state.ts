@@ -212,7 +212,8 @@ class AppState {
   }
 
   /** Save one submitted task in this tab's bounded, newest-first history.
-   * Returns its submission timestamp, which the view uses to attach completion. */
+   * If the preceding task has not ended, the new submission is its interruption
+   * boundary. Returns the new submission time so the view can attach completion. */
   addTaskHistory(id: string, content: string, images?: string[]): number | null {
     const tab = this.tabs.get(id);
     const text = content.trim();
@@ -220,6 +221,12 @@ class AppState {
     if (!tab || (!text && paths.length === 0)) return null;
     // Keep the timestamp unique even if two submissions land in one millisecond.
     const submittedAt = Math.max(Date.now(), (tab.taskHistory[0]?.submittedAt || 0) + 1);
+    // There should normally be only one open entry. Find it rather than relying
+    // on index 0 so older persisted data is handled safely as well.
+    const openEntry = tab.taskHistory.find(item => !item.completedAt && !item.interruptedAt);
+    if (openEntry) {
+      openEntry.interruptedAt = Math.max(submittedAt, openEntry.submittedAt);
+    }
     tab.taskHistory.unshift({
       content: text,
       images: paths.length > 0 ? [...paths] : undefined,
@@ -235,26 +242,38 @@ class AppState {
     const tab = this.tabs.get(id);
     if (!tab || submittedAt === null) return;
     const entry = tab.taskHistory.find(item => item.submittedAt === submittedAt);
-    if (!entry || entry.completedAt) return;
+    if (!entry || entry.completedAt || entry.interruptedAt) return;
     entry.completedAt = Math.max(completedAt, entry.submittedAt);
     this.persistTabs();
   }
 
-  /** Restore persisted history defensively and enforce the same 20-item cap. */
+  /** Restore persisted history defensively and enforce the same 20-item cap.
+   * Legacy open entries followed by a newer submission are backfilled as
+   * interrupted at that next submission time. */
   restoreTaskHistory(id: string, entries?: TaskHistoryEntry[]) {
     const tab = this.tabs.get(id);
     if (!tab || !Array.isArray(entries)) return;
-    tab.taskHistory = entries
+    const restored = entries
       .filter(entry => entry && typeof entry.content === 'string'
         && Number.isFinite(entry.submittedAt)
         && (entry.content.trim().length > 0 || (Array.isArray(entry.images) && entry.images.length > 0)))
+      .sort((a, b) => b.submittedAt - a.submittedAt)
       .slice(0, 20)
       .map(entry => ({
         content: entry.content,
         images: Array.isArray(entry.images) ? entry.images.filter(path => typeof path === 'string') : undefined,
         submittedAt: entry.submittedAt,
         completedAt: Number.isFinite(entry.completedAt) ? entry.completedAt : undefined,
+        interruptedAt: !Number.isFinite(entry.completedAt) && Number.isFinite(entry.interruptedAt)
+          ? entry.interruptedAt : undefined,
       }));
+    for (let i = 1; i < restored.length; i++) {
+      const entry = restored[i];
+      if (!entry.completedAt && !entry.interruptedAt) {
+        entry.interruptedAt = Math.max(entry.submittedAt, restored[i - 1].submittedAt);
+      }
+    }
+    tab.taskHistory = restored;
   }
 
   /**
@@ -634,6 +653,7 @@ class AppState {
           images: entry.images ? [...entry.images] : undefined,
           submittedAt: entry.submittedAt,
           completedAt: entry.completedAt,
+          interruptedAt: entry.interruptedAt,
         })),
         autoSend: tab.autoSend || undefined,
         cwd: validCwd,
