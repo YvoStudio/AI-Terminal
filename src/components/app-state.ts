@@ -1,4 +1,5 @@
 import { api, type TabStatus, type SidebarEntry, type SavedTab, type TaskHistoryEntry } from '../api';
+import { acknowledgeTabStatus, isTabSeen, nextTabStatus } from './tab-status';
 
 export interface NoteBlock {
   id: string;
@@ -74,6 +75,7 @@ class AppState {
   tabOrder: string[] = [];
   tabs: Map<string, TabState> = new Map();
   splitState: SplitState | null = null;
+  windowHasFocus = document.hasFocus();
   private tabCounter = 0;
   private listeners: Array<() => void> = [];
   // Tabs where the user has typed into the prompt but not yet submitted/cleared
@@ -88,8 +90,23 @@ class AppState {
   /** True while the user has unsubmitted text in this tab's prompt. */
   isPromptDirty(tabId: string): boolean { return this.promptDirtyTabs.has(tabId); }
 
+  isTabSeen(tabId: string): boolean { return isTabSeen(tabId, this); }
+
+  setWindowFocus(focused: boolean) {
+    this.windowHasFocus = focused;
+    this.notify();
+  }
+
   subscribe(fn: () => void) { this.listeners.push(fn); }
-  private notify() { this.listeners.forEach(fn => { try { fn(); } catch (e) { console.error('[AppState] listener error:', e); } }); }
+  private notify() {
+    // Centralize acknowledgement for every visibility change: tab switches,
+    // split/merge, closing a tab, and returning to the application. Running
+    // tasks stay running; merely looking at one cannot consume its future done.
+    for (const tab of this.tabs.values()) {
+      tab.status = acknowledgeTabStatus(tab.status, this.isTabSeen(tab.id));
+    }
+    this.listeners.forEach(fn => { try { fn(); } catch (e) { console.error('[AppState] listener error:', e); } });
+  }
 
   addTab(id: string): TabState {
     this.tabCounter++;
@@ -126,8 +143,6 @@ class AppState {
   switchTab(id: string) {
     if (!this.tabs.has(id)) return;
     this.activeTabId = id;
-    const tab = this.tabs.get(id)!;
-    if (tab.status === 'done-unseen' || tab.status === 'waiting') tab.status = 'active';
     this.notify();
   }
 
@@ -148,12 +163,9 @@ class AppState {
   setStatus(id: string, status: TabStatus) {
     const tab = this.tabs.get(id);
     if (!tab) return;
-    if (id === this.activeTabId && status === 'waiting') {
-      tab.status = 'active';
-      this.notify();
-      return;
-    }
-    tab.status = status;
+    const next = nextTabStatus(tab.status, status, this.isTabSeen(id));
+    if (tab.status === next) return;
+    tab.status = next;
     this.notify();
   }
 
@@ -534,8 +546,6 @@ class AppState {
     this.splitState.activePaneIndex = index;
     const pane = this.splitState.panes[index];
     this.activeTabId = pane.activeTabId;
-    const tab = this.tabs.get(this.activeTabId!);
-    if (tab && (tab.status === 'done-unseen' || tab.status === 'waiting')) tab.status = 'active';
     this.notify();
   }
 

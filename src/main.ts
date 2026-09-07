@@ -55,7 +55,7 @@ function getThemeOptions(): string {
 
 const terminalViews = new Map<string, TerminalView>();
 const container = document.getElementById('terminal-container')!;
-let windowHasFocus = document.hasFocus();
+let lastPendingDoneCount = -1;
 
 function getPendingDoneCount(): number {
   let count = 0;
@@ -67,6 +67,8 @@ function getPendingDoneCount(): number {
 
 function syncPendingAttention(requestAttention = false): void {
   const pendingCount = getPendingDoneCount();
+  if (!requestAttention && pendingCount === lastPendingDoneCount) return;
+  lastPendingDoneCount = pendingCount;
   if (pendingCount > 0) {
     api.notifyTaskDone(pendingCount, requestAttention);
   } else {
@@ -75,7 +77,7 @@ function syncPendingAttention(requestAttention = false): void {
 }
 
 function maybeShowSystemNotification(tabId: string): void {
-  if (windowHasFocus && tabId === appState.activeTabId) return;
+  if (appState.isTabSeen(tabId)) return;
   if (!('Notification' in window)) return;
 
   const tab = appState.tabs.get(tabId);
@@ -83,6 +85,8 @@ function maybeShowSystemNotification(tabId: string): void {
   const body = `${title} 输出已完成，等待查看`;
 
   const show = () => {
+    // Permission prompts may resolve after the result was read or a new task began.
+    if (appState.tabs.get(tabId)?.status !== 'done-unseen' || appState.isTabSeen(tabId)) return;
     try {
       new Notification('AI Terminal', { body, tag: `task-done-${tabId}` });
     } catch {}
@@ -412,6 +416,7 @@ function renderPaneLocalTabs(paneEl: HTMLElement, pane: { tabIds: string[]; acti
 
     const tabEl = document.createElement('div');
     tabEl.className = 'pane-tab' + (tabId === pane.activeTabId ? ' active' : '');
+    tabEl.dataset.tabId = tabId;
     if (tab.color) tabEl.style.setProperty('--tab-color', tab.color);
 
     const indicator = document.createElement('span');
@@ -715,10 +720,7 @@ function switchToTab(tabId: string) {
     }
   }
 
-  clearPendingDoneTimer(tabId);
-  markDoneAcknowledged(tabId);
   appState.switchTab(tabId);
-  syncPendingAttention(false);
   updateCwdDisplay(tabId);
 }
 
@@ -2478,129 +2480,37 @@ let _closeHistoryPanel: (() => void) | null = null;
   });
 })();
 
-// Backend events — auto-send notepad blocks when Claude is waiting
-const pendingDoneTimers = new Map<string, number>();
-const lastExecutingAt = new Map<string, number>();
-const lastAcknowledgedAt = new Map<string, number>();
-
-function clearPendingDoneTimer(tabId: string): void {
-  const timer = pendingDoneTimers.get(tabId);
-  if (timer !== undefined) {
-    window.clearTimeout(timer);
-    pendingDoneTimers.delete(tabId);
-  }
-}
-
-function armPendingDoneTimer(tabId: string): void {
-  clearPendingDoneTimer(tabId);
-  const timer = window.setTimeout(() => {
-    pendingDoneTimers.delete(tabId);
-    const tab = appState.tabs.get(tabId);
-    if (!tab) return;
-    // Don't gate on `tab.status === 'executing'` here. The caller below sets
-    // status to 'executing' as a transient placeholder when isLikelyStillExecuting
-    // is true — checking that same value would make this timer permanently
-    // no-op for fast Claude responses (<1.8s), which is exactly the case the
-    // auto-send queue produces. Backend done-unseen + 700ms quiet window is
-    // sufficient; if a real 'executing' arrives in the window it calls
-    // clearPendingDoneTimer and this body never runs.
-    const nextStatus = shouldShowDoneUnseen(tabId) ? 'done-unseen' : 'active';
-    appState.setStatus(tabId, nextStatus);
-    syncPendingAttention(nextStatus === 'done-unseen');
-    if (nextStatus === 'done-unseen') maybeShowSystemNotification(tabId);
-  }, 700);
-  pendingDoneTimers.set(tabId, timer);
-}
-
-function markExecutingSeen(tabId: string): void {
-  lastExecutingAt.set(tabId, Date.now());
-}
-
-function markDoneAcknowledged(tabId: string): void {
-  lastAcknowledgedAt.set(tabId, Date.now());
-}
-
-function isLikelyStillExecuting(tabId: string): boolean {
-  const last = lastExecutingAt.get(tabId);
-  return last !== undefined && Date.now() - last < 1800;
-}
-
-function hasUnacknowledgedExecution(tabId: string): boolean {
-  const lastExec = lastExecutingAt.get(tabId) ?? 0;
-  const lastAck = lastAcknowledgedAt.get(tabId) ?? 0;
-  return lastExec > lastAck;
-}
-
-function shouldShowDoneUnseen(tabId: string): boolean {
-  // 分屏时，检查该 tab 是否在某个面板中可见——可见则不亮红点
-  if (appState.splitState) {
-    for (const pane of appState.splitState.panes) {
-      if (pane.activeTabId === tabId) return false; // tab 正显示在某面板中
-    }
-  }
-  return tabId !== appState.activeTabId || !windowHasFocus;
-}
+// Status is driven by the backend's debounced lifecycle, not frontend timers.
+// Keep pane-local dots in sync too, without rebuilding/focusing the terminals.
+appState.subscribe(() => {
+  container.querySelectorAll<HTMLElement>('.pane-tab[data-tab-id]').forEach(el => {
+    const tab = appState.tabs.get(el.dataset.tabId!);
+    const indicator = el.querySelector<HTMLElement>('.pane-tab-indicator');
+    if (tab && indicator) indicator.className = `pane-tab-indicator ${tab.status}`;
+  });
+  syncPendingAttention(false);
+});
 
 window.addEventListener('focus', () => {
-  windowHasFocus = true;
-  if (appState.activeTabId) {
-    clearPendingDoneTimer(appState.activeTabId);
-    markDoneAcknowledged(appState.activeTabId);
-    const activeTab = appState.tabs.get(appState.activeTabId);
-    if (activeTab?.status === 'done-unseen') {
-      appState.setStatus(appState.activeTabId, 'active');
-    }
-  }
-  syncPendingAttention(false);
+  appState.setWindowFocus(true);
 });
 
 window.addEventListener('blur', () => {
-  windowHasFocus = false;
-  // Re-sync badge: if tasks were already done-unseen while we were focused,
-  // the Rust-side focus gate suppressed the badge. Emit once now that we've
-  // left so the Dock gets the hint.
-  syncPendingAttention(false);
+  // Rust suppresses the Dock badge while focused. Force a re-sync on blur even
+  // if the number of unread results hasn't changed.
+  lastPendingDoneCount = -1;
+  appState.setWindowFocus(false);
 });
 
 api.onTabStatusChanged((tabId, status) => {
-  const existingTab = appState.tabs.get(tabId);
-  // 'executing' must be handled BEFORE the "keep red dot sticky" guard. After
-  // an auto-send fires, the tab is showing a red dot from the previous cycle's
-  // done-unseen — when Claude starts working on the auto-sent prompt, the
-  // backend's new 'executing' event has to bump lastExecutingAt[tab] or the
-  // SECOND cycle's done-unseen lookup sees stale timing and the red dot never
-  // re-arms when that response finishes.
-  if (status === 'executing') {
-    markExecutingSeen(tabId);
-    clearPendingDoneTimer(tabId);
-    // Preserve the red dot visually if it was already up — moving to
-    // 'executing' would hide the unseen-output cue the user hasn't acked yet.
-    if (existingTab?.status !== 'done-unseen') {
-      appState.setStatus(tabId, status);
-    }
-    return;
+  const tab = appState.tabs.get(tabId);
+  if (!tab) return;
+  const previous = tab.status;
+  appState.setStatus(tabId, status);
+  if (tab.status === 'done-unseen' && previous !== 'done-unseen') {
+    syncPendingAttention(true);
+    maybeShowSystemNotification(tabId);
   }
-
-  if (existingTab?.status === 'done-unseen' && status !== 'done-unseen') {
-    clearPendingDoneTimer(tabId);
-    return;
-  }
-
-  if (status === 'done-unseen' || status === 'waiting') {
-    if (!hasUnacknowledgedExecution(tabId)) {
-      clearPendingDoneTimer(tabId);
-      appState.setStatus(tabId, 'active');
-      syncPendingAttention(false);
-      return;
-    }
-    armPendingDoneTimer(tabId);
-    appState.setStatus(tabId, isLikelyStillExecuting(tabId) ? 'executing' : 'active');
-  } else {
-    clearPendingDoneTimer(tabId);
-    appState.setStatus(tabId, status);
-    syncPendingAttention(false);
-  }
-
 });
 
 // Queue auto-send is intentionally more conservative than the backend's visual

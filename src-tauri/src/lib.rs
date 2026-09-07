@@ -355,12 +355,12 @@ pub fn run() {
                     //     emitting chunks once truly idle.
                     //  2. Last-resort: tabs we couldn't classify but went silent
                     //     for 30s.
-                    let (committed, idle_done) = {
-                        let Ok(mut p) = parser.lock() else { continue };
-                        let c = p.commit_pending_idle(800);
-                        let d = p.collect_idle_done(30000);
-                        (c, d)
-                    };
+                    // Keep the parser lock until these events have been emitted.
+                    // Otherwise PTY output can publish a newer Executing between
+                    // collecting and emitting this Done, leaving a working tab red.
+                    let Ok(mut p) = parser.lock() else { continue };
+                    let committed = p.commit_pending_idle(800);
+                    let idle_done = p.collect_idle_done(30000);
                     for (tid, status, ui) in committed {
                         let _ = idle_handle.emit("tab-status-changed", serde_json::json!({
                             "tabId": tid, "status": status,

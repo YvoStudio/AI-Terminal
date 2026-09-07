@@ -304,7 +304,12 @@ impl OutputParser {
                         on_status(tab_id.to_string(), TabStatus::Waiting);
                     }
                 }
-                AiUiState::Unknown => {}
+                AiUiState::Unknown => {
+                    // A blank redraw/overlay is not continued evidence of idle.
+                    // Keep the committed state, but require a fresh, uninterrupted
+                    // idle window before declaring the running task finished.
+                    state.pending_idle = None;
+                }
             }
         } else if state.ai_tool.is_some() && !state.was_executing {
             // Non-TUI AI (e.g., the auto-detected "shell" pseudo-tool): keep the
@@ -671,7 +676,11 @@ impl OutputParser {
     /// classification keeps looking at the right rows after the user resizes.
     pub fn resize_screen(&mut self, tab_id: &str, cols: u16, rows: u16) {
         if let Some(state) = self.states.get_mut(tab_id) {
-            state.screen.set_size(rows, cols);
+            if state.screen.screen().size() != (rows, cols) {
+                state.screen.set_size(rows, cols);
+                // The pre-resize footer no longer describes the current viewport.
+                state.pending_idle = None;
+            }
         }
     }
 
@@ -1569,6 +1578,77 @@ mod tests {
         let completed = take_completed_output_lines(&mut buffer, " line\nnext");
         assert_eq!(completed, "partial line\n");
         assert_eq!(buffer, "next");
+    }
+
+    fn render_status_frame(parser: &mut OutputParser, lines: &[&str]) -> Vec<TabStatus> {
+        let statuses = std::cell::RefCell::new(Vec::new());
+        parser.process(
+            "task", &format!("\x1b[2J\x1b[H{}", lines.join("\r\n")),
+            |_, status| statuses.borrow_mut().push(status),
+            |_, _| {}, |_, _| {}, |_, _, _| {}, |_, _| {}, |_, _| {},
+        );
+        statuses.into_inner()
+    }
+
+    #[test]
+    fn unknown_redraw_cancels_pending_completion() {
+        let mut parser = OutputParser::new();
+        let started = render_status_frame(&mut parser, &["✻ Thinking… (esc to interrupt)"]);
+        assert!(matches!(started.as_slice(), [TabStatus::Executing]));
+        render_status_frame(&mut parser, &[INPUT_BOX_TOP, INPUT_BOX_MID, INPUT_BOX_BOT]);
+        assert!(parser.states["task"].pending_idle.is_some());
+        render_status_frame(&mut parser, &[""]);
+        assert!(parser.commit_pending_idle(0).is_empty());
+        assert!(parser.states["task"].was_executing);
+
+        // A fresh idle observation can still complete normally after the redraw.
+        render_status_frame(&mut parser, &[INPUT_BOX_TOP, INPUT_BOX_MID, INPUT_BOX_BOT]);
+        let committed = parser.commit_pending_idle(0);
+        assert_eq!(committed.len(), 1);
+        assert!(matches!(committed[0].1, TabStatus::DoneUnseen));
+        assert!(parser.commit_pending_idle(0).is_empty());
+    }
+
+    #[test]
+    fn working_frame_and_resize_cancel_pending_completion() {
+        let mut parser = OutputParser::new();
+        render_status_frame(&mut parser, &["✻ Thinking… (esc to interrupt)"]);
+        render_status_frame(&mut parser, &[INPUT_BOX_TOP, INPUT_BOX_MID, INPUT_BOX_BOT]);
+        render_status_frame(&mut parser, &["✻ Thinking… (esc to interrupt)"]);
+        assert!(parser.commit_pending_idle(0).is_empty());
+        render_status_frame(&mut parser, &[INPUT_BOX_TOP, INPUT_BOX_MID, INPUT_BOX_BOT]);
+        parser.resize_screen("task", 80, 24);
+        assert!(parser.commit_pending_idle(0).is_empty());
+        assert!(parser.states["task"].was_executing);
+    }
+
+    #[test]
+    fn same_size_refit_does_not_discard_pending_completion() {
+        let mut parser = OutputParser::new();
+        render_status_frame(&mut parser, &["✻ Thinking… (esc to interrupt)"]);
+        render_status_frame(&mut parser, &[INPUT_BOX_TOP, INPUT_BOX_MID, INPUT_BOX_BOT]);
+        // Tab switches may refit without resizing the PTY; no new redraw is
+        // guaranteed in that case, so don't strand the tab on green.
+        parser.resize_screen("task", 120, 30);
+        let committed = parser.commit_pending_idle(0);
+        assert_eq!(committed.len(), 1);
+        assert!(matches!(committed[0].1, TabStatus::DoneUnseen));
+    }
+
+    #[test]
+    fn each_execution_emits_one_completion_and_idle_redraws_do_not_rearm() {
+        let mut parser = OutputParser::new();
+        for _ in 0..3 {
+            let started = render_status_frame(&mut parser, &["✻ Thinking… (esc to interrupt)"]);
+            assert!(matches!(started.as_slice(), [TabStatus::Executing]));
+            render_status_frame(&mut parser, &[INPUT_BOX_TOP, INPUT_BOX_MID, INPUT_BOX_BOT]);
+            let committed = parser.commit_pending_idle(0);
+            assert_eq!(committed.len(), 1);
+            assert!(matches!(committed[0].1, TabStatus::DoneUnseen));
+            let redraw = render_status_frame(&mut parser, &[INPUT_BOX_TOP, INPUT_BOX_MID, INPUT_BOX_BOT]);
+            assert!(redraw.is_empty());
+            assert!(parser.commit_pending_idle(0).is_empty());
+        }
     }
 
     /// Render `lines` into a fresh 80x24 virtual screen and classify it.
