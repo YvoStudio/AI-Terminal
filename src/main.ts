@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { appState, type SplitLayout, type NoteBlock, type TabState } from './components/app-state';
 import { TabBar } from './components/tab-bar';
 import { TerminalView } from './components/terminal-view';
+import { registerNotepadDismiss } from './components/notepad-dismiss';
 import { themes } from './components/themes';
 import { getDefaultFontSize, isMac, isWindows, shouldUseNativeTitleBar } from './platform';
 
@@ -2214,7 +2215,10 @@ function toggleTipsPanel() {
   });
 })();
 
-// Close all popups/panels on outside click (unified handler)
+// Queue dismissal must run even when xterm stops the bubbling mousedown.
+registerNotepadDismiss(() => terminalViews.values());
+
+// Close all other popups/panels on outside click (unified handler)
 document.addEventListener('mousedown', (e) => {
   const target = e.target as Node;
 

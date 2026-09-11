@@ -9,6 +9,7 @@ import { api, type CodexSessionStats } from '../api';
 import { appState } from './app-state';
 import { themes } from './themes';
 import { isWindows, getDefaultFontSize, getPlatformFonts } from '../platform';
+import { PromptInput } from './prompt-input';
 
 export class TerminalView {
   terminal: Terminal;
@@ -58,11 +59,8 @@ export class TerminalView {
   private currentTaskText = '';
   private currentTaskSummary = '';
   private currentTaskSubmittedAt: number | null = null;
-  // Best-effort mirror of the text currently being composed in an AI prompt.
-  // xterm normally exposes only keystrokes, not the editor's final value, so we
-  // track printable input/paste and publish it when Enter is submitted.
-  private pendingPromptText = '';
-  private pendingPromptImages = 0;
+  // One cursor-aware mirror shared by xterm input, intercepted keys and paste.
+  private pendingPrompt = new PromptInput();
   private notepadVisible = false;
   onNotepadRender: ((tabId: string) => void) | null = null;
   onNotepadAddBlock: ((tabId: string) => void) | null = null;
@@ -130,45 +128,23 @@ export class TerminalView {
 
   private stagePromptText(text: string) {
     if (!appState.tabs.get(this.tabId)?.aiTool || !text) return;
-    this.pendingPromptText += text;
+    this.pendingPrompt.insert(text);
   }
 
   private stagePromptImage() {
     if (!appState.tabs.get(this.tabId)?.aiTool) return;
-    this.pendingPromptImages += 1;
+    this.pendingPrompt.addImage();
   }
 
   private resetPendingPrompt() {
-    this.pendingPromptText = '';
-    this.pendingPromptImages = 0;
+    this.pendingPrompt.reset();
   }
 
-  /** Mirror enough prompt editing to identify a directly submitted AI task.
-   * This intentionally ignores cursor navigation/control sequences; normal
-   * typing, IME commits, paste, backspace and readline clear/delete-word cover
-   * the common paths without ever forwarding extra bytes to the child. */
   private trackPromptInput(data: string) {
     if (!appState.tabs.get(this.tabId)?.aiTool || !data) return;
-    const plain = data
-      .replace(/\x1b\[200~/g, '')
-      .replace(/\x1b\[201~/g, '')
-      .replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|O.)/g, '');
-    for (const ch of plain) {
-      if (ch === '\r') {
-        const text = this.pendingPromptText.trim();
-        const images = this.pendingPromptImages;
-        this.resetPendingPrompt();
-        if (text || images > 0) this.setCurrentTask(text, images);
-      } else if (ch === '\x7f' || ch === '\b') {
-        this.pendingPromptText = Array.from(this.pendingPromptText).slice(0, -1).join('');
-      } else if (ch === '\x17') {
-        this.pendingPromptText = this.pendingPromptText.replace(/\s*\S+\s*$/, '');
-      } else if (ch === '\x03' || ch === '\x15') {
-        this.resetPendingPrompt();
-      } else if (ch === '\n' || ch >= ' ') {
-        this.pendingPromptText += ch;
-      }
-    }
+    this.pendingPrompt.feed(data, ({ text, imageCount }) => this.setCurrentTask(text, imageCount));
+    if (this.pendingPrompt.hasContent) appState.markPromptDirty(this.tabId);
+    else appState.clearPromptDirty(this.tabId);
   }
 
   /** Build a buffer line's plain text plus a char-index → cell-column map.
@@ -718,6 +694,7 @@ export class TerminalView {
       // Intercept before Kitty encoding so Cmd and Ctrl behave identically.
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'Delete') {
         if (e.type === 'keydown') {
+          this.trackPromptInput('\x0b');
           api.writeTerminalUserInput(tabId, '\x0b');
         }
         e.preventDefault();
@@ -747,7 +724,9 @@ export class TerminalView {
           // Only emit CSI u form when there are real modifiers beyond base 1
           // (avoid intercepting bare Enter, which TUIs still expect as \r).
           if (mods > 1 || (e.key === 'Enter' && (e.ctrlKey || e.shiftKey))) {
-            api.writeTerminalUserInput(this.tabId, `\x1b[${cp};${mods}u`);
+            const data = `\x1b[${cp};${mods}u`;
+            this.trackPromptInput(data);
+            api.writeTerminalUserInput(this.tabId, data);
             e.preventDefault();
             return false;
           }
@@ -809,7 +788,7 @@ export class TerminalView {
           const tab = appState.tabs.get(tabId);
           if (tab?.aiTool) {
             // AI tools support kitty protocol for multiline
-            this.stagePromptText('\n');
+            this.trackPromptInput('\x1b[13;2u');
             api.writeTerminalUserInput(tabId, '\x1b[13;2u');
           } else {
             // Regular shell: send \r\n for proper line break
@@ -1401,6 +1380,7 @@ export class TerminalView {
 
   setNotepadVisible(visible: boolean) {
     this.notepadVisible = visible;
+    if (!visible && this.taskHistoryVisible) this.setTaskHistoryVisible(false);
     localStorage.setItem('notepad-hidden', visible ? '' : '1');
     this.applyNotepadVisibility();
     if (visible) this.onNotepadRender?.(this.tabId);
@@ -1408,6 +1388,17 @@ export class TerminalView {
 
   toggleNotepad() { this.setNotepadVisible(!this.notepadVisible); }
   isNotepadVisible() { return this.notepadVisible; }
+
+  /** Handle an outside click one layer at a time: history returns to the live
+   * queue first, and only a later outside click closes the queue itself. */
+  handleNotepadOutsideClick(target: Node) {
+    if (!this.notepadVisible || this.notepadEl.contains(target) || this.notepadFab.contains(target)) return;
+    if (this.taskHistoryVisible) {
+      this.setTaskHistoryVisible(false);
+    } else {
+      this.setNotepadVisible(false);
+    }
+  }
 
   private setTaskHistoryVisible(visible: boolean) {
     this.taskHistoryVisible = visible;
@@ -1537,8 +1528,9 @@ export class TerminalView {
   /** Pin a newly submitted item as executing. The compact summary stays
    * visible on the queue entry button even when the full panel is collapsed. */
   setCurrentTask(content: string, imageCount = 0, imagePaths?: string[]) {
-    const text = content.trim();
-    if (!text && imageCount === 0) { this.clearCurrentTask(); return; }
+    const text = content;
+    this.pendingPrompt.accept(text); // queue sends also consume the editor draft
+    if (!text.trim() && imageCount === 0) { this.clearCurrentTask(); return; }
     this.onAiTaskSubmitted?.(this.tabId);
     // Callers that tracked the paste inside the terminal (paste + Enter) know
     // only the count, not the paths — fall back to the most recent pasted
@@ -1612,7 +1604,7 @@ export class TerminalView {
   /** Drop text/status inherited from a previous agent when the same shell tab
    * launches another TUI (for example Pi → Codex → Claude). */
   resetTaskTracking() {
-    this.resetPendingPrompt();
+    this.pendingPrompt.reset(true);
     this.clearCurrentTask();
   }
 

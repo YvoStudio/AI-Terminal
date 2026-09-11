@@ -228,9 +228,9 @@ class AppState {
    * boundary. Returns the new submission time so the view can attach completion. */
   addTaskHistory(id: string, content: string, images?: string[]): number | null {
     const tab = this.tabs.get(id);
-    const text = content.trim();
+    const text = content;
     const paths = (images || []).filter(Boolean);
-    if (!tab || (!text && paths.length === 0)) return null;
+    if (!tab || (!text.trim() && paths.length === 0)) return null;
     // Keep the timestamp unique even if two submissions land in one millisecond.
     const submittedAt = Math.max(Date.now(), (tab.taskHistory[0]?.submittedAt || 0) + 1);
     // There should normally be only one open entry. Find it rather than relying
