@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -49,13 +50,26 @@ function formatDuration(ms: number): string {
  * - shows a live elapsed timer in Pi's own working row above the editor;
  * - appends the final duration to the transcript without sending it to the LLM;
  * - replaces Pi's two-line cwd/branch footer with one compact stats line because
- *   AI Terminal already renders cwd and branch in its own bottom bar.
+ *   AI Terminal already renders cwd and branch in its own bottom bar;
+ * - reports actual interactive submissions, including recalled history, to the
+ *   host instead of asking it to reconstruct Pi's editor from keystrokes.
  */
 export default function taskDurationExtension(pi: ExtensionAPI) {
   let startedAt: number | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let footerContext: ExtensionContext | null = null;
   let requestFooterRender = () => {};
+  const taskSession = randomUUID();
+  let taskSequence = 0;
+  const reportTask = (ctx: ExtensionContext, event: "ready" | "input" | "stop", text = "", imageCount = 0) => {
+    // Never add terminal control bytes to print/JSON/RPC output, or to Pi
+    // instances outside AI Terminal. No prompt text is written to disk here.
+    if (ctx.mode !== "tui" || process.env.AI_TERMINAL_TASK_EVENTS !== "1") return;
+    const payload = Buffer.from(JSON.stringify({
+      version: 1, session: taskSession, sequence: taskSequence++, event, text, imageCount,
+    }), "utf8").toString("base64");
+    process.stdout.write(`\x1b]633;AiTerminalTask;${payload}\x1b\\`);
+  };
 
   const installCompactFooter = (ctx: ExtensionContext) => {
     footerContext = ctx;
@@ -160,7 +174,19 @@ export default function taskDurationExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    reportTask(ctx, "ready");
     installCompactFooter(ctx);
+  });
+
+  pi.on("input", (event, ctx) => {
+    // The input event includes history recall, external-editor edits and native
+    // queue submissions. It fires once per submission, not per model/tool turn.
+    // Keep the raw instruction before skill/template expansion and do not
+    // count extension-generated continuations as fresh user submissions.
+    if (event.source === "interactive") {
+      reportTask(ctx, "input", event.text, event.images?.length ?? 0);
+    }
+    return { action: "continue" };
   });
 
   pi.on("model_select", async (_event, ctx) => {
@@ -194,6 +220,7 @@ export default function taskDurationExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    reportTask(ctx, "stop");
     startedAt = null;
     footerContext = null;
     requestFooterRender = () => {};

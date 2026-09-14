@@ -1142,7 +1142,7 @@ async function sendNoteBlock(tabId: string, blockId: string): Promise<boolean> {
     // Pin the task at the actual submission boundary, not while its images are
     // still being pasted. Idle redraws during clipboard staging otherwise mark
     // the new task completed before Enter reaches the agent.
-    if (tab.aiTool) terminalViews.get(tabId)?.setCurrentTask(block.content, block.images?.length ?? 0, block.images);
+    if (tab.aiTool) terminalViews.get(tabId)?.submitQueuedTask(block.content, block.images?.length ?? 0, block.images);
     api.writeTerminal(tabId, '\r');
     appState.clearPromptDirty(tabId); // submitted — prompt is empty again
     removeNoteBlock(tabId, blockId);

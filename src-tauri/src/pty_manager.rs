@@ -116,6 +116,8 @@ impl PtyManager {
         // Set environment
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // Opt the bundled Pi extension into the host's private task-event OSC.
+        cmd.env("AI_TERMINAL_TASK_EVENTS", "1");
         cmd.env("LANG", "en_US.UTF-8");
         cmd.env("LC_ALL", "en_US.UTF-8");
         // Disable mouse tracking protocols - prevent mouse events from being sent to PTY

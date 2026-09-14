@@ -41,13 +41,14 @@ function setup() {
     '../api': { api: {} }, './tab-status': loadSource('tab-status.ts'),
   }, globals).appState;
   const prompt = loadSource('prompt-input.ts');
+  const piEvents = loadSource('pi-task-events.ts', {}, { atob, TextDecoder });
   const copies = [];
   const { TerminalView } = loadSource('terminal-view.ts', {
     '@xterm/xterm': {}, '@xterm/addon-fit': {}, '@xterm/addon-canvas': {},
     '@xterm/addon-search': {}, '@xterm/addon-serialize': {}, '@xterm/addon-unicode11': {},
     '@tauri-apps/api/core': { convertFileSrc: path => path },
     '../api': { api: {} }, './app-state': { appState: state }, './themes': {}, '../platform': {},
-    './prompt-input': prompt,
+    './prompt-input': prompt, './pi-task-events': piEvents,
   }, {
     ...globals,
     localStorage: { setItem() {} },
@@ -58,6 +59,7 @@ function setup() {
     const view = Object.create(TerminalView.prototype);
     Object.assign(view, {
       tabId: id, pendingPrompt: new prompt.PromptInput(),
+      piTaskEvents: new piEvents.PiTaskEvents(), queuedPiTask: null,
       notepadVisible: true, taskHistoryVisible: false,
     });
     for (const field of ['notepadEl', 'notepadFab', 'notepadTitleEl', 'notepadHistoryToggle',
@@ -188,4 +190,83 @@ test('capture dismissal survives stopped bubbling, ignores portals/right-click, 
   assert.equal(first.isNotepadVisible(), false);
   dispose();
   assert.equal(listener, null);
+});
+
+function piFrame(event, sequence, extra = {}) {
+  const payload = { version: 1, session: 'pi-session', event, sequence, ...extra };
+  return '\x1b]633;AiTerminalTask;' + Buffer.from(JSON.stringify(payload)).toString('base64') + '\x1b\\';
+}
+
+test('Up/Down recall from a resumed Pi adds a NEW history entry on every execution', () => {
+  const { state, view } = setup();
+  const terminal = view('task');
+  const text = '从 Pi 原有历史中选中的任务';
+  state.restoreTaskHistory('task', [{ content: text, submittedAt: 1, completedAt: 2 }]);
+  terminal.readPiTaskOutput(piFrame('ready', 0));
+  assert.equal(state.tabs.get('task').taskHistory.length, 1);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    terminal.trackPromptInput('\x1b[A\x1b[B\x1b[A');
+    assert.equal(state.isPromptDirty('task'), true, 'even unknown CLI history protects the editor from queue auto-send');
+    terminal.trackPromptInput('\r');
+    assert.equal(state.tabs.get('task').taskHistory.length, attempt, 'keypress mirror must not invent a submission');
+    terminal.readPiTaskOutput(piFrame('input', attempt, { text, imageCount: 0 }));
+    assert.equal(state.tabs.get('task').taskHistory.length, attempt + 1);
+    assert.equal(state.isPromptDirty('task'), false);
+    assert.equal(terminal.currentTaskTextEl.textContent, text);
+    terminal.completeCurrentTask();
+  }
+  const entries = state.tabs.get('task').taskHistory;
+  assert.equal(new Set(entries.map(item => item.submittedAt)).size, 3);
+  assert.ok(entries.every(item => item.content === text && item.completedAt));
+  terminal.setTaskHistoryVisible(true);
+  assert.equal(terminal.taskHistoryEl.children.length, 3);
+});
+
+test('Pi actual edited text wins over stale mirror; typed and queue submissions are recorded exactly once', () => {
+  const { state, view } = setup();
+  const terminal = view('task');
+  terminal.readPiTaskOutput(piFrame('ready', 0));
+  terminal.trackPromptInput('猜测的旧文本\r');
+  assert.equal(state.tabs.get('task').taskHistory.length, 0);
+  const text = '上下选择、外部编辑后真正提交的文本';
+  terminal.readPiTaskOutput(piFrame('input', 1, { text, imageCount: 0 }));
+  terminal.readPiTaskOutput(piFrame('input', 1, { text, imageCount: 0 }));
+  assert.equal(state.tabs.get('task').taskHistory.length, 1);
+  assert.equal(terminal.currentTaskTextEl.textContent, text);
+  terminal.submitQueuedTask('队列任务', 1, ['/queue-image.png']);
+  assert.equal(state.tabs.get('task').taskHistory.length, 1);
+  terminal.readPiTaskOutput(piFrame('input', 2, { text: '队列任务', imageCount: 1 }));
+  const history = state.tabs.get('task').taskHistory;
+  assert.equal(history.length, 2);
+  assert.equal(history[0].images[0], '/queue-image.png');
+  assert.ok(history[1].interruptedAt);
+});
+
+test('a delayed Pi acknowledgement does not clear the next composing prompt', () => {
+  const { state, view } = setup();
+  const terminal = view('task');
+  terminal.readPiTaskOutput(piFrame('ready', 0));
+  terminal.trackPromptInput('first\rnext draft');
+  terminal.readPiTaskOutput(piFrame('input', 1, { text: 'first', imageCount: 0 }));
+  assert.equal(terminal.pendingPrompt.text, 'next draft');
+  assert.equal(state.isPromptDirty('task'), true);
+  assert.equal(state.tabs.get('task').taskHistory[0].content, 'first');
+  terminal.trackPromptInput('\r');
+  terminal.readPiTaskOutput(piFrame('input', 2, { text: 'next draft', imageCount: 0 }));
+  assert.equal(state.isPromptDirty('task'), false);
+  assert.equal(state.tabs.get('task').taskHistory.length, 2);
+});
+
+test('managed Pi readiness identifies the agent, and switching tools restores fallback tracking', () => {
+  const { state, view } = setup();
+  const terminal = view('task');
+  state.setAiTool('task', '');
+  terminal.readPiTaskOutput(piFrame('ready', 0));
+  assert.equal(state.tabs.get('task').aiTool, 'pi');
+  terminal.resetTaskTracking();
+  state.setAiTool('task', 'claude');
+  terminal.trackPromptInput('fallback\r');
+  assert.equal(state.tabs.get('task').taskHistory[0].content, 'fallback');
+  terminal.submitQueuedTask('queued fallback');
+  assert.equal(state.tabs.get('task').taskHistory[0].content, 'queued fallback');
 });

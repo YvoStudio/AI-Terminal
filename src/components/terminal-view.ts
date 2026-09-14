@@ -10,6 +10,7 @@ import { appState } from './app-state';
 import { themes } from './themes';
 import { isWindows, getDefaultFontSize, getPlatformFonts } from '../platform';
 import { PromptInput } from './prompt-input';
+import { PiTaskEvents, type PiTaskSubmission } from './pi-task-events';
 
 export class TerminalView {
   terminal: Terminal;
@@ -61,6 +62,8 @@ export class TerminalView {
   private currentTaskSubmittedAt: number | null = null;
   // One cursor-aware mirror shared by xterm input, intercepted keys and paste.
   private pendingPrompt = new PromptInput();
+  private piTaskEvents = new PiTaskEvents();
+  private queuedPiTask: { text: string; images?: string[] } | null = null;
   private notepadVisible = false;
   onNotepadRender: ((tabId: string) => void) | null = null;
   onNotepadAddBlock: ((tabId: string) => void) | null = null;
@@ -142,9 +145,43 @@ export class TerminalView {
 
   private trackPromptInput(data: string) {
     if (!appState.tabs.get(this.tabId)?.aiTool || !data) return;
-    this.pendingPrompt.feed(data, ({ text, imageCount }) => this.setCurrentTask(text, imageCount));
+    this.pendingPrompt.feed(data, ({ text, imageCount }) => {
+      // Once Pi advertises the live submission channel, its input event is the
+      // source of truth. Mirrored Enter must not create a second history entry.
+      if (!this.piTaskEvents.active) this.setCurrentTask(text, imageCount);
+    });
     if (this.pendingPrompt.hasContent) appState.markPromptDirty(this.tabId);
     else appState.clearPromptDirty(this.tabId);
+  }
+
+  private readPiTaskOutput(data: string) {
+    this.piTaskEvents.feed(data, (task) => this.acceptPiTask(task));
+    // This handshake also identifies Pi before a later title-detection event;
+    // that event must not reset a task which has just arrived on this channel.
+    if (this.piTaskEvents.active && appState.tabs.get(this.tabId)?.aiTool !== 'pi') {
+      appState.setAiTool(this.tabId, 'pi');
+    }
+  }
+
+  private acceptPiTask(task: PiTaskSubmission) {
+    const queued = this.queuedPiTask;
+    this.queuedPiTask = null;
+    const images = queued?.text.trim() === task.text.trim() ? queued.images : undefined;
+    // The acknowledgement is asynchronous: the user may already be composing
+    // the NEXT prompt. Do not erase that draft (or allow auto-send over it).
+    this.setCurrentTask(task.text, task.imageCount, images, true);
+    if (!this.pendingPrompt.hasContent) appState.clearPromptDirty(this.tabId);
+  }
+
+  /** Queue sends bypass xterm.onData. Let a managed Pi acknowledge the real
+   * submission too; other agents keep their existing local tracking path. */
+  submitQueuedTask(content: string, imageCount = 0, imagePaths?: string[]) {
+    if (this.piTaskEvents.active) {
+      this.pendingPrompt.accept(content);
+      this.queuedPiTask = { text: content, images: imagePaths ? [...imagePaths] : undefined };
+    } else {
+      this.setCurrentTask(content, imageCount, imagePaths);
+    }
   }
 
   /** Build a buffer line's plain text plus a char-index → cell-column map.
@@ -992,6 +1029,9 @@ export class TerminalView {
 
     // Listen for output from Rust backend
     api.onTerminalOutput(tabId, (data) => {
+      // Process submissions before output can be held for selection, and never
+      // through writeOutput() (which also receives restored scrollback).
+      this.readPiTaskOutput(data);
       // The AI CLI restarts its [Image #N] counter every new session. A new
       // full-screen session re-enters the alt-screen buffer (CSI ?1049h / ?1047h
       // / ?47h) — treat that as a hard session boundary and open a fresh binding
@@ -1527,9 +1567,9 @@ export class TerminalView {
 
   /** Pin a newly submitted item as executing. The compact summary stays
    * visible on the queue entry button even when the full panel is collapsed. */
-  setCurrentTask(content: string, imageCount = 0, imagePaths?: string[]) {
+  setCurrentTask(content: string, imageCount = 0, imagePaths?: string[], preserveDraft = false) {
     const text = content;
-    this.pendingPrompt.accept(text); // queue sends also consume the editor draft
+    if (!preserveDraft) this.pendingPrompt.accept(text);
     if (!text.trim() && imageCount === 0) { this.clearCurrentTask(); return; }
     this.onAiTaskSubmitted?.(this.tabId);
     // Callers that tracked the paste inside the terminal (paste + Enter) know
@@ -1605,6 +1645,8 @@ export class TerminalView {
    * launches another TUI (for example Pi → Codex → Claude). */
   resetTaskTracking() {
     this.pendingPrompt.reset(true);
+    this.piTaskEvents.reset();
+    this.queuedPiTask = null;
     this.clearCurrentTask();
   }
 

@@ -15,9 +15,10 @@ export class PromptInput {
   private history: string[] = [];
   private historyIndex = -1;
   private draft = '';
+  private unobservedHistory = false;
 
   get text(): string { return this.chars.join(''); }
-  get hasContent(): boolean { return this.chars.length > 0 || this.images > 0; }
+  get hasContent(): boolean { return this.chars.length > 0 || this.images > 0 || this.unobservedHistory; }
 
   reset(clearHistory = false) {
     this.chars = [];
@@ -27,6 +28,7 @@ export class PromptInput {
     this.paste = null;
     this.historyIndex = -1;
     this.draft = '';
+    this.unobservedHistory = false;
     if (clearHistory) this.history = [];
   }
 
@@ -90,7 +92,14 @@ export class PromptInput {
       // Prompt history observed during this session. Keep an unfinished draft
       // so Up then Down restores it instead of appending the recalled prompt.
       const index = this.historyIndex - direction;
-      if (index < -1 || index >= this.history.length) return;
+      if (index >= this.history.length) {
+        // The CLI may have restored older inputs that this mirror never saw.
+        // Treat the editor as dirty until submission/clear so queue auto-send
+        // cannot overwrite a recalled prompt whose text we do not know.
+        this.unobservedHistory = true;
+        return;
+      }
+      if (index < -1) return;
       if (this.historyIndex === -1) this.draft = this.text;
       this.historyIndex = index;
       this.chars = Array.from(index === -1 ? this.draft : this.history[index]);
