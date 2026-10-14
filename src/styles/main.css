@@ -191,8 +191,8 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .terminal-search-bar button:hover { background: var(--bg-hover); color: var(--text-primary); }
 .terminal-search-bar .search-close { font-size: 16px; }
 
-/* Scroll to bottom */
-.terminal-scroll-bottom { display: none; position: absolute; right: 16px; bottom: 16px; z-index: 10; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-secondary); cursor: pointer; align-items: center; justify-content: center; box-shadow: 0 2px 6px rgba(0,0,0,0.3); opacity: 0.7; transition: opacity 0.15s; }
+/* Scroll to bottom — the lower action row, directly below the task entry. */
+.terminal-scroll-bottom { display: none; position: absolute; right: 16px; bottom: 104px; z-index: 10; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-secondary); cursor: pointer; align-items: center; justify-content: center; box-shadow: 0 2px 6px rgba(0,0,0,0.3); opacity: 0.7; transition: opacity 0.15s; }
 .terminal-scroll-bottom.visible { display: flex; }
 .terminal-scroll-bottom:hover { opacity: 1; color: var(--text-primary); background: var(--bg-hover); }
 
@@ -208,11 +208,11 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
    its .terminal-wrapper, so the panel's width tracks that pane. Opened via
    .terminal-notepad-fab, which sits just above the pane's prompt/status area.
    Right-anchored on the same 16px gutter as that entry button, so the panel
-   opens flush under it instead of jumping to the pane's centre — and leaves the
+   opens above it instead of jumping to the pane's centre — and leaves the
    left side of the terminal readable while the queue is open. */
 .terminal-notepad {
-  position: absolute; right: 16px; bottom: 148px; z-index: 20;
-  width: min(570px, calc(100% - 32px)); max-height: calc(100% - 180px);
+  position: absolute; right: 16px; bottom: 188px; z-index: 20;
+  width: min(570px, calc(100% - 32px)); max-height: calc(100% - 220px);
   /* One step above --bg-secondary so the panel reads as floating over the
      terminal rather than as part of it. The hairline ring supplements the drop
      shadow, which contributes nothing on a black background. */
@@ -275,9 +275,9 @@ body.tab-dragging * { user-select: none !important; cursor: grabbing !important;
 .terminal-notepad-footer .terminal-notepad-autosend { flex-shrink: 0; }
 .terminal-notepad-add { flex: 1; border: none; background: none; color: var(--text-secondary); cursor: pointer; font-size: 12px; padding: 8px; border-radius: 6px; text-align: center; }
 .terminal-notepad-add:hover { background: var(--bg-hover); color: var(--text-primary); }
-/* Per-pane entry button (the collapsed text-block "入口"), aligned on the
-   terminal's right edge above the prompt/status area. */
-.terminal-notepad-fab { position: absolute; right: 16px; bottom: 104px; z-index: 15; height: 32px; padding: 0 10px; border-radius: 16px; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); opacity: 0.85; transition: opacity 0.15s, color 0.15s, background 0.15s, border-color 0.15s; }
+/* Per-pane entry button (the collapsed text-block "入口"), one action row
+   (32px + 8px gap) above scroll-to-bottom, clear of the prompt/status area. */
+.terminal-notepad-fab { position: absolute; right: 16px; bottom: 144px; z-index: 15; height: 32px; padding: 0 10px; border-radius: 16px; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); opacity: 0.85; transition: opacity 0.15s, color 0.15s, background 0.15s, border-color 0.15s; }
 .terminal-notepad-fab:hover { opacity: 1; color: var(--text-primary); background: var(--bg-hover); }
 .terminal-notepad-fab.active { color: var(--accent-blue); border-color: var(--accent-blue); opacity: 1; }
 .terminal-notepad-fab.has-current-task { max-width: min(360px, calc(100% - 32px)); border-color: var(--accent-green); color: var(--accent-green); opacity: 1; }
